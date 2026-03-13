@@ -17,7 +17,7 @@ final class SigningManager {
     private let authManager = AuthManager.shared
     private let ruleEngine = RuleEngine.shared
     private let auditLog = AuditLog.shared
-    private let rateLimitStore = RateLimitStore.shared
+    private let stateStore = StateStore.shared
 
     private init() {}
 
@@ -40,7 +40,7 @@ final class SigningManager {
 
         // Rate limit check
         if let limit = config.rules.maxTxPerDayWithoutAuth {
-            let todayCount = rateLimitStore.todayCount()
+            let todayCount = stateStore.todayCount()
             if todayCount >= limit {
                 requiresMasterKey = true
                 violations.append("Daily limit reached (\(todayCount)/\(limit))")
@@ -114,7 +114,7 @@ final class SigningManager {
 
         // Record success and increment tamper-proof counter
         auditLog.record(AuditEvent(type: .signSuccess, dataPrefix: dataPrefix))
-        rateLimitStore.increment()
+        stateStore.increment()
 
         return result
     }

@@ -30,9 +30,7 @@ final class AppState {
     init() {
         ruleEngine.loadConfigOnStartup()
 
-        do { _ = try SecureEnclaveManager.shared.loadOrCreateConfigKey() } catch {}
         do { _ = try SecureEnclaveManager.shared.loadOrCreateSigningKey() } catch {}
-        do { _ = try SecureEnclaveManager.shared.loadOrCreateStateKey() } catch {}
 
         menuBarManager.startObserving()
         xpcServer.start()

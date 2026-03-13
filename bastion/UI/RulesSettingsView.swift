@@ -136,14 +136,14 @@ struct RulesSettingsView: View {
             rules: newRules
         )
 
-        // Config save triggers Key A auth (userPresence) via SE encryption
-        do {
-            try ruleEngine.updateConfig(newConfig)
-            statusMessage = "Saved"
-        } catch {
-            statusMessage = "Error: \(error.localizedDescription)"
+        Task {
+            do {
+                try await ruleEngine.updateConfig(newConfig)
+                statusMessage = "Saved"
+            } catch {
+                statusMessage = "Error: \(error.localizedDescription)"
+            }
+            isSaving = false
         }
-
-        isSaving = false
     }
 }

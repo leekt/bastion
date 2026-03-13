@@ -3,58 +3,53 @@ import Foundation
 final class RuleEngine {
     static let shared = RuleEngine()
 
-    private let configURL: URL
-    private let seManager = SecureEnclaveManager.shared
+    private let keychain: KeychainBackend
+    private let authManager = AuthManager.shared
     private let auditLog = AuditLog.shared
+
+    private nonisolated static let configAccount = "config"
 
     private(set) var config: BastionConfig = .default
     private(set) var configLoaded = false
 
     private init() {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!
-        let bastionDir = appSupport.appendingPathComponent("Bastion")
-        if !FileManager.default.fileExists(atPath: bastionDir.path) {
-            try? FileManager.default.createDirectory(at: bastionDir, withIntermediateDirectories: true)
-        }
-        self.configURL = bastionDir.appendingPathComponent("config.enc")
+        self.keychain = SystemKeychainBackend()
+    }
+
+    // For testing
+    init(keychain: KeychainBackend) {
+        self.keychain = keychain
     }
 
     // MARK: - Config Management
 
-    nonisolated func loadConfig() throws -> BastionConfig {
-        guard FileManager.default.fileExists(atPath: configURL.path) else {
+    nonisolated func loadConfig() -> BastionConfig {
+        guard let data = keychain.read(account: Self.configAccount),
+              let config = try? JSONDecoder().decode(BastionConfig.self, from: data) else {
             return .default
         }
-
-        let encrypted = try Data(contentsOf: configURL)
-        let plaintext = try seManager.decryptConfig(encrypted)
-        let decoder = JSONDecoder()
-        return try decoder.decode(BastionConfig.self, from: plaintext)
+        return config
     }
 
     nonisolated func saveConfig(_ newConfig: BastionConfig) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
-        let jsonData = try encoder.encode(newConfig)
-        let encrypted = try seManager.encryptConfig(jsonData)
-        try encrypted.write(to: configURL, options: .atomic)
+        let data = try encoder.encode(newConfig)
+        keychain.write(account: Self.configAccount, data: data)
     }
 
     func loadConfigOnStartup() {
-        do {
-            config = try loadConfig()
-            configLoaded = true
-        } catch {
-            // If config can't be loaded (first run or auth declined), use defaults
-            config = .default
-            configLoaded = false
-        }
+        config = loadConfig()
+        configLoaded = true
     }
 
-    func updateConfig(_ newConfig: BastionConfig) throws {
+    /// Updates config after biometric authentication.
+    /// Biometric auth is required since Keychain alone doesn't gate writes with userPresence.
+    func updateConfig(_ newConfig: BastionConfig) async throws {
+        try await authManager.authenticate(
+            policy: .biometricOrPasscode,
+            reason: "Authenticate to update Bastion rules"
+        )
         try saveConfig(newConfig)
         config = newConfig
         configLoaded = true

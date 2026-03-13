@@ -10,8 +10,6 @@ nonisolated enum BastionError: Int, Error, CustomStringConvertible, Sendable {
     case authFailed = 4
     case userDenied = 5
     case ruleViolation = 6
-    case configCorrupted = 7
-    case configEncryptionFailed = 8
     case timeout = 9
     case appNotRunning = 10
     case invalidInput = 11
@@ -24,8 +22,6 @@ nonisolated enum BastionError: Int, Error, CustomStringConvertible, Sendable {
         case .authFailed: return "Authentication failed"
         case .userDenied: return "User denied the signing request"
         case .ruleViolation: return "Rule violation"
-        case .configCorrupted: return "Configuration file is corrupted or tampered"
-        case .configEncryptionFailed: return "Configuration encryption/decryption failed"
         case .timeout: return "Request timed out"
         case .appNotRunning: return "Bastion app is not running"
         case .invalidInput: return "Invalid input data"

@@ -5,67 +5,17 @@ import Security
 nonisolated final class SecureEnclaveManager: Sendable {
     static let shared = SecureEnclaveManager()
 
-    private let configKeyTag = "com.bastion.configkey".data(using: .utf8)!
     private let signingKeyTag = "com.bastion.signingkey".data(using: .utf8)!
-    private let stateKeyTag = "com.bastion.statekey".data(using: .utf8)!
 
     private init() {}
 
     // MARK: - Key Management
-
-    nonisolated func loadOrCreateConfigKey() throws -> SecKey {
-        if let existing = try? loadKey(tag: configKeyTag) {
-            return existing
-        }
-        return try createKey(
-            tag: configKeyTag,
-            accessControlFlags: [.privateKeyUsage, .userPresence]
-        )
-    }
 
     nonisolated func loadOrCreateSigningKey() throws -> SecKey {
         if let existing = try? loadKey(tag: signingKeyTag, context: silentContext()) {
             return existing
         }
         return try createSilentKey(tag: signingKeyTag)
-    }
-
-    nonisolated func loadOrCreateStateKey() throws -> SecKey {
-        if let existing = try? loadKey(tag: stateKeyTag, context: silentContext()) {
-            return existing
-        }
-        return try createSilentKey(tag: stateKeyTag)
-    }
-
-    // MARK: - State Signing (Key C)
-
-    nonisolated func signState(_ data: Data) throws -> Data {
-        let privateKey = try loadOrCreateStateKey()
-        var error: Unmanaged<CFError>?
-        guard let signature = SecKeyCreateSignature(
-            privateKey,
-            .ecdsaSignatureMessageX962SHA256,
-            data as CFData,
-            &error
-        ) as Data? else {
-            throw error!.takeRetainedValue() as Error
-        }
-        return signature
-    }
-
-    nonisolated func verifyState(_ data: Data, signature: Data) throws -> Bool {
-        let privateKey = try loadOrCreateStateKey()
-        guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
-            throw BastionError.keyNotFound
-        }
-        var error: Unmanaged<CFError>?
-        return SecKeyVerifySignature(
-            publicKey,
-            .ecdsaSignatureMessageX962SHA256,
-            data as CFData,
-            signature as CFData,
-            &error
-        )
     }
 
     // MARK: - Signing (Key B)
@@ -117,86 +67,6 @@ nonisolated final class SecureEnclaveManager: Sendable {
             x: pubData.subdata(in: 1..<33).hex,
             y: pubData.subdata(in: 33..<65).hex
         )
-    }
-
-    // MARK: - Config Encryption (Key A)
-
-    nonisolated func encryptConfig(_ plaintext: Data) throws -> Data {
-        let privateKey = try loadOrCreateConfigKey()
-
-        guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
-            throw BastionError.keyNotFound
-        }
-
-        // Sign the plaintext with Key A (triggers userPresence auth)
-        var error: Unmanaged<CFError>?
-        guard let signature = SecKeyCreateSignature(
-            privateKey,
-            .ecdsaSignatureMessageX962SHA256,
-            plaintext as CFData,
-            &error
-        ) as Data? else {
-            throw error!.takeRetainedValue() as Error
-        }
-
-        // Build payload: [4 bytes sig length][signature][plaintext]
-        var sigLen = UInt32(signature.count).bigEndian
-        var payload = Data(bytes: &sigLen, count: 4)
-        payload.append(signature)
-        payload.append(plaintext)
-
-        // Encrypt with Key A public key (no auth needed)
-        guard let encrypted = SecKeyCreateEncryptedData(
-            publicKey,
-            .eciesEncryptionStandardVariableIVX963SHA256AESGCM,
-            payload as CFData,
-            &error
-        ) as Data? else {
-            throw error!.takeRetainedValue() as Error
-        }
-
-        return encrypted
-    }
-
-    nonisolated func decryptConfig(_ encrypted: Data) throws -> Data {
-        let privateKey = try loadOrCreateConfigKey()
-
-        guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
-            throw BastionError.keyNotFound
-        }
-
-        // Decrypt with Key A private key (triggers userPresence auth)
-        var error: Unmanaged<CFError>?
-        guard let payload = SecKeyCreateDecryptedData(
-            privateKey,
-            .eciesEncryptionStandardVariableIVX963SHA256AESGCM,
-            encrypted as CFData,
-            &error
-        ) as Data? else {
-            throw BastionError.configCorrupted
-        }
-
-        // Parse payload: [4 bytes sig length][signature][plaintext]
-        guard payload.count > 4 else { throw BastionError.configCorrupted }
-
-        let sigLen = Int(payload.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-        guard payload.count > 4 + sigLen else { throw BastionError.configCorrupted }
-
-        let signature = payload.subdata(in: 4..<4 + sigLen)
-        let plaintext = payload.subdata(in: 4 + sigLen..<payload.count)
-
-        // Verify signature with Key A public key (no auth needed)
-        guard SecKeyVerifySignature(
-            publicKey,
-            .ecdsaSignatureMessageX962SHA256,
-            plaintext as CFData,
-            signature as CFData,
-            &error
-        ) else {
-            throw BastionError.configCorrupted
-        }
-
-        return plaintext
     }
 
     // MARK: - DER Parsing
@@ -273,57 +143,6 @@ nonisolated final class SecureEnclaveManager: Sendable {
         let ctx = LAContext()
         ctx.setCredential(Data(), type: .applicationPassword)
         return ctx
-    }
-
-    /// Delete a key from the Keychain by tag.
-    nonisolated func deleteKey(tag: Data) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag,
-            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
-
-    /// Recreate Key B and Key C as silent keys (no auth prompt).
-    /// Call once if keys were previously created with wrong access controls.
-    nonisolated func resetSilentKeys() throws {
-        deleteKey(tag: signingKeyTag)
-        deleteKey(tag: stateKeyTag)
-        _ = try createSilentKey(tag: signingKeyTag)
-        _ = try createSilentKey(tag: stateKeyTag)
-    }
-
-    private nonisolated func createKey(
-        tag: Data,
-        accessControlFlags: SecAccessControlCreateFlags
-    ) throws -> SecKey {
-        var error: Unmanaged<CFError>?
-
-        guard let access = SecAccessControlCreateWithFlags(
-            nil,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            accessControlFlags,
-            &error
-        ) else {
-            throw error!.takeRetainedValue() as Error
-        }
-
-        let attrs: [String: Any] = [
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeySizeInBits as String: 256,
-            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-            kSecPrivateKeyAttrs as String: [
-                kSecAttrIsPermanent as String: true,
-                kSecAttrApplicationTag as String: tag,
-                kSecAttrAccessControl as String: access
-            ]
-        ]
-
-        guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {
-            throw error!.takeRetainedValue() as Error
-        }
-        return key
     }
 
     /// Creates an SE key that does NOT trigger any user authentication dialog.
