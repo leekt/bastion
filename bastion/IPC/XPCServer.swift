@@ -41,6 +41,9 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
 
     // MARK: - Code Signing Verification
 
+    /// Team ID that signed Bastion.app — only clients signed by the same team are accepted.
+    private nonisolated static let requiredTeamID = "926A27BQ7W"
+
     private nonisolated func verifyClientCodeSignature(connection: NSXPCConnection) -> Bool {
         let pid = connection.processIdentifier
         var code: SecCode?
@@ -50,7 +53,23 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
             return false
         }
 
+        // Require valid code signature
         guard SecCodeCheckValidity(secCode, [], nil) == errSecSuccess else {
+            return false
+        }
+
+        // Verify the client is signed by the same team
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(secCode, [], &staticCode) == errSecSuccess,
+              let code = staticCode else {
+            return false
+        }
+
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+              let signingInfo = info as? [String: Any],
+              let teamID = signingInfo[kSecCodeInfoTeamIdentifier as String] as? String,
+              teamID == Self.requiredTeamID else {
             return false
         }
 
