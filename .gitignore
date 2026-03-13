@@ -1,0 +1,12 @@
+# Xcode
+xcuserdata/
+*.xcscmblueprint
+DerivedData/
+build/
+
+# macOS
+.DS_Store
+
+# Debug artifacts
+bastion-debug.log
+bastion-init-marker.txt
