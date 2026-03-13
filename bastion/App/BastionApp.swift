@@ -58,6 +58,18 @@ struct MenuBarContentView: View {
 
         Divider()
 
+        if let pubkey = try? SecureEnclaveManager.shared.getPublicKey() {
+            let full = "0x04\(pubkey.x)\(pubkey.y)"
+            let short = "\(full.prefix(10))...\(full.suffix(6))"
+            Button("Public Key: \(short)") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(full, forType: .string)
+            }
+            .help("Click to copy full public key")
+        }
+
+        Divider()
+
         SettingsLink {
             Text("Rules Settings...")
         }
