@@ -52,6 +52,12 @@ nonisolated struct RulesResponse: Codable, Sendable {
     let rules: RuleConfig
 }
 
+nonisolated struct StateResponse: Codable, Sendable {
+    let todayCount: Int
+    let dailyLimit: Int?
+    let remaining: Int?
+}
+
 // MARK: - Rule Config
 
 nonisolated struct RuleConfig: Codable, Sendable {

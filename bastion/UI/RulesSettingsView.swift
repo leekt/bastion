@@ -27,7 +27,7 @@ struct RulesSettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
 
-                Text("Changing auth policy requires Key A authentication (biometric or passcode).")
+                Text("Saving requires biometric or passcode authentication.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

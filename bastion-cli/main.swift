@@ -7,6 +7,7 @@ import Foundation
     func getPublicKey(withReply reply: @escaping (Data?, Error?) -> Void)
     func ping(withReply reply: @escaping (Bool) -> Void)
     func getRules(withReply reply: @escaping (Data?, Error?) -> Void)
+    func getState(withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
 // MARK: - Helpers
@@ -160,6 +161,36 @@ func cmdRules() {
     connection.invalidate()
 }
 
+func cmdState() {
+    let connection = createConnection()
+    let proxy = getProxy(connection)
+    let semaphore = DispatchSemaphore(value: 0)
+
+    proxy.getState { responseData, error in
+        defer { semaphore.signal() }
+
+        if let error = error {
+            exitWithError(error.localizedDescription)
+        }
+
+        guard let responseData = responseData else {
+            exitWithError("No response data")
+        }
+
+        guard let response = try? JSONDecoder().decode(StateResponse.self, from: responseData) else {
+            exitWithError("Invalid response format")
+        }
+
+        printJSON(response)
+    }
+
+    if semaphore.wait(timeout: .now() + 10) == .timedOut {
+        exitWithError("Request timed out")
+    }
+
+    connection.invalidate()
+}
+
 // MARK: - Response Types (duplicated for CLI target)
 
 struct SignResponse: Codable {
@@ -172,6 +203,12 @@ struct SignResponse: Codable {
 struct PublicKeyResponse: Codable {
     let x: String
     let y: String
+}
+
+struct StateResponse: Codable {
+    let todayCount: Int
+    let dailyLimit: Int?
+    let remaining: Int?
 }
 
 extension Data {
@@ -200,6 +237,7 @@ guard args.count >= 2 else {
       bastion pubkey                      # Get public key
       bastion status                      # Check app status
       bastion rules                       # Get current rules
+      bastion state                       # Get signing state (tx count, limits)
 
     """.utf8))
     exit(1)
@@ -220,6 +258,9 @@ case "status":
 
 case "rules":
     cmdRules()
+
+case "state":
+    cmdState()
 
 default:
     exitWithError("Unknown command: \(args[1])")

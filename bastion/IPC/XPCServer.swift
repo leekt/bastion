@@ -140,4 +140,23 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             }
         }
     }
+
+    nonisolated func getState(withReply reply: @escaping (Data?, Error?) -> Void) {
+        Task { @MainActor in
+            let todayCount = StateStore.shared.todayCount()
+            let limit = ruleEngine.config.rules.maxTxPerDayWithoutAuth
+            let remaining = limit.map { max(0, $0 - todayCount) }
+            let response = StateResponse(
+                todayCount: todayCount,
+                dailyLimit: limit,
+                remaining: remaining
+            )
+            do {
+                let jsonData = try JSONEncoder().encode(response)
+                reply(jsonData, nil)
+            } catch {
+                reply(nil, error)
+            }
+        }
+    }
 }

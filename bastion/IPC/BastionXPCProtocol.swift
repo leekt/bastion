@@ -18,6 +18,10 @@ import Foundation
     func getRules(
         withReply reply: @escaping (Data?, Error?) -> Void
     )
+
+    func getState(
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
 }
 
 let xpcServiceName = "com.bastion.xpc"
