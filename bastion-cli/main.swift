@@ -11,10 +11,44 @@ import Foundation
     func signStructured(operationType: String, operationData: Data, requestID: String, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
+private let userOpFieldHelp = """
+Required JSON fields:
+  sender, nonce, callData, verificationGasLimit, callGasLimit,
+  preVerificationGas, maxPriorityFeePerGas, maxFeePerGas,
+  chainId, entryPoint, entryPointVersion ("v0.7"|"v0.8"|"v0.9")
+
+Optional: factory, factoryData, paymaster, paymasterVerificationGasLimit,
+          paymasterPostOpGasLimit, paymasterData
+"""
+
+private let cliUsage = """
+Usage:
+  bastion sign --data <32byte hex>              # Legacy: sign raw hash
+  bastion eth message <text>                    # EIP-191 personal sign
+  bastion eth typedData --json '{...}'          # EIP-712 typed data
+  bastion eth typedData --json-file <path>      # EIP-712 typed data from file
+  bastion eth userOp --json '{...}'             # ERC-4337 UserOperation (v0.7+)
+  bastion eth userOp --json-file <path>         # ERC-4337 UserOperation from file
+  bastion pubkey                                # Get public key
+  bastion status                                # Check app status
+  bastion rules                                 # Get current rules
+  bastion state                                 # Get signing state
+
+UserOp JSON fields (all byte fields hex-encoded with 0x prefix):
+  sender, nonce, callData, verificationGasLimit, callGasLimit,
+  preVerificationGas, maxPriorityFeePerGas, maxFeePerGas,
+  chainId (int), entryPoint, entryPointVersion ("v0.7"|"v0.8"|"v0.9")
+"""
+
 // MARK: - Helpers
 
 func exitWithError(_ message: String) -> Never {
     FileHandle.standardError.write(Data("Error: \(message)\n".utf8))
+    exit(1)
+}
+
+func exitWithUsage(_ usage: String = cliUsage) -> Never {
+    FileHandle.standardError.write(Data((usage + "\n").utf8))
     exit(1)
 }
 
@@ -48,35 +82,153 @@ func getProxy(_ connection: NSXPCConnection) -> BastionXPCProtocol {
 
 // MARK: - Structured Signing Helper
 
-func callSignStructured(type: String, data: Data) {
-    let requestID = UUID().uuidString
+func readAllStdin() -> Data {
+    do {
+        return try FileHandle.standardInput.readToEnd() ?? Data()
+    } catch {
+        exitWithError("Failed to read stdin: \(error.localizedDescription)")
+    }
+}
+
+func structuredJSONUsage(for commandName: String) -> String {
+    var usage = "Usage: bastion eth \(commandName) --json '{...}' or --json-file /path/to/request.json"
+    if commandName == "userOp" {
+        usage += "\n\n" + userOpFieldHelp
+    }
+    return usage
+}
+
+func decodeJSON<T: Decodable>(_ type: T.Type, from data: Data) -> T {
+    guard let decoded = try? JSONDecoder().decode(type, from: data) else {
+        exitWithError("Invalid response format")
+    }
+    return decoded
+}
+
+func decodeJSONString(_ data: Data) -> String {
+    guard let json = String(data: data, encoding: .utf8) else {
+        exitWithError("No response data")
+    }
+    return json
+}
+
+func performDataRequest(
+    timeoutSeconds: Int,
+    timeoutMessage: String = "Request timed out",
+    _ invoke: (BastionXPCProtocol, @escaping (Data?, Error?) -> Void) -> Void
+) -> Data {
     let connection = createConnection()
     let proxy = getProxy(connection)
     let semaphore = DispatchSemaphore(value: 0)
+    var responseData: Data?
+    var responseError: Error?
 
-    proxy.signStructured(operationType: type, operationData: data, requestID: requestID) { responseData, error in
-        defer { semaphore.signal() }
-
-        if let error = error {
-            exitWithError(error.localizedDescription)
-        }
-
-        guard let responseData = responseData else {
-            exitWithError("No response data")
-        }
-
-        guard let response = try? JSONDecoder().decode(SignResponse.self, from: responseData) else {
-            exitWithError("Invalid response format")
-        }
-
-        printJSON(response)
+    invoke(proxy) { data, error in
+        responseData = data
+        responseError = error
+        semaphore.signal()
     }
 
-    if semaphore.wait(timeout: .now() + 65) == .timedOut {
-        exitWithError("Request timed out (65s)")
+    if semaphore.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut {
+        connection.invalidate()
+        exitWithError(timeoutMessage)
     }
 
     connection.invalidate()
+
+    if let responseError {
+        exitWithError(responseError.localizedDescription)
+    }
+
+    guard let responseData else {
+        exitWithError("No response data")
+    }
+
+    return responseData
+}
+
+func performBoolRequest(
+    timeoutSeconds: Int,
+    timeoutMessage: String,
+    _ invoke: (BastionXPCProtocol, @escaping (Bool) -> Void) -> Void
+) -> Bool {
+    let connection = createConnection()
+    let proxy = getProxy(connection)
+    let semaphore = DispatchSemaphore(value: 0)
+    var value = false
+
+    invoke(proxy) { result in
+        value = result
+        semaphore.signal()
+    }
+
+    if semaphore.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut {
+        connection.invalidate()
+        exitWithError(timeoutMessage)
+    }
+
+    connection.invalidate()
+    return value
+}
+
+func resolveStructuredJSONInput(
+    _ args: ArraySlice<String>,
+    commandName: String
+) -> Data {
+    var jsonString: String?
+    var jsonFilePath: String?
+
+    var i = args.startIndex
+    while i < args.endIndex {
+        switch args[i] {
+        case "--json":
+            let next = args.index(after: i)
+            guard next < args.endIndex else {
+                exitWithError("--json requires a value")
+            }
+            jsonString = args[next]
+            i = args.index(after: next)
+        case "--json-file":
+            let next = args.index(after: i)
+            guard next < args.endIndex else {
+                exitWithError("--json-file requires a path")
+            }
+            jsonFilePath = args[next]
+            i = args.index(after: next)
+        default:
+            i = args.index(after: i)
+        }
+    }
+
+    if let json = jsonString {
+        guard let data = json.data(using: .utf8) else {
+            exitWithError("Invalid JSON string")
+        }
+        return data
+    }
+
+    if let path = jsonFilePath {
+        do {
+            return try Data(contentsOf: URL(fileURLWithPath: path))
+        } catch {
+            exitWithError("Failed to read JSON file: \(error.localizedDescription)")
+        }
+    }
+
+    let stdinData = readAllStdin()
+    if !stdinData.isEmpty {
+        return stdinData
+    }
+
+    exitWithError(structuredJSONUsage(for: commandName))
+}
+
+func callSignStructured(type: String, data: Data) {
+    let requestID = UUID().uuidString
+    let responseData = performDataRequest(timeoutSeconds: 65, timeoutMessage: "Request timed out (65s)") { proxy, reply in
+        proxy.signStructured(operationType: type, operationData: data, requestID: requestID, withReply: reply)
+    }
+    printJSON(decodeJSON(SignResponse.self, from: responseData))
 }
 
 // MARK: - Commands
@@ -88,37 +240,14 @@ func cmdSign(dataHex: String) {
     }
 
     let requestID = UUID().uuidString
-    let connection = createConnection()
-    let proxy = getProxy(connection)
-    let semaphore = DispatchSemaphore(value: 0)
-
-    proxy.sign(data: data, requestID: requestID) { responseData, error in
-        defer { semaphore.signal() }
-
-        if let error = error {
-            exitWithError(error.localizedDescription)
-        }
-
-        guard let responseData = responseData else {
-            exitWithError("No response data")
-        }
-
-        guard let response = try? JSONDecoder().decode(SignResponse.self, from: responseData) else {
-            exitWithError("Invalid response format")
-        }
-
-        printJSON(response)
+    let responseData = performDataRequest(timeoutSeconds: 65, timeoutMessage: "Request timed out (65s)") { proxy, reply in
+        proxy.sign(data: data, requestID: requestID, withReply: reply)
     }
-
-    if semaphore.wait(timeout: .now() + 65) == .timedOut {
-        exitWithError("Request timed out (65s)")
-    }
-
-    connection.invalidate()
+    printJSON(decodeJSON(SignResponse.self, from: responseData))
 }
 
 func cmdEthMessage(_ args: ArraySlice<String>) {
-    guard let message = args.first else {
+    guard !args.isEmpty else {
         exitWithError("Usage: bastion eth message <text>")
     }
     let text = args.joined(separator: " ")
@@ -126,179 +255,44 @@ func cmdEthMessage(_ args: ArraySlice<String>) {
 }
 
 func cmdEthTypedData(_ args: ArraySlice<String>) {
-    var jsonString: String?
-
-    var i = args.startIndex
-    while i < args.endIndex {
-        if args[i] == "--json" {
-            let next = args.index(after: i)
-            guard next < args.endIndex else {
-                exitWithError("--json requires a value")
-            }
-            jsonString = args[next]
-            break
-        }
-        i = args.index(after: i)
-    }
-
-    guard let json = jsonString else {
-        // Try reading from stdin if no --json flag
-        if let stdinData = try? FileHandle.standardInput.availableData, !stdinData.isEmpty {
-            callSignStructured(type: "typedData", data: stdinData)
-            return
-        }
-        exitWithError("Usage: bastion eth typedData --json '{...}' or pipe JSON to stdin")
-    }
-
-    guard let data = json.data(using: .utf8) else {
-        exitWithError("Invalid JSON string")
-    }
-
+    let data = resolveStructuredJSONInput(args, commandName: "typedData")
     callSignStructured(type: "typedData", data: data)
 }
 
 func cmdEthUserOp(_ args: ArraySlice<String>) {
-    // Accept either --json '{...}' or stdin
-    var jsonString: String?
-
-    var i = args.startIndex
-    while i < args.endIndex {
-        if args[i] == "--json" {
-            let next = args.index(after: i)
-            guard next < args.endIndex else {
-                exitWithError("--json requires a value")
-            }
-            jsonString = args[next]
-            break
-        }
-        i = args.index(after: i)
-    }
-
-    if let json = jsonString {
-        guard let data = json.data(using: .utf8) else {
-            exitWithError("Invalid JSON string")
-        }
-        callSignStructured(type: "userOperation", data: data)
-    } else if let stdinData = try? FileHandle.standardInput.availableData, !stdinData.isEmpty {
-        callSignStructured(type: "userOperation", data: stdinData)
-    } else {
-        exitWithError("""
-        Usage: bastion eth userOp --json '{...}' or pipe JSON to stdin
-
-        Required JSON fields:
-          sender, nonce, callData, verificationGasLimit, callGasLimit,
-          preVerificationGas, maxPriorityFeePerGas, maxFeePerGas,
-          chainId, entryPoint, entryPointVersion ("v0.7"|"v0.8"|"v0.9")
-
-        Optional: factory, factoryData, paymaster, paymasterVerificationGasLimit,
-                  paymasterPostOpGasLimit, paymasterData
-        """)
-    }
+    let data = resolveStructuredJSONInput(args, commandName: "userOp")
+    callSignStructured(type: "userOperation", data: data)
 }
 
 func cmdPubkey() {
-    let connection = createConnection()
-    let proxy = getProxy(connection)
-    let semaphore = DispatchSemaphore(value: 0)
-
-    proxy.getPublicKey { responseData, error in
-        defer { semaphore.signal() }
-
-        if let error = error {
-            exitWithError(error.localizedDescription)
-        }
-
-        guard let responseData = responseData else {
-            exitWithError("No response data")
-        }
-
-        guard let response = try? JSONDecoder().decode(PublicKeyResponse.self, from: responseData) else {
-            exitWithError("Invalid response format")
-        }
-
-        printJSON(response)
+    let responseData = performDataRequest(timeoutSeconds: 10) { proxy, reply in
+        proxy.getPublicKey(withReply: reply)
     }
-
-    if semaphore.wait(timeout: .now() + 10) == .timedOut {
-        exitWithError("Request timed out")
-    }
-
-    connection.invalidate()
+    printJSON(decodeJSON(PublicKeyResponse.self, from: responseData))
 }
 
 func cmdStatus() {
-    let connection = createConnection()
-    let proxy = getProxy(connection)
-    let semaphore = DispatchSemaphore(value: 0)
-
-    proxy.ping { alive in
-        defer { semaphore.signal() }
-        if alive {
-            print("{\"status\": \"running\"}")
-        } else {
-            exitWithError("App not responding")
-        }
+    let alive = performBoolRequest(timeoutSeconds: 5, timeoutMessage: "Bastion app is not running") { proxy, reply in
+        proxy.ping(withReply: reply)
     }
-
-    if semaphore.wait(timeout: .now() + 5) == .timedOut {
-        exitWithError("Bastion app is not running")
+    guard alive else {
+        exitWithError("App not responding")
     }
-
-    connection.invalidate()
+    print("{\"status\": \"running\"}")
 }
 
 func cmdRules() {
-    let connection = createConnection()
-    let proxy = getProxy(connection)
-    let semaphore = DispatchSemaphore(value: 0)
-
-    proxy.getRules { responseData, error in
-        defer { semaphore.signal() }
-
-        if let error = error {
-            exitWithError(error.localizedDescription)
-        }
-
-        guard let responseData = responseData,
-              let json = String(data: responseData, encoding: .utf8) else {
-            exitWithError("No response data")
-        }
-
-        print(json)
+    let responseData = performDataRequest(timeoutSeconds: 10) { proxy, reply in
+        proxy.getRules(withReply: reply)
     }
-
-    if semaphore.wait(timeout: .now() + 10) == .timedOut {
-        exitWithError("Request timed out")
-    }
-
-    connection.invalidate()
+    print(decodeJSONString(responseData))
 }
 
 func cmdState() {
-    let connection = createConnection()
-    let proxy = getProxy(connection)
-    let semaphore = DispatchSemaphore(value: 0)
-
-    proxy.getState { responseData, error in
-        defer { semaphore.signal() }
-
-        if let error = error {
-            exitWithError(error.localizedDescription)
-        }
-
-        guard let responseData = responseData,
-              let json = String(data: responseData, encoding: .utf8) else {
-            exitWithError("No response data")
-        }
-
-        print(json)
+    let responseData = performDataRequest(timeoutSeconds: 10) { proxy, reply in
+        proxy.getState(withReply: reply)
     }
-
-    if semaphore.wait(timeout: .now() + 10) == .timedOut {
-        exitWithError("Request timed out")
-    }
-
-    connection.invalidate()
+    print(decodeJSONString(responseData))
 }
 
 // MARK: - Response Types (duplicated for CLI target)
@@ -341,24 +335,7 @@ extension Data {
 let args = CommandLine.arguments
 
 guard args.count >= 2 else {
-    FileHandle.standardError.write(Data("""
-    Usage:
-      bastion sign --data <32byte hex>              # Legacy: sign raw hash
-      bastion eth message <text>                    # EIP-191 personal sign
-      bastion eth typedData --json '{...}'          # EIP-712 typed data
-      bastion eth userOp --json '{...}'             # ERC-4337 UserOperation (v0.7+)
-      bastion pubkey                                # Get public key
-      bastion status                                # Check app status
-      bastion rules                                 # Get current rules
-      bastion state                                 # Get signing state
-
-    UserOp JSON fields (all hex-encoded with 0x prefix):
-      sender, nonce, callData, verificationGasLimit, callGasLimit,
-      preVerificationGas, maxPriorityFeePerGas, maxFeePerGas,
-      chainId (int), entryPoint, entryPointVersion ("v0.7"|"v0.8"|"v0.9")
-
-    """.utf8))
-    exit(1)
+    exitWithUsage()
 }
 
 switch args[1] {
@@ -370,7 +347,7 @@ case "sign":
 
 case "eth":
     guard args.count >= 3 else {
-        exitWithError("Usage: bastion eth <message|typedData|tx> ...")
+        exitWithError("Usage: bastion eth <message|typedData|userOp> ...")
     }
     switch args[2] {
     case "message":

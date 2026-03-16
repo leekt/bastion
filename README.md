@@ -18,7 +18,7 @@ AI agents that interact with blockchains need to sign transactions. Giving an ag
 ```
 Agent (Python / TypeScript / any process)
   |
-  |  subprocess: bastion eth userOp --json '{...}'
+  |  subprocess: bastion eth userOp --json-file /tmp/userop.json
   v
 bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
                                         |
@@ -62,6 +62,7 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 
 - **Sign raw data** (`bastion sign`) — within rules, silently; outside rules, with user biometric override
 - **Sign Ethereum operations** (`bastion eth message|typedData|userOp`) — structured signing with calldata decoding
+  Use `--json-file` for `typedData` and `userOp` payloads; the documented examples are in `docs/CLI_REQUEST_EXAMPLES.md`.
 - **Read public key** (`bastion pubkey`) — always allowed
 - **Read rules** (`bastion rules`) — always allowed
 - **Read state** (`bastion state`) — check remaining quota per rate limit window
@@ -187,7 +188,7 @@ bastion.xcodeproj
 │       ├── KeychainStore.swift
 │       ├── CLIInstaller.swift
 │       └── AuditLog.swift
-├── bastion-cli/                       # CLI target (Command Line Tool)
+├── bastion-cli/                       # CLI source bundled into bastion.app at build time
 │   └── main.swift
 └── bastionTests/                      # Unit tests
     ├── StateStoreTests.swift          # RuleEngine + StateStore tests (mock keychain)
@@ -222,6 +223,7 @@ These should already be set:
    - Creates Secure Enclave signing key
    - Installs `~/Library/LaunchAgents/com.bastion.xpc.plist` for XPC
    - Attempts to symlink `bastion-cli` to `/usr/local/bin/bastion`
+   - Bundles the CLI at `bastion.app/Contents/MacOS/bastion-cli`
 
 ### 4. Activate the LaunchAgent
 
@@ -240,8 +242,8 @@ launchctl print gui/$(id -u)/com.bastion.xpc
 ### 5. Install the CLI manually (if auto-install failed)
 
 ```bash
-BASTION_CLI=$(find ~/Library/Developer/Xcode/DerivedData -name "bastion-cli" -type f | head -1)
-sudo ln -sf "$BASTION_CLI" /usr/local/bin/bastion
+BASTION_APP=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Build/Products/*/bastion.app" -type d | head -1)
+sudo ln -sf "$BASTION_APP/Contents/MacOS/bastion-cli" /usr/local/bin/bastion
 ```
 
 ---
@@ -269,11 +271,17 @@ bastion sign --data a3f1c2d4e5b67890abcdef1234567890abcdef1234567890abcdef123456
 
 # Ethereum structured signing
 bastion eth message "Hello, world!"
-bastion eth typedData --json '{ ... }'
-bastion eth userOp --json '{ ... }'
+bastion eth typedData --json-file /tmp/typed-data.json
+bastion eth userOp --json-file /tmp/userop.json
 ```
 
 All output is JSON on stdout. Errors go to stderr with exit code 1.
+
+For structured requests, `--json-file` is the most reliable path for large JSON payloads.
+
+For `bastion eth userOp`, the byte fields `callData`, `factoryData`, and `paymasterData` must be passed as `0x`-prefixed hex strings. Base64-encoded values are rejected.
+
+See `docs/CLI_REQUEST_EXAMPLES.md` for validated `message`, `typedData`, and `userOp` examples.
 
 ### From an AI agent
 
