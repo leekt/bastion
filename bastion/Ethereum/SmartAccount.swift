@@ -29,7 +29,7 @@ nonisolated final class SmartAccount: Sendable {
     /// Encode the MetaFactory `deployWithFactory(factory, createData, salt)` calldata.
     /// This is the `factoryData` field in the UserOperation for first-time deployment.
     var factoryData: Data {
-        let selector = Data(hexString: "0xbb24085e")! // deployWithFactory(address,bytes,bytes32)
+        let selector = Data(hexString: "0xc5265d5d")! // deployWithFactory(address,bytes,uint256)
         let factoryAddr = Data(hexString: KernelAddress.factory)!
         let createData = initializeCalldata
         let salt = uint256(index)
@@ -183,6 +183,7 @@ nonisolated final class SmartAccount: Sendable {
             key: nonceKeyUInt192,
             entryPoint: EntryPointAddress.address(for: entryPointVersion)
         )
+        let fees = try await rpc.estimateUserOperationFeesPerGas()
 
         let op = UserOperation(
             sender: sender,
@@ -193,8 +194,8 @@ nonisolated final class SmartAccount: Sendable {
             verificationGasLimit: "0x0",
             callGasLimit: "0x0",
             preVerificationGas: "0x0",
-            maxPriorityFeePerGas: "0x0",
-            maxFeePerGas: "0x0",
+            maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+            maxFeePerGas: fees.maxFeePerGas,
             paymaster: nil,
             paymasterVerificationGasLimit: nil,
             paymasterPostOpGasLimit: nil,

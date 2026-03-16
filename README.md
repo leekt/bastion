@@ -1,6 +1,6 @@
 # Bastion
 
-Hardware-backed signing guard for AI agents on macOS. Bastion uses Apple Secure Enclave to hold private keys and macOS Keychain for tamper-proof state storage. Agents interact through a CLI that communicates with the app over XPC — they can sign freely within configured rules, but need biometric override to break them.
+Hardware-backed signing guard for AI agents on macOS. Bastion uses Apple Secure Enclave to hold private keys and macOS Keychain for tamper-resistant state storage. Agents interact through a CLI that communicates with the app over XPC. Requests that stay within policy can be signed autonomously; requests outside policy require explicit approval plus owner authentication.
 
 ## Why
 
@@ -9,7 +9,7 @@ AI agents that interact with blockchains need to sign transactions. Giving an ag
 - The private key **never leaves the Secure Enclave**. It cannot be exported, copied, or read — even by Bastion itself.
 - Every signing request goes through a **rule engine** (rate limits, allowed hours, whitelist).
 - Within rules: signing is **silent and autonomous** — no user interaction needed.
-- Breaking rules: requires **biometric authentication** (master key override).
+- Breaking rules: requires **explicit approval plus owner authentication** (biometric or passcode).
 - Config and state are in **macOS Keychain** — agents cannot read, modify, or delete them.
 - A tamper-proof **audit log** records every request, approval, and denial.
 
@@ -18,18 +18,32 @@ AI agents that interact with blockchains need to sign transactions. Giving an ag
 ```
 Agent (Python / TypeScript / any process)
   |
-  |  subprocess: bastion sign --data <hex>
+  |  subprocess: bastion eth userOp --json '{...}'
   v
 bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
                                         |
+                                        +-- CalldataDecoder (parse UserOp calldata)
                                         +-- RuleEngine (config from Keychain)
                                         +-- StateStore (counters in Keychain)
-                                        +-- Approval Popup (60s timeout)
+                                        +-- Approval Popup (60s timeout, decoded calldata)
                                         +-- LAContext Auth (Touch ID / passcode)
                                         +-- Secure Enclave ---> ECDSA P-256 signature
+                                        +-- s-normalization (OZ P256 compatibility)
                                               |
                                               v
-                                        JSON response ---> stdout ---> Agent
+                                        JSON response ---> stdout ---> Agent / bundler client
+                                                                        |
+                                                                        +-- Standard RPC fee estimate
+                                                                        |     (EIP-1559, 1.2x base fee)
+                                                                        |
+                                                                        +-- ZeroDev Bundler / Paymaster
+                                                                              (optional fallback for floor fees)
+                                                                              |
+                                                                              v
+                                                                        EntryPoint ---> Kernel v3.3
+                                                                                          |
+                                                                                          v
+                                                                                    P256Validator (on-chain)
 ```
 
 ### Security model
@@ -41,15 +55,16 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 | Hardened Runtime | App process integrity | Prevents debugger attachment, dylib injection, memory manipulation |
 | XPC code signing | IPC channel | Rejects connections from binaries not signed by the same team |
 | Rule engine | Operational limits | Rate limits, time windows, address whitelist |
-| Biometric auth | Rule changes + overrides | `LAContext` with `.biometricOrPasscode` for config saves and rule violations |
+| Owner auth | Rule changes + overrides | `LAContext` with `.biometricOrPasscode` for config saves and rule violations |
 | Audit log | Accountability | Append-only JSON Lines, no delete API |
 
 ### What agents can do
 
-- **Sign data** (`bastion sign`) — within rules, silently; outside rules, with user biometric override
+- **Sign raw data** (`bastion sign`) — within rules, silently; outside rules, with user biometric override
+- **Sign Ethereum operations** (`bastion eth message|typedData|userOp`) — structured signing with calldata decoding
 - **Read public key** (`bastion pubkey`) — always allowed
 - **Read rules** (`bastion rules`) — always allowed
-- **Read state** (`bastion state`) — check remaining daily tx quota
+- **Read state** (`bastion state`) — check remaining quota per rate limit window
 - **Check status** (`bastion status`) — health check
 
 ### What agents cannot do
@@ -59,6 +74,8 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 - Reset rate limit counters — state is in Keychain, survives app restarts
 - Forge XPC connections — team ID verification on every connection
 - Inject code into Bastion.app — Hardened Runtime blocks it
+- Bypass direct-call spending checks through simple calldata wrapping — Bastion decodes actual inner call targets and direct ERC-20/native amounts
+- Treat spending limits as full protocol simulation — complex protocols can still move assets indirectly, so use target allowlists and explicit approval for higher-risk flows
 
 ### Signing key
 
@@ -74,24 +91,34 @@ The key's SE access control is intentionally open so signing doesn't prompt. The
 ### Signing flow
 
 ```
-1. bastion-cli sends sign request over XPC
+1. bastion-cli sends sign request over XPC (raw or structured)
 2. XPCServer verifies client code signature + team ID
-3. RuleEngine.validate() — checks rate limits, allowed hours, whitelist
-4. StateStore.todayCount() — checks daily transaction limit
+3. Parse operation type (message / typedData / userOperation)
+4. CalldataDecoder inspects UserOp calldata → extract inner targets + direct token amounts
+5. RuleEngine.validate():
+   - Client allowlist
+   - Allowed hours
+   - Chain ID whitelist
+   - Target address check (decoded inner-call targets, not just the smart-account sender)
+   - Rate limits (configurable time windows)
+   - Spending limits (direct native/ERC-20 amounts from decoded calldata)
 
    If all rules pass:
-     5a. Optional explicit approval popup (if configured)
-     5b. Auth per policy (.open skips, .biometric prompts, etc.)
-     5c. Sign with Secure Enclave Key B
+     6a. Optional explicit approval popup (shows decoded calldata)
+     6b. Auth per policy (.open skips, .biometric prompts, etc.)
+     6c. Sign with Secure Enclave Key B
 
    If any rule fails:
-     5a. Show violation popup (what rule was broken)
-     5b. User approves → biometric auth (master key, non-negotiable)
-     5c. Sign with Secure Enclave Key B
+     6a. Show violation popup (what rule was broken)
+     6b. User approves → owner auth (`.biometricOrPasscode`)
+     6c. Sign with Secure Enclave Key B
 
-6. Increment daily counter in Keychain
-7. Record audit log entry
-8. Return JSON response via XPC → CLI stdout → Agent
+7. For UserOps: normalize s <= N/2 (OZ P256 on-chain requirement)
+8. Increment counters in Keychain (rate limit + spending)
+9. Record audit log entry
+10. Return JSON response via XPC → CLI stdout → Agent
+
+For live UserOps, the client can seed gas fees from chain-native EIP-1559 data and only fall back to bundler-specific fee floors when `eth_sendUserOperation` rejects the initial estimate.
 ```
 
 ### Storage
@@ -100,10 +127,19 @@ All persistent state is in macOS Keychain (service: `com.bastion`):
 
 | Account | Contents |
 |---------|----------|
-| `config` | BastionConfig JSON (auth policy, rules, whitelist) |
-| `state.ratelimit` | Daily tx counter (date + count) |
+| `config` | BastionConfig JSON (auth policy, access controls, rate limits, spending limits) |
+| `state.*` | Keychain-backed counters for rate limits and spending windows |
 
 Audit log (display only, not security-critical): `~/Library/Application Support/Bastion/audit.log`
+
+---
+
+## Rule settings and approval UI
+
+- **Rules Settings** is split into Authentication, Access Controls, Allowed XPC Clients, Rate Limits, and Spending Limits.
+- **Allowed Targets** matches decoded inner destinations from Kernel `execute()` calldata, not just the smart-account address.
+- **Spending Limits** enforce direct native value plus ERC-20 `transfer`, `approve`, and `transferFrom` amounts decoded from UserOps.
+- **Approval Popup** shows request metadata, the exact digest to sign, decoded action summaries, and rule-override reasons when Bastion blocks a request.
 
 ---
 
@@ -117,31 +153,48 @@ Audit log (display only, not security-critical): `~/Library/Application Support/
 
 ```
 bastion.xcodeproj
-├── bastion/                          # Main app target (menu bar)
+├── BastionShared/                     # Shared XPC protocol
+│   └── BastionXPCProtocol.swift
+├── bastion/                           # Main app target (menu bar)
 │   ├── App/BastionApp.swift
 │   ├── MenuBar/MenuBarManager.swift
 │   ├── Signing/
-│   │   ├── SecureEnclaveManager.swift
-│   │   ├── SigningManager.swift
+│   │   ├── SecureEnclaveManager.swift # SE key mgmt + signDigest (raw P-256)
+│   │   ├── SigningManager.swift       # Two-path flow + s-normalization
 │   │   └── AuthManager.swift
+│   ├── Ethereum/
+│   │   ├── Keccak256.swift            # C-backed Keccak-256 (Ethereum variant)
+│   │   ├── EthTypes.swift             # SigningOperation, UserOperation, EIP-712
+│   │   ├── EthHashing.swift           # EIP-191, EIP-712, UserOp hash (v0.7/v0.8+)
+│   │   ├── EthRPC.swift               # Standard JSON-RPC client
+│   │   ├── RLP.swift                  # RLP encoding
+│   │   ├── KernelEncoding.swift       # Kernel v3.3 ERC-7579 calldata
+│   │   ├── CalldataDecoder.swift      # Decode UserOp calldata for display + rules
+│   │   ├── SmartAccount.swift         # Kernel v3.3 account (CREATE2, nonce, factory)
+│   │   ├── Validator.swift            # KernelValidator protocol, P256Validator, P256Curve
+│   │   ├── TokenConfig.swift          # Token identifiers, USDC addresses, chain config
+│   │   └── ZeroDevAPI.swift           # ZeroDev bundler + paymaster API
 │   ├── Rules/
-│   │   ├── RuleEngine.swift
-│   │   ├── RuleModels.swift
-│   │   └── StateStore.swift
+│   │   ├── RuleEngine.swift           # Validation with calldata-aware target + spending checks
+│   │   ├── RuleModels.swift           # BastionConfig, RuleConfig, rate/spending limits
+│   │   └── StateStore.swift           # Time-windowed counters in Keychain
 │   ├── IPC/
-│   │   ├── BastionXPCProtocol.swift
-│   │   └── XPCServer.swift
+│   │   └── XPCServer.swift            # XPC listener + code signing verification
 │   ├── UI/
-│   │   ├── SigningRequestView.swift
-│   │   └── RulesSettingsView.swift
+│   │   ├── SigningRequestView.swift   # Approval popup with decoded calldata
+│   │   └── RulesSettingsView.swift    # Full settings UI (rules, targets, spending)
 │   └── Utilities/
 │       ├── KeychainStore.swift
 │       ├── CLIInstaller.swift
 │       └── AuditLog.swift
-├── bastion-cli/                      # CLI target (Command Line Tool)
+├── bastion-cli/                       # CLI target (Command Line Tool)
 │   └── main.swift
-└── bastionTests/                     # Unit tests
-    └── StateStoreTests.swift
+└── bastionTests/                      # Unit tests
+    ├── StateStoreTests.swift          # RuleEngine + StateStore tests (mock keychain)
+    ├── EthHashingTests.swift          # Keccak, EIP-191/712, UserOp hash tests
+    ├── LiveTestConfig.swift           # Env-gated live test config
+    ├── ZeroDevAPITests.swift          # ZeroDev integration tests (live Sepolia)
+    └── P256ValidatorTests.swift       # P256 validator tests + live P256 flow
 ```
 
 ## Build & install
@@ -204,16 +257,20 @@ bastion status
 bastion pubkey
 # {"x": "3a2f...", "y": "9b1e..."}
 
-# Check signing state (daily tx count and remaining quota)
+# Check signing state (remaining quota per rate limit window)
 bastion state
-# {"todayCount": 3, "dailyLimit": 5, "remaining": 2}
 
 # View current rules
 bastion rules
 
-# Request a signature (32 bytes = 64 hex chars)
+# Raw signature (32 bytes = 64 hex chars)
 bastion sign --data a3f1c2d4e5b67890abcdef1234567890abcdef1234567890abcdef1234567890
 # {"pubkeyX": "...", "pubkeyY": "...", "r": "...", "s": "..."}
+
+# Ethereum structured signing
+bastion eth message "Hello, world!"
+bastion eth typedData --json '{ ... }'
+bastion eth userOp --json '{ ... }'
 ```
 
 All output is JSON on stdout. Errors go to stderr with exit code 1.
@@ -249,6 +306,17 @@ const result = execFileSync(
 const sig = JSON.parse(result.toString());
 ```
 
+### Live integration tests
+
+Use `.env.test.example` as a template, then export the values before running the live Sepolia flows:
+
+```bash
+BASTION_RUN_LIVE_AA_TESTS=1 \
+BASTION_ZERODEV_PROJECT_ID=... \
+BASTION_SEPOLIA_RPC_URL=... \
+xcodebuild -project bastion.xcodeproj -scheme bastion test
+```
+
 ---
 
 ## Uninstall
@@ -272,6 +340,12 @@ Secure Enclave keys persist in the hardware keychain. To delete them, use Keycha
 
 ---
 
+## On-chain component
+
+The P256Validator Solidity contract lives in [`contracts/`](contracts/). It's an ERC-7579 validator module for Kernel v3.3 that verifies P-256 signatures on-chain via the RIP-7212 precompile. Deployed at `0x9906AB44fF795883C5a725687A2705BE4118B0f3`.
+
 ## Documentation
 
 See [OVERVIEW.md](OVERVIEW.md) for the full security model, threat analysis, trust assumptions, and path forward.
+
+Full specifications, audits, and design docs are in Obsidian: `~/Documents/Obsidian/projects/bastion/`

@@ -6,7 +6,7 @@ final class SigningManager {
 
     enum SigningState {
         case idle
-        case pendingApproval(SignRequest)
+        case pendingApproval(ApprovalRequest)
         case signing
     }
 
@@ -39,7 +39,10 @@ final class SigningManager {
             let reason = violations.joined(separator: "; ")
             auditLog.record(AuditEvent(type: .ruleViolation, dataPrefix: dataPrefix, reason: reason))
 
-            state = .pendingApproval(request)
+            state = .pendingApproval(ApprovalRequest(
+                request: request,
+                mode: .ruleOverride(violations)
+            ))
 
             let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                 self.pendingContinuation = continuation
@@ -63,7 +66,10 @@ final class SigningManager {
             }
         } else {
             if config.rules.requireExplicitApproval {
-                state = .pendingApproval(request)
+                state = .pendingApproval(ApprovalRequest(
+                    request: request,
+                    mode: .policyReview
+                ))
 
                 let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     self.pendingContinuation = continuation
@@ -94,8 +100,12 @@ final class SigningManager {
         state = .signing
         defer { state = .idle }
 
-        let hash = request.data  // 32-byte keccak256 hash computed from the operation
-        let result = try seManager.sign(data: hash)
+        // `request.data` is already the Ethereum-standard 32-byte digest for every operation type.
+        // Feed that digest directly into the Secure Enclave to avoid double-hashing message requests.
+        let hash = request.data
+        let raw = try seManager.signDigest(hash: hash)
+        let normalizedS = Data(hexString: raw.s).map { P256Curve.normalizeS($0).hex } ?? raw.s
+        let result = SignResponse(pubkeyX: raw.pubkeyX, pubkeyY: raw.pubkeyY, r: raw.r, s: normalizedS)
 
         // Record success — update rate limit and spending counters
         auditLog.record(AuditEvent(type: .signSuccess, dataPrefix: dataPrefix))

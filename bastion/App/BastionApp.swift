@@ -70,6 +70,26 @@ struct MenuBarContentView: View {
 
         Divider()
 
+        Menu("Preview Approval UI") {
+            Button("Policy Review Sample") {
+                SigningRequestPanelManager.shared.showRequest(
+                    SigningRequestPreviewFactory.policyReview(),
+                    onApprove: {},
+                    onDeny: {}
+                )
+            }
+
+            Button("Rule Override Sample") {
+                SigningRequestPanelManager.shared.showRequest(
+                    SigningRequestPreviewFactory.ruleOverride(),
+                    onApprove: {},
+                    onDeny: {}
+                )
+            }
+        }
+
+        Divider()
+
         SettingsLink {
             Text("Rules Settings...")
         }

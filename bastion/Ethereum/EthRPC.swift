@@ -72,6 +72,54 @@ nonisolated final class EthRPC: Sendable {
         return result
     }
 
+    /// Ask the EntryPoint to compute the canonical v0.7/v0.8+ UserOperation hash.
+    func getUserOpHash(_ op: UserOperation, signature: Data = Data()) async throws -> Data {
+        let selector = Keccak256.hash(
+            Data("getUserOpHash((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes))".utf8)
+        ).prefix(4)
+
+        let initCode = packedInitCode(for: op)
+        let paymasterAndData = packedPaymasterAndData(for: op)
+        let tuple = abiEncodeUserOperationTuple(
+            sender: op.sender,
+            nonce: op.nonce,
+            initCode: initCode,
+            callData: op.callData,
+            accountGasLimits: packTwo128(op.verificationGasLimit, op.callGasLimit),
+            preVerificationGas: op.preVerificationGas,
+            gasFees: packTwo128(op.maxPriorityFeePerGas, op.maxFeePerGas),
+            paymasterAndData: paymasterAndData,
+            signature: signature
+        )
+
+        var calldata = Data(selector)
+        calldata += abiEncodeUInt256(32)
+        calldata += tuple
+
+        #if DEBUG
+        print("[getUserOpHash] initCode (\(initCode.count) bytes): 0x\(initCode.hex)")
+        print("[getUserOpHash] paymasterAndData (\(paymasterAndData.count) bytes): 0x\(paymasterAndData.hex)")
+        print("[getUserOpHash] accountGasLimits: 0x\(packTwo128(op.verificationGasLimit, op.callGasLimit).hex)")
+        print("[getUserOpHash] gasFees: 0x\(packTwo128(op.maxPriorityFeePerGas, op.maxFeePerGas).hex)")
+        print("[getUserOpHash] full calldata (\(calldata.count) bytes): 0x\(calldata.hex)")
+        #endif
+
+        let result = try await ethCall(to: op.entryPoint, data: "0x" + calldata.hex)
+        guard let hash = Data(hexString: result), hash.count == 32 else {
+            throw EthRPCError.networkError("Invalid getUserOpHash response: \(result)")
+        }
+        return hash
+    }
+
+    // MARK: - Generic eth_call
+
+    /// Perform a raw `eth_call` and return the hex result.
+    func ethCall(to: String, data: String, from: String? = nil) async throws -> String {
+        var callObj: [String: String] = ["to": to, "data": data]
+        if let from { callObj["from"] = from }
+        return try await call(method: "eth_call", params: [callObj, "latest"] as [Any])
+    }
+
     // MARK: - Chain Methods
 
     func chainId() async throws -> String {
@@ -88,6 +136,61 @@ nonisolated final class EthRPC: Sendable {
 
     func getBlock(tag: String = "latest") async throws -> EthBlock {
         try await call(method: "eth_getBlockByNumber", params: [tag, false] as [Any])
+    }
+
+    /// Estimate EIP-1559 fees for a UserOperation using viem's default strategy:
+    /// maxFeePerGas = floor(baseFeePerGas * baseFeeMultiplier) + maxPriorityFeePerGas
+    /// with a default baseFeeMultiplier of 1.2.
+    func estimateUserOperationFeesPerGas(baseFeeMultiplier: Double = 1.2) async throws -> UserOperationFeeEstimate {
+        let block = try await getBlock()
+        guard
+            let baseFeeHex = block.baseFeePerGas,
+            let baseFeePerGas = Self.hexToUInt128(baseFeeHex)
+        else {
+            throw EthRPCError.networkError("EIP-1559 fees not supported by this RPC")
+        }
+
+        let estimatedPriorityFeePerGas: UInt128
+        do {
+            let priorityHex = try await self.maxPriorityFeePerGas()
+            guard let priority = Self.hexToUInt128(priorityHex) else {
+                throw EthRPCError.networkError("Invalid eth_maxPriorityFeePerGas response: \(priorityHex)")
+            }
+            estimatedPriorityFeePerGas = priority
+        } catch {
+            let gasPriceHex = try await gasPrice()
+            guard let gasPrice = Self.hexToUInt128(gasPriceHex) else {
+                throw EthRPCError.networkError("Invalid eth_gasPrice response: \(gasPriceHex)")
+            }
+            estimatedPriorityFeePerGas = Self.fallbackMaxPriorityFeePerGas(
+                gasPrice: gasPrice,
+                baseFeePerGas: baseFeePerGas
+            )
+        }
+
+        return try Self.computeUserOperationFees(
+            baseFeePerGas: baseFeePerGas,
+            maxPriorityFeePerGas: estimatedPriorityFeePerGas,
+            baseFeeMultiplier: baseFeeMultiplier
+        )
+    }
+
+    static func computeUserOperationFees(
+        baseFeePerGas: UInt128,
+        maxPriorityFeePerGas: UInt128,
+        baseFeeMultiplier: Double = 1.2
+    ) throws -> UserOperationFeeEstimate {
+        guard baseFeeMultiplier >= 1 else {
+            throw EthRPCError.networkError("baseFeeMultiplier must be >= 1")
+        }
+
+        let adjustedBaseFee = try multiply(baseFeePerGas, by: baseFeeMultiplier)
+        let maxFeePerGas = adjustedBaseFee + maxPriorityFeePerGas
+
+        return UserOperationFeeEstimate(
+            maxPriorityFeePerGas: hexString(maxPriorityFeePerGas),
+            maxFeePerGas: hexString(maxFeePerGas)
+        )
     }
 
     // MARK: - JSON-RPC Transport
@@ -143,6 +246,138 @@ nonisolated final class EthRPC: Sendable {
         let paddingNeeded = max(0, length - clean.count)
         return String(repeating: "0", count: paddingNeeded) + clean
     }
+
+    private static func hexToUInt128(_ hex: String) -> UInt128? {
+        guard let data = Data(hexString: hex) else { return nil }
+        let highByteCount = max(0, data.count - 16)
+        guard !data.prefix(highByteCount).contains(where: { $0 != 0 }) else { return nil }
+
+        var result: UInt128 = 0
+        for byte in data.suffix(16) {
+            result = (result << 8) | UInt128(byte)
+        }
+        return result
+    }
+
+    private static func fallbackMaxPriorityFeePerGas(
+        gasPrice: UInt128,
+        baseFeePerGas: UInt128
+    ) -> UInt128 {
+        gasPrice > baseFeePerGas ? gasPrice - baseFeePerGas : 0
+    }
+
+    private static func multiply(_ base: UInt128, by multiplier: Double) throws -> UInt128 {
+        let multiplierString = String(multiplier)
+        let decimals = multiplierString.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        let fractionDigits = decimals.count == 2 ? decimals[1].count : 0
+        let denominatorInt = UInt64(pow(10.0, Double(fractionDigits)))
+        let scaledMultiplierInt = UInt64((multiplier * Double(denominatorInt)).rounded(.up))
+        let denominator = UInt128(denominatorInt)
+        let scaledMultiplier = UInt128(scaledMultiplierInt)
+        return (base * scaledMultiplier) / denominator
+    }
+
+    private static func hexString(_ value: UInt128) -> String {
+        "0x" + String(value, radix: 16)
+    }
+
+    private func packedInitCode(for op: UserOperation) -> Data {
+        var initCode = Data()
+        if let factory = op.factory {
+            initCode += Data(hexString: factory) ?? Data()
+            initCode += op.factoryData ?? Data()
+        }
+        return initCode
+    }
+
+    private func packedPaymasterAndData(for op: UserOperation) -> Data {
+        var paymasterAndData = Data()
+        if let paymaster = op.paymaster {
+            paymasterAndData += Data(hexString: paymaster) ?? Data()
+            paymasterAndData += leftPad(Data(hexString: op.paymasterVerificationGasLimit ?? "0x0") ?? Data(), to: 16)
+            paymasterAndData += leftPad(Data(hexString: op.paymasterPostOpGasLimit ?? "0x0") ?? Data(), to: 16)
+            paymasterAndData += op.paymasterData ?? Data()
+        }
+        return paymasterAndData
+    }
+
+    private func packTwo128(_ high: String, _ low: String) -> Data {
+        leftPad(Data(hexString: high) ?? Data(), to: 16) + leftPad(Data(hexString: low) ?? Data(), to: 16)
+    }
+
+    private func abiEncodeUserOperationTuple(
+        sender: String,
+        nonce: String,
+        initCode: Data,
+        callData: Data,
+        accountGasLimits: Data,
+        preVerificationGas: String,
+        gasFees: Data,
+        paymasterAndData: Data,
+        signature: Data
+    ) -> Data {
+        let headWords = 9
+        let headSize = headWords * 32
+
+        let initCodeData = abiEncodeBytes(initCode)
+        let callDataData = abiEncodeBytes(callData)
+        let paymasterData = abiEncodeBytes(paymasterAndData)
+        let signatureData = abiEncodeBytes(signature)
+
+        let initCodeOffset = headSize
+        let callDataOffset = initCodeOffset + initCodeData.count
+        let paymasterOffset = callDataOffset + callDataData.count
+        let signatureOffset = paymasterOffset + paymasterData.count
+
+        var encoded = Data()
+        encoded += abiEncodeAddress(sender)
+        encoded += abiEncodeUInt256FromHex(nonce)
+        encoded += abiEncodeUInt256(UInt64(initCodeOffset))
+        encoded += abiEncodeUInt256(UInt64(callDataOffset))
+        encoded += leftPad(accountGasLimits, to: 32)
+        encoded += abiEncodeUInt256FromHex(preVerificationGas)
+        encoded += leftPad(gasFees, to: 32)
+        encoded += abiEncodeUInt256(UInt64(paymasterOffset))
+        encoded += abiEncodeUInt256(UInt64(signatureOffset))
+        encoded += initCodeData
+        encoded += callDataData
+        encoded += paymasterData
+        encoded += signatureData
+        return encoded
+    }
+
+    private func abiEncodeBytes(_ data: Data) -> Data {
+        var encoded = abiEncodeUInt256(UInt64(data.count))
+        encoded += data
+        let padding = (32 - data.count % 32) % 32
+        if padding > 0 {
+            encoded += Data(repeating: 0, count: padding)
+        }
+        return encoded
+    }
+
+    private func abiEncodeAddress(_ address: String) -> Data {
+        leftPad(Data(hexString: address) ?? Data(), to: 32)
+    }
+
+    private func abiEncodeUInt256(_ value: UInt64) -> Data {
+        var result = Data(repeating: 0, count: 32)
+        var v = value
+        for i in stride(from: 31, through: 24, by: -1) {
+            result[i] = UInt8(v & 0xFF)
+            v >>= 8
+        }
+        return result
+    }
+
+    private func abiEncodeUInt256FromHex(_ hex: String) -> Data {
+        leftPad(Data(hexString: hex) ?? Data(), to: 32)
+    }
+
+    private func leftPad(_ data: Data, to size: Int) -> Data {
+        if data.count >= size { return Data(data.suffix(size)) }
+        return Data(repeating: 0, count: size - data.count) + data
+    }
 }
 
 // MARK: - Response Types
@@ -151,6 +386,11 @@ nonisolated struct EthBlock: Decodable, Sendable {
     let baseFeePerGas: String?
     let number: String?
     let timestamp: String?
+}
+
+nonisolated struct UserOperationFeeEstimate: Sendable, Equatable {
+    let maxPriorityFeePerGas: String
+    let maxFeePerGas: String
 }
 
 // MARK: - Errors

@@ -30,35 +30,6 @@ nonisolated enum SigningOperation: Sendable {
         case .userOperation(let op): return op.chainId
         }
     }
-
-    var targetAddress: String? {
-        switch self {
-        case .message: return nil
-        case .typedData(let data): return data.domain.verifyingContract
-        case .userOperation(let op): return op.sender
-        }
-    }
-
-    var ethValue: String? {
-        switch self {
-        case .message: return nil
-        case .typedData: return nil
-        case .userOperation: return nil
-        }
-    }
-
-    var calldata: Data? {
-        switch self {
-        case .message: return nil
-        case .typedData: return nil
-        case .userOperation(let op): return op.callData
-        }
-    }
-
-    var selector: Data? {
-        guard let data = calldata, data.count >= 4 else { return nil }
-        return data.prefix(4)
-    }
 }
 
 // MARK: - EIP-712 Typed Data
@@ -127,7 +98,7 @@ nonisolated struct UserOperation: Codable, Sendable {
 
 // MARK: - AnyCodable (for EIP-712 message values)
 
-nonisolated struct AnyCodable: Codable, Sendable {
+nonisolated struct AnyCodable: Codable, @unchecked Sendable {
     let value: Any
 
     nonisolated init(_ value: Any) {
