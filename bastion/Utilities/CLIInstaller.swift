@@ -20,7 +20,7 @@ final class CLIInstaller {
 
         // Check if bastion-cli binary exists in bundle
         guard fileManager.fileExists(atPath: bundlePath) else {
-            // CLI binary not bundled yet (development mode)
+            // CLI build sidecar missing from app bundle
             return
         }
 

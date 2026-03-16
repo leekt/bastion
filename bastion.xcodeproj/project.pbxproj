@@ -80,6 +80,7 @@
 				06779EEB2F63D53A0058B67A /* Sources */,
 				06779EEC2F63D53A0058B67A /* Frameworks */,
 				06779EED2F63D53A0058B67A /* Resources */,
+				BB000001AAAA000000000001 /* Bundle bastion-cli */,
 			);
 			buildRules = (
 			);
@@ -171,6 +172,30 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		BB000001AAAA000000000001 /* Bundle bastion-cli */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/bastion-cli/main.swift",
+				"$(SRCROOT)/scripts/build-bastion-cli.sh",
+			);
+			name = "Bundle bastion-cli";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/bastion-cli",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/scripts/build-bastion-cli.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		06779EEB2F63D53A0058B67A /* Sources */ = {
