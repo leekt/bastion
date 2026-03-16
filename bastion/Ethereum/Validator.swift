@@ -40,7 +40,7 @@ extension KernelValidator {
 // MARK: - P256 Validator (Secure Enclave) — Production
 
 /// Kernel v3.3 P256 validator using Apple Secure Enclave.
-nonisolated final class P256Validator: KernelValidator, Sendable {
+nonisolated final class P256Validator: KernelValidator, @unchecked Sendable {
     let validatorAddress: String
 
     private let publicKeyX: Data
@@ -65,12 +65,19 @@ nonisolated final class P256Validator: KernelValidator, Sendable {
     }
 
     func sign(hash: Data) throws -> Data {
-        try signClosure(hash)
+        let rawSig = try signClosure(hash) // 64 bytes: r[32] + s[32]
+        let r = Data(rawSig.prefix(32))
+        let s = P256Curve.normalizeS(Data(rawSig.suffix(32)))
+        return r + s
     }
 
     var dummySignature: Data {
-        // P256: r[32] + s[32] (no v)
-        Data(repeating: 0xff, count: 64)
+        // P256: r[32] + s[32] (no v). Mirror the known-good dummy values used
+        // in the TypeScript Kernel flow so sponsor/paymaster simulation sees the
+        // same signature shape.
+        let r = Data(hexString: "0x635bc6d0f68ff895cae8a288ecf7542a6a9cd555df784b73e1e2ea7e9104b1db")!
+        let s = Data(hexString: "0x15e9015d280cb19527881c625fee43fd3a405d5b0d199a8c8e6589a7381209e4")!
+        return r + s
     }
 }
 
@@ -78,6 +85,54 @@ nonisolated final class P256Validator: KernelValidator, Sendable {
 
 nonisolated enum ValidatorAddress {
     static let ecdsaValidator = "0x845ADb2C711129d4f3966735eD98a9F09fC4cE57"
+    static let p256Validator = "0x9906AB44fF795883C5a725687A2705BE4118B0f3"
+}
+
+// MARK: - P-256 Curve Constants (for s-normalization)
+
+nonisolated enum P256Curve {
+    /// P-256 curve order N
+    static let N = Data(hexString: "FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551")!
+    /// floor(N/2) — signatures must have s <= halfN (OZ P256 requirement)
+    static let halfN = Data(hexString: "7FFFFFFF800000007FFFFFFFFFFFFFFFDE737D56D38BCF4279DCE5617E3192A8")!
+
+    /// If s > N/2, return N - s; otherwise return s unchanged.
+    static func normalizeS(_ s: Data) -> Data {
+        if compareBigEndian(s, halfN) > 0 {
+            return subtractBigEndian(N, s)
+        }
+        return s
+    }
+
+    /// Compare two 32-byte big-endian unsigned integers. Returns -1, 0, or 1.
+    static func compareBigEndian(_ a: Data, _ b: Data) -> Int {
+        let aBytes = [UInt8](a)
+        let bBytes = [UInt8](b)
+        for i in 0..<min(aBytes.count, bBytes.count) {
+            if aBytes[i] < bBytes[i] { return -1 }
+            if aBytes[i] > bBytes[i] { return 1 }
+        }
+        return 0
+    }
+
+    /// Subtract two 32-byte big-endian unsigned integers: a - b.
+    private static func subtractBigEndian(_ a: Data, _ b: Data) -> Data {
+        var result = [UInt8](repeating: 0, count: 32)
+        var borrow: Int = 0
+        let aBytes = [UInt8](a)
+        let bBytes = [UInt8](b)
+        for i in stride(from: 31, through: 0, by: -1) {
+            let diff = Int(aBytes[i]) - Int(bBytes[i]) - borrow
+            if diff < 0 {
+                result[i] = UInt8((diff + 256) & 0xFF)
+                borrow = 1
+            } else {
+                result[i] = UInt8(diff)
+                borrow = 0
+            }
+        }
+        return Data(result)
+    }
 }
 
 // MARK: - Validator Errors

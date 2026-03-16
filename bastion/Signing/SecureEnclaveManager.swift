@@ -20,6 +20,9 @@ nonisolated final class SecureEnclaveManager: Sendable {
 
     // MARK: - Signing (Key B)
 
+    /// Sign an arbitrary message payload using SHA-256 inside the Secure Enclave.
+    /// This is not appropriate for Ethereum signing flows because those requests
+    /// already provide a finalized 32-byte Keccak digest.
     nonisolated func sign(data: Data) throws -> SignResponse {
         let privateKey = try loadOrCreateSigningKey()
 
@@ -36,6 +39,40 @@ nonisolated final class SecureEnclaveManager: Sendable {
             privateKey,
             .ecdsaSignatureMessageX962SHA256,
             data as CFData,
+            &error
+        ) as Data? else {
+            throw error!.takeRetainedValue() as Error
+        }
+
+        let (r, s) = try parseDER(signature)
+
+        return SignResponse(
+            pubkeyX: pubData.subdata(in: 1..<33).hex,
+            pubkeyY: pubData.subdata(in: 33..<65).hex,
+            r: r.hex,
+            s: s.hex
+        )
+    }
+
+    /// Sign a raw 32-byte digest directly with P-256 ECDSA.
+    /// Uses `.ecdsaSignatureDigestX962SHA256` so the Secure Enclave signs the digest as-is.
+    /// This is the correct path for Ethereum message, typed-data, and UserOperation signing.
+    nonisolated func signDigest(hash: Data) throws -> SignResponse {
+        let privateKey = try loadOrCreateSigningKey()
+
+        guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+            throw BastionError.keyNotFound
+        }
+
+        var error: Unmanaged<CFError>?
+        guard let pubData = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
+            throw error!.takeRetainedValue() as Error
+        }
+
+        guard let signature = SecKeyCreateSignature(
+            privateKey,
+            .ecdsaSignatureDigestX962SHA256,
+            hash as CFData,
             &error
         ) as Data? else {
             throw error!.takeRetainedValue() as Error
