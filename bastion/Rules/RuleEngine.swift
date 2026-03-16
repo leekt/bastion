@@ -63,6 +63,23 @@ final class RuleEngine {
         case denied(reasons: [String])
     }
 
+    private enum OperationInspection {
+        case notApplicable
+        case known(targets: [String], spending: [SpendObservation])
+        case opaque(String)
+    }
+
+    private struct SpendObservation {
+        let token: TokenIdentifier
+        let amount: String
+    }
+
+    private enum SpendEvaluation {
+        case noMatch
+        case amount(UInt128)
+        case unsupportedAmount
+    }
+
     /// Validates a signing operation against all configured rules.
     nonisolated func validate(_ request: SignRequest, config: BastionConfig) -> ValidationResult {
         guard config.rules.enabled else {
@@ -70,6 +87,7 @@ final class RuleEngine {
         }
 
         var reasons: [String] = []
+        let inspection = inspect(request.operation)
 
         // 0. Client allowlist
         if let allowedClients = config.rules.allowedClients, !allowedClients.isEmpty {
@@ -106,20 +124,15 @@ final class RuleEngine {
             }
         }
 
-        // 3. Target check (direct `to` address filtering)
+        // 3. Target check (verifying contract or decoded inner call targets)
         if let allowedTargets = config.rules.allowedTargets,
-           let chainId = request.operation.chainId,
-           let target = request.operation.targetAddress {
-            let chainKey = String(chainId)
-            if let chainTargets = allowedTargets[chainKey] {
-                let normalizedTarget = target.lowercased()
-                let allowed = chainTargets.contains { $0.lowercased() == normalizedTarget }
-                if !allowed {
-                    let short = "\(target.prefix(10))..."
-                    reasons.append("Target \(short) not in allowlist for chain \(chainId)")
-                }
-            }
-            // If chain has no target list, all targets are allowed on that chain
+           let chainId = request.operation.chainId {
+            validateTargets(
+                inspection: inspection,
+                allowedTargets: allowedTargets,
+                chainId: chainId,
+                reasons: &reasons
+            )
         }
 
         // 4. Rate limit checks
@@ -130,22 +143,12 @@ final class RuleEngine {
             }
         }
 
-        // 5. Spending limit checks (ETH value for transactions)
-        if let ethValue = request.operation.ethValue, ethValue != "0" {
-            for rule in config.rules.spendingLimits {
-                if case .eth = rule.token {
-                    let spent = stateStore.spentAmount(ruleId: rule.id, windowSeconds: rule.windowSeconds)
-                    let allowance = UInt128(rule.allowance) ?? 0
-                    let txValue = UInt128(ethValue) ?? 0
-                    if spent + txValue > allowance {
-                        reasons.append("ETH spending limit exceeded: \(rule.displayDescription)")
-                    }
-                }
-            }
-        }
-
-        // TODO: ERC-20 spending limit checks require parsing calldata
-        // (transfer/approve selectors) — will be added with ABI decoding
+        // 5. Spending limit checks (native ETH + direct ERC-20 transfers/approvals)
+        validateSpendingLimits(
+            inspection: inspection,
+            rules: config.rules.spendingLimits,
+            reasons: &reasons
+        )
 
         if reasons.isEmpty {
             return .allowed
@@ -160,13 +163,180 @@ final class RuleEngine {
             stateStore.recordRequest(ruleId: rule.id, windowSeconds: rule.windowSeconds)
         }
 
-        // Record ETH spending
-        if let ethValue = request.operation.ethValue, ethValue != "0" {
-            for rule in config.rules.spendingLimits {
-                if case .eth = rule.token {
-                    stateStore.recordSpend(ruleId: rule.id, amount: ethValue, windowSeconds: rule.windowSeconds)
+        guard case .known(_, let observations) = inspect(request.operation) else {
+            return
+        }
+
+        for rule in config.rules.spendingLimits {
+            switch matchedSpendAmount(for: rule, observations: observations) {
+            case .amount(let amount) where amount > 0:
+                stateStore.recordSpend(
+                    ruleId: rule.id,
+                    amount: String(amount),
+                    windowSeconds: rule.windowSeconds
+                )
+            default:
+                continue
+            }
+        }
+    }
+
+    private func inspect(_ operation: SigningOperation) -> OperationInspection {
+        switch operation {
+        case .message:
+            return .notApplicable
+        case .typedData(let data):
+            if let verifyingContract = data.domain.verifyingContract {
+                return .known(targets: [verifyingContract], spending: [])
+            }
+            return .known(targets: [], spending: [])
+        case .userOperation(let op):
+            switch CalldataDecoder.inspect(op) {
+            case .decoded(let executions):
+                return .known(
+                    targets: executions.map(\.to),
+                    spending: spendObservations(from: executions, chainId: op.chainId)
+                )
+            case .opaque(let reason):
+                return .opaque(reason)
+            }
+        }
+    }
+
+    private func spendObservations(
+        from executions: [CalldataDecoder.DecodedExecution],
+        chainId: Int
+    ) -> [SpendObservation] {
+        var observations: [SpendObservation] = []
+
+        for execution in executions {
+            if execution.value != "0" {
+                observations.append(SpendObservation(token: .eth, amount: execution.value))
+            }
+
+            if let tokenOperation = execution.tokenOperation {
+                let token: TokenIdentifier
+                if let usdcAddress = USDCAddresses.address(for: chainId),
+                   usdcAddress.caseInsensitiveCompare(execution.to) == .orderedSame {
+                    token = .usdc
+                } else {
+                    token = .erc20(address: execution.to, chainId: chainId)
+                }
+                observations.append(SpendObservation(token: token, amount: tokenOperation.amount))
+            }
+        }
+
+        return observations
+    }
+
+    private func validateTargets(
+        inspection: OperationInspection,
+        allowedTargets: [String: [String]],
+        chainId: Int,
+        reasons: inout [String]
+    ) {
+        let chainKey = String(chainId)
+        guard let chainTargets = allowedTargets[chainKey], !chainTargets.isEmpty else {
+            return
+        }
+
+        let normalizedAllowed = Set(chainTargets.map(normalizedAddress))
+
+        switch inspection {
+        case .opaque(let reason):
+            reasons.append("Unable to inspect targets for chain \(chainId): \(reason)")
+        case .notApplicable:
+            reasons.append("No inspectable target found for chain \(chainId)")
+        case .known(let targets, _):
+            let normalizedTargets = Set(targets.map(normalizedAddress))
+            guard !normalizedTargets.isEmpty else {
+                reasons.append("No inspectable target found for chain \(chainId)")
+                return
+            }
+
+            for target in normalizedTargets where !normalizedAllowed.contains(target) {
+                reasons.append("Target \(shortAddress(target)) not in allowlist for chain \(chainId)")
+            }
+        }
+    }
+
+    private func validateSpendingLimits(
+        inspection: OperationInspection,
+        rules: [SpendingLimitRule],
+        reasons: inout [String]
+    ) {
+        guard !rules.isEmpty else { return }
+
+        switch inspection {
+        case .opaque(let reason):
+            reasons.append("Unable to inspect UserOperation spending: \(reason)")
+        case .notApplicable:
+            return
+        case .known(_, let observations):
+            for rule in rules {
+                switch matchedSpendAmount(for: rule, observations: observations) {
+                case .noMatch:
+                    continue
+                case .unsupportedAmount:
+                    reasons.append("Unable to safely evaluate \(rule.token.displayName) amount for spending limit")
+                case .amount(let pendingSpend):
+                    guard pendingSpend > 0 else { continue }
+                    guard let allowance = UInt128(rule.allowance) else {
+                        reasons.append("Invalid allowance configured for \(rule.token.displayName)")
+                        continue
+                    }
+
+                    let spent = stateStore.spentAmount(ruleId: rule.id, windowSeconds: rule.windowSeconds)
+                    let (projectedSpend, overflow) = spent.addingReportingOverflow(pendingSpend)
+                    if overflow || projectedSpend > allowance {
+                        reasons.append("\(rule.token.displayName) spending limit exceeded: \(rule.displayDescription)")
+                    }
                 }
             }
         }
+    }
+
+    private func matchedSpendAmount(
+        for rule: SpendingLimitRule,
+        observations: [SpendObservation]
+    ) -> SpendEvaluation {
+        var total: UInt128 = 0
+        var sawMatch = false
+
+        for observation in observations where matches(rule.token, observation.token) {
+            sawMatch = true
+            guard let amount = UInt128(observation.amount) else {
+                return .unsupportedAmount
+            }
+            let (newTotal, overflow) = total.addingReportingOverflow(amount)
+            if overflow {
+                return .unsupportedAmount
+            }
+            total = newTotal
+        }
+
+        return sawMatch ? .amount(total) : .noMatch
+    }
+
+    private func matches(_ ruleToken: TokenIdentifier, _ observedToken: TokenIdentifier) -> Bool {
+        switch (ruleToken, observedToken) {
+        case (.eth, .eth), (.usdc, .usdc):
+            return true
+        case let (.erc20(ruleAddress, ruleChainId), .erc20(observedAddress, observedChainId)):
+            return ruleChainId == observedChainId &&
+                normalizedAddress(ruleAddress) == normalizedAddress(observedAddress)
+        default:
+            return false
+        }
+    }
+
+    private func normalizedAddress(_ address: String) -> String {
+        address.lowercased()
+    }
+
+    private func shortAddress(_ address: String) -> String {
+        let normalized = normalizedAddress(address)
+        guard normalized.count > 12 else { return normalized }
+        return "\(normalized.prefix(10))..."
     }
 }
