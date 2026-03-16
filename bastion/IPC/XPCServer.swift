@@ -79,6 +79,7 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
 
     /// Team ID that signed Bastion.app — only clients signed by the same team are accepted.
     private nonisolated static let requiredTeamID = "926A27BQ7W"
+    private nonisolated static let untrustedDevSignatureStatus = OSStatus(CSSMERR_TP_NOT_TRUSTED)
 
     private nonisolated func verifyClientCodeSignature(connection: NSXPCConnection) -> Bool {
         let pid = connection.processIdentifier
@@ -90,7 +91,13 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
         }
 
         // Require valid code signature
-        guard SecCodeCheckValidity(secCode, [], nil) == errSecSuccess else {
+        let validityStatus = SecCodeCheckValidity(secCode, [], nil)
+#if DEBUG
+        let allowUntrustedDevSignature = validityStatus == Self.untrustedDevSignatureStatus
+#else
+        let allowUntrustedDevSignature = false
+#endif
+        guard validityStatus == errSecSuccess || allowUntrustedDevSignature else {
             return false
         }
 
@@ -102,7 +109,11 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
         }
 
         var info: CFDictionary?
-        guard SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+        guard SecCodeCopySigningInformation(
+            code,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &info
+        ) == errSecSuccess,
               let signingInfo = info as? [String: Any],
               let teamID = signingInfo[kSecCodeInfoTeamIdentifier as String] as? String,
               teamID == Self.requiredTeamID else {
