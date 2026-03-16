@@ -391,6 +391,79 @@ struct UserOpHashTests {
         // With same entrypoint address, v0.8 and v0.9 should produce identical hash
         #expect(EthHashing.userOperationHash(opV08) == EthHashing.userOperationHash(opV09))
     }
+
+    @Test("Odd-length numeric hex formatting does not change hash")
+    func oddLengthNumericHexNormalizes() {
+        let odd = UserOperation(
+            sender: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            nonce: "0x1",
+            callData: Data(),
+            factory: nil,
+            factoryData: nil,
+            verificationGasLimit: "0x1b1b0",
+            callGasLimit: "0x4623",
+            preVerificationGas: "0xc654",
+            maxPriorityFeePerGas: "0xf4240",
+            maxFeePerGas: "0xf424b",
+            paymaster: "0x777777777777AeC03fd955926DbF81597e66834C",
+            paymasterVerificationGasLimit: "0x8a8e",
+            paymasterPostOpGasLimit: "0x1",
+            paymasterData: Data(hexString: "0x010203"),
+            chainId: 11155111,
+            entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+            entryPointVersion: .v0_7
+        )
+
+        let padded = UserOperation(
+            sender: odd.sender,
+            nonce: "0x01",
+            callData: odd.callData,
+            factory: nil,
+            factoryData: nil,
+            verificationGasLimit: "0x01b1b0",
+            callGasLimit: "0x4623",
+            preVerificationGas: "0x0c654",
+            maxPriorityFeePerGas: "0x0f4240",
+            maxFeePerGas: "0x0f424b",
+            paymaster: odd.paymaster,
+            paymasterVerificationGasLimit: "0x08a8e",
+            paymasterPostOpGasLimit: "0x01",
+            paymasterData: odd.paymasterData,
+            chainId: odd.chainId,
+            entryPoint: odd.entryPoint,
+            entryPointVersion: odd.entryPointVersion
+        )
+
+        #expect(EthHashing.userOperationHash(odd) == EthHashing.userOperationHash(padded))
+    }
+}
+
+@Suite("UserOperation Fee Estimation")
+struct UserOperationFeeEstimationTests {
+
+    @Test("Viem-style base fee multiplier")
+    func viemStyleEstimate() throws {
+        let fees = try EthRPC.computeUserOperationFees(
+            baseFeePerGas: 100,
+            maxPriorityFeePerGas: 10,
+            baseFeeMultiplier: 1.2
+        )
+
+        #expect(fees.maxPriorityFeePerGas == "0xa")
+        #expect(fees.maxFeePerGas == "0x82")
+    }
+
+    @Test("Custom multiplier rounds like viem")
+    func customMultiplier() throws {
+        let fees = try EthRPC.computeUserOperationFees(
+            baseFeePerGas: 101,
+            maxPriorityFeePerGas: 5,
+            baseFeeMultiplier: 1.25
+        )
+
+        #expect(fees.maxPriorityFeePerGas == "0x5")
+        #expect(fees.maxFeePerGas == "0x83")
+    }
 }
 
 // MARK: - Kernel Encoding Tests

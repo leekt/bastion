@@ -45,6 +45,7 @@ private func makeMessageRequest(
 private func makeUserOpRequest(
     sender: String = "0x1234567890abcdef1234567890abcdef12345678",
     chainId: Int = 1,
+    callData: Data = Data(),
     requestID: String = UUID().uuidString,
     clientBundleId: String? = nil
 ) -> SignRequest {
@@ -52,7 +53,7 @@ private func makeUserOpRequest(
         operation: .userOperation(UserOperation(
             sender: sender,
             nonce: "0x0",
-            callData: Data(),
+            callData: callData,
             factory: nil,
             factoryData: nil,
             verificationGasLimit: "0x0f4240",
@@ -72,6 +73,32 @@ private func makeUserOpRequest(
         timestamp: Date(),
         clientBundleId: clientBundleId
     )
+}
+
+private func makeKernelSingleCallData(target: String, value: UInt64 = 0, calldata: Data = Data()) -> Data {
+    KernelEncoding.executeCalldata(single: .init(to: target, value: value, data: calldata))
+}
+
+private func makeERC20TransferCalldata(to recipient: String, amount: UInt64) -> Data {
+    Data([0xa9, 0x05, 0x9c, 0xbb]) + paddedAddress(recipient) + uint256(amount)
+}
+
+private func makeERC20ApproveCalldata(spender: String, amount: UInt64) -> Data {
+    Data([0x09, 0x5e, 0xa7, 0xb3]) + paddedAddress(spender) + uint256(amount)
+}
+
+private func paddedAddress(_ address: String) -> Data {
+    Data(repeating: 0, count: 12) + (Data(hexString: address) ?? Data())
+}
+
+private func uint256(_ value: UInt64) -> Data {
+    var data = Data(repeating: 0, count: 32)
+    var remaining = value
+    for index in stride(from: 31, through: 24, by: -1) {
+        data[index] = UInt8(remaining & 0xff)
+        remaining >>= 8
+    }
+    return data
 }
 
 // MARK: - StateStore Rate Limit Tests
@@ -359,9 +386,14 @@ struct RuleEngineValidationTests {
     func allowedTargetsPass() {
         let engine = RuleEngine(keychain: MockKeychainBackend())
         var config = BastionConfig.default
-        config.rules.allowedTargets = ["1": ["0x1234567890abcdef1234567890abcdef12345678"]]
+        let target = "0x9999999999999999999999999999999999999999"
+        config.rules.allowedTargets = ["1": [target]]
         let result = engine.validate(
-            makeUserOpRequest(sender: "0x1234567890abcdef1234567890abcdef12345678", chainId: 1),
+            makeUserOpRequest(
+                sender: "0x1234567890abcdef1234567890abcdef12345678",
+                chainId: 1,
+                callData: makeKernelSingleCallData(target: target)
+            ),
             config: config
         )
         if case .allowed = result { } else {
@@ -375,7 +407,11 @@ struct RuleEngineValidationTests {
         var config = BastionConfig.default
         config.rules.allowedTargets = ["1": ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]
         let result = engine.validate(
-            makeUserOpRequest(sender: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", chainId: 1),
+            makeUserOpRequest(
+                sender: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                chainId: 1,
+                callData: makeKernelSingleCallData(target: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            ),
             config: config
         )
         if case .denied = result { } else {
@@ -422,18 +458,104 @@ struct RuleEngineValidationTests {
         }
     }
 
-    @Test("ETH spending limit: UserOp passes (no explicit ethValue)")
-    func spendingLimitUserOpPasses() {
+    @Test("ETH spending limit: UserOp native transfer denies")
+    func spendingLimitUserOpEthDeny() {
         let keychain = MockKeychainBackend()
         let engine = RuleEngine(keychain: keychain)
         var config = BastionConfig.default
         config.rules.spendingLimits = [
-            SpendingLimitRule(id: "s1", token: .eth, allowance: "2000000000000000000", windowSeconds: 3600)
+            SpendingLimitRule(id: "s1", token: .eth, allowance: "1000000000000000000", windowSeconds: 3600)
         ]
-        // UserOps don't carry explicit ethValue; spending limit check requires calldata parsing (TODO)
-        let result = engine.validate(makeUserOpRequest(), config: config)
-        if case .allowed = result { } else {
-            Issue.record("Expected .allowed for UserOp (spending limits require calldata parsing)")
+        let result = engine.validate(
+            makeUserOpRequest(
+                callData: makeKernelSingleCallData(
+                    target: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    value: 2_000_000_000_000_000_000
+                )
+            ),
+            config: config
+        )
+        if case .denied(let reasons) = result {
+            #expect(reasons.contains { $0.contains("ETH spending limit exceeded") })
+        } else {
+            Issue.record("Expected .denied for ETH spending limit overflow")
+        }
+    }
+
+    @Test("ERC-20 spending limit: UserOp transfer denies")
+    func spendingLimitUserOpERC20Deny() {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+        var config = BastionConfig.default
+        let usdc = USDCAddresses.address(for: 1)!
+        config.rules.spendingLimits = [
+            SpendingLimitRule(id: "usdc", token: .usdc, allowance: "1000000", windowSeconds: 3600)
+        ]
+        let result = engine.validate(
+            makeUserOpRequest(
+                callData: makeKernelSingleCallData(
+                    target: usdc,
+                    calldata: makeERC20TransferCalldata(
+                        to: "0xcccccccccccccccccccccccccccccccccccccccc",
+                        amount: 2_000_000
+                    )
+                )
+            ),
+            config: config
+        )
+        if case .denied(let reasons) = result {
+            #expect(reasons.contains { $0.contains("USDC spending limit exceeded") })
+        } else {
+            Issue.record("Expected .denied for USDC spending limit overflow")
+        }
+    }
+
+    @Test("Record success tracks decoded UserOp spending")
+    func recordSuccessTracksDecodedUserOpSpending() {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+        var config = BastionConfig.default
+        let usdc = USDCAddresses.address(for: 1)!
+        config.rules.spendingLimits = [
+            SpendingLimitRule(id: "eth", token: .eth, allowance: "5000000000000000000", windowSeconds: 3600),
+            SpendingLimitRule(id: "usdc", token: .usdc, allowance: "5000000", windowSeconds: 3600),
+        ]
+
+        let request = makeUserOpRequest(
+            callData: makeKernelSingleCallData(
+                target: usdc,
+                value: 1_000_000_000_000_000_000,
+                calldata: makeERC20ApproveCalldata(
+                    spender: "0xdddddddddddddddddddddddddddddddddddddddd",
+                    amount: 2_000_000
+                )
+            )
+        )
+
+        engine.recordSuccess(request: request, config: config)
+
+        #expect(engine.stateStore.spentAmount(ruleId: "eth", windowSeconds: 3600) == UInt128("1000000000000000000"))
+        #expect(engine.stateStore.spentAmount(ruleId: "usdc", windowSeconds: 3600) == UInt128("2000000"))
+    }
+
+    @Test("Opaque UserOp denies when spending rules are configured")
+    func opaqueUserOpDeniedForSpendingRules() {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+        var config = BastionConfig.default
+        config.rules.spendingLimits = [
+            SpendingLimitRule(id: "eth", token: .eth, allowance: "1000000000000000000", windowSeconds: 3600)
+        ]
+
+        let result = engine.validate(
+            makeUserOpRequest(callData: Data([0xde, 0xad, 0xbe, 0xef])),
+            config: config
+        )
+
+        if case .denied(let reasons) = result {
+            #expect(reasons.contains { $0.contains("Unable to inspect UserOperation spending") })
+        } else {
+            Issue.record("Expected opaque UserOp to be denied when spending rules are configured")
         }
     }
 
@@ -535,6 +657,12 @@ struct DataHexTests {
     func hexWith0xPrefix() {
         let data = Data(hexString: "0xdeadbeef")
         #expect(data == Data([0xDE, 0xAD, 0xBE, 0xEF]))
+    }
+
+    @Test("Odd-length hex string is left-padded")
+    func oddLengthHex() {
+        let data = Data(hexString: "0xabc")
+        #expect(data == Data([0x0A, 0xBC]))
     }
 
     @Test("Empty hex string")
