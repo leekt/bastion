@@ -244,6 +244,16 @@ nonisolated struct SignRequest: Sendable {
     }
 }
 
+nonisolated enum ApprovalMode: Sendable {
+    case policyReview
+    case ruleOverride([String])
+}
+
+nonisolated struct ApprovalRequest: Sendable {
+    let request: SignRequest
+    let mode: ApprovalMode
+}
+
 nonisolated extension Data {
     var hex: String { map { String(format: "%02x", $0) }.joined() }
 

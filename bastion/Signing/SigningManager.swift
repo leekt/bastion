@@ -6,7 +6,7 @@ final class SigningManager {
 
     enum SigningState {
         case idle
-        case pendingApproval(SignRequest)
+        case pendingApproval(ApprovalRequest)
         case signing
     }
 
@@ -39,7 +39,10 @@ final class SigningManager {
             let reason = violations.joined(separator: "; ")
             auditLog.record(AuditEvent(type: .ruleViolation, dataPrefix: dataPrefix, reason: reason))
 
-            state = .pendingApproval(request)
+            state = .pendingApproval(ApprovalRequest(
+                request: request,
+                mode: .ruleOverride(violations)
+            ))
 
             let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                 self.pendingContinuation = continuation
@@ -63,7 +66,10 @@ final class SigningManager {
             }
         } else {
             if config.rules.requireExplicitApproval {
-                state = .pendingApproval(request)
+                state = .pendingApproval(ApprovalRequest(
+                    request: request,
+                    mode: .policyReview
+                ))
 
                 let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
                     self.pendingContinuation = continuation

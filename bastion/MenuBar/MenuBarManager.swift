@@ -29,12 +29,12 @@ final class MenuBarManager {
             switch currentState {
             case .idle:
                 showingRequestID = nil
-            case .pendingApproval(let request):
-                if showingRequestID != request.requestID {
-                    showingRequestID = request.requestID
+            case .pendingApproval(let approval):
+                if showingRequestID != approval.request.requestID {
+                    showingRequestID = approval.request.requestID
                     iconName = "lock.open.fill"
                     SigningRequestPanelManager.shared.showRequest(
-                        request,
+                        approval,
                         onApprove: { [weak self] in
                             self?.signingManager.approveCurrentRequest()
                             self?.showingRequestID = nil
