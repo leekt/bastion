@@ -248,7 +248,10 @@ nonisolated extension Data {
     var hex: String { map { String(format: "%02x", $0) }.joined() }
 
     init?(hexString: String) {
-        let hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
+        var hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
+        if hex.count.isMultiple(of: 2) == false {
+            hex = "0" + hex
+        }
         let len = hex.count / 2
         var data = Data(capacity: len)
         var index = hex.startIndex
