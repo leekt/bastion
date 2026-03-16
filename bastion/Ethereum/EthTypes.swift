@@ -94,6 +94,145 @@ nonisolated struct UserOperation: Codable, Sendable {
     let chainId: Int
     let entryPoint: String              // entrypoint contract address
     let entryPointVersion: EntryPointVersion
+
+    enum CodingKeys: String, CodingKey {
+        case sender
+        case nonce
+        case callData
+        case factory
+        case factoryData
+        case verificationGasLimit
+        case callGasLimit
+        case preVerificationGas
+        case maxPriorityFeePerGas
+        case maxFeePerGas
+        case paymaster
+        case paymasterVerificationGasLimit
+        case paymasterPostOpGasLimit
+        case paymasterData
+        case chainId
+        case entryPoint
+        case entryPointVersion
+    }
+
+    nonisolated init(
+        sender: String,
+        nonce: String,
+        callData: Data,
+        factory: String? = nil,
+        factoryData: Data? = nil,
+        verificationGasLimit: String,
+        callGasLimit: String,
+        preVerificationGas: String,
+        maxPriorityFeePerGas: String,
+        maxFeePerGas: String,
+        paymaster: String? = nil,
+        paymasterVerificationGasLimit: String? = nil,
+        paymasterPostOpGasLimit: String? = nil,
+        paymasterData: Data? = nil,
+        chainId: Int,
+        entryPoint: String,
+        entryPointVersion: EntryPointVersion
+    ) {
+        self.sender = sender
+        self.nonce = nonce
+        self.callData = callData
+        self.factory = factory
+        self.factoryData = factoryData
+        self.verificationGasLimit = verificationGasLimit
+        self.callGasLimit = callGasLimit
+        self.preVerificationGas = preVerificationGas
+        self.maxPriorityFeePerGas = maxPriorityFeePerGas
+        self.maxFeePerGas = maxFeePerGas
+        self.paymaster = paymaster
+        self.paymasterVerificationGasLimit = paymasterVerificationGasLimit
+        self.paymasterPostOpGasLimit = paymasterPostOpGasLimit
+        self.paymasterData = paymasterData
+        self.chainId = chainId
+        self.entryPoint = entryPoint
+        self.entryPointVersion = entryPointVersion
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sender = try container.decode(String.self, forKey: .sender)
+        nonce = try container.decode(String.self, forKey: .nonce)
+        callData = try container.decodeHexData(forKey: .callData)
+        factory = try container.decodeIfPresent(String.self, forKey: .factory)
+        factoryData = try container.decodeHexDataIfPresent(forKey: .factoryData)
+        verificationGasLimit = try container.decode(String.self, forKey: .verificationGasLimit)
+        callGasLimit = try container.decode(String.self, forKey: .callGasLimit)
+        preVerificationGas = try container.decode(String.self, forKey: .preVerificationGas)
+        maxPriorityFeePerGas = try container.decode(String.self, forKey: .maxPriorityFeePerGas)
+        maxFeePerGas = try container.decode(String.self, forKey: .maxFeePerGas)
+        paymaster = try container.decodeIfPresent(String.self, forKey: .paymaster)
+        paymasterVerificationGasLimit = try container.decodeIfPresent(String.self, forKey: .paymasterVerificationGasLimit)
+        paymasterPostOpGasLimit = try container.decodeIfPresent(String.self, forKey: .paymasterPostOpGasLimit)
+        paymasterData = try container.decodeHexDataIfPresent(forKey: .paymasterData)
+        chainId = try container.decode(Int.self, forKey: .chainId)
+        entryPoint = try container.decode(String.self, forKey: .entryPoint)
+        entryPointVersion = try container.decode(EntryPointVersion.self, forKey: .entryPointVersion)
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sender, forKey: .sender)
+        try container.encode(nonce, forKey: .nonce)
+        try container.encodeHexData(callData, forKey: .callData)
+        try container.encodeIfPresent(factory, forKey: .factory)
+        try container.encodeHexDataIfPresent(factoryData, forKey: .factoryData)
+        try container.encode(verificationGasLimit, forKey: .verificationGasLimit)
+        try container.encode(callGasLimit, forKey: .callGasLimit)
+        try container.encode(preVerificationGas, forKey: .preVerificationGas)
+        try container.encode(maxPriorityFeePerGas, forKey: .maxPriorityFeePerGas)
+        try container.encode(maxFeePerGas, forKey: .maxFeePerGas)
+        try container.encodeIfPresent(paymaster, forKey: .paymaster)
+        try container.encodeIfPresent(paymasterVerificationGasLimit, forKey: .paymasterVerificationGasLimit)
+        try container.encodeIfPresent(paymasterPostOpGasLimit, forKey: .paymasterPostOpGasLimit)
+        try container.encodeHexDataIfPresent(paymasterData, forKey: .paymasterData)
+        try container.encode(chainId, forKey: .chainId)
+        try container.encode(entryPoint, forKey: .entryPoint)
+        try container.encode(entryPointVersion, forKey: .entryPointVersion)
+    }
+}
+
+private nonisolated extension KeyedDecodingContainer {
+    func decodeHexData(forKey key: Key) throws -> Data {
+        let value = try decode(String.self, forKey: key)
+        if let data = Data(hexString: value) {
+            return data
+        }
+        throw DecodingError.dataCorruptedError(
+            forKey: key,
+            in: self,
+            debugDescription: "Expected hex string for \(key.stringValue). Base64 is not supported."
+        )
+    }
+
+    func decodeHexDataIfPresent(forKey key: Key) throws -> Data? {
+        guard let value = try decodeIfPresent(String.self, forKey: key) else {
+            return nil
+        }
+        if let data = Data(hexString: value) {
+            return data
+        }
+        throw DecodingError.dataCorruptedError(
+            forKey: key,
+            in: self,
+            debugDescription: "Expected hex string for \(key.stringValue). Base64 is not supported."
+        )
+    }
+}
+
+private nonisolated extension KeyedEncodingContainer {
+    mutating func encodeHexData(_ data: Data, forKey key: Key) throws {
+        try encode("0x" + data.hex, forKey: key)
+    }
+
+    mutating func encodeHexDataIfPresent(_ data: Data?, forKey key: Key) throws {
+        guard let data else { return }
+        try encode("0x" + data.hex, forKey: key)
+    }
 }
 
 // MARK: - AnyCodable (for EIP-712 message values)

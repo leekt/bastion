@@ -466,6 +466,78 @@ struct UserOperationFeeEstimationTests {
     }
 }
 
+@Suite("UserOperation Codable")
+struct UserOperationCodableTests {
+
+    @Test("Decodes hex byte fields and encodes them back as hex")
+    func decodesAndEncodesHexByteFields() throws {
+        let json = """
+        {
+          "sender": "0x1234567890abcdef1234567890abcdef12345678",
+          "nonce": "0x01",
+          "callData": "0xaabbccdd",
+          "factory": "0xd703aaE79538628d27099B8c4f621bE4CCd142d5",
+          "factoryData": "0xc5265d5d",
+          "verificationGasLimit": "0x57749",
+          "callGasLimit": "0x4623",
+          "preVerificationGas": "0xd5d9",
+          "maxPriorityFeePerGas": "0x233f76",
+          "maxFeePerGas": "0x233f83",
+          "paymaster": "0x777777777777AeC03fd955926DbF81597e66834C",
+          "paymasterVerificationGasLimit": "0x8a8e",
+          "paymasterPostOpGasLimit": "0x01",
+          "paymasterData": "0x0102030405",
+          "chainId": 11155111,
+          "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+          "entryPointVersion": "v0.7"
+        }
+        """
+
+        let op = try JSONDecoder().decode(UserOperation.self, from: Data(json.utf8))
+        #expect(op.callData == Data([0xaa, 0xbb, 0xcc, 0xdd]))
+        #expect(op.factoryData == Data(hexString: "0xc5265d5d"))
+        #expect(op.paymasterData == Data(hexString: "0x0102030405"))
+
+        let encoded = try JSONEncoder().encode(op)
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+
+        #expect(object?["callData"] as? String == "0xaabbccdd")
+        #expect(object?["factoryData"] as? String == "0xc5265d5d")
+        #expect(object?["paymasterData"] as? String == "0x0102030405")
+    }
+
+    @Test("Rejects base64 byte fields")
+    func rejectsBase64ByteFields() throws {
+        let json = """
+        {
+          "sender": "0x1234567890abcdef1234567890abcdef12345678",
+          "nonce": "0x01",
+          "callData": "qrvM3Q==",
+          "verificationGasLimit": "0x57749",
+          "callGasLimit": "0x4623",
+          "preVerificationGas": "0xd5d9",
+          "maxPriorityFeePerGas": "0x233f76",
+          "maxFeePerGas": "0x233f83",
+          "chainId": 11155111,
+          "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+          "entryPointVersion": "v0.7"
+        }
+        """
+
+        do {
+            _ = try JSONDecoder().decode(UserOperation.self, from: Data(json.utf8))
+            Issue.record("Expected base64-encoded byte fields to be rejected")
+        } catch let error as DecodingError {
+            switch error {
+            case .dataCorrupted(let context):
+                #expect(context.debugDescription.contains("Base64 is not supported"))
+            default:
+                Issue.record("Expected dataCorrupted error, got \(error)")
+            }
+        }
+    }
+}
+
 // MARK: - Kernel Encoding Tests
 
 @Suite("Kernel v3.3 Encoding")
