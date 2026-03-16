@@ -22,6 +22,16 @@ import Foundation
     func getState(
         withReply reply: @escaping (Data?, Error?) -> Void
     )
+
+    /// Structured signing: accepts a JSON-encoded signing operation.
+    /// operationType: "message" | "typedData" | "userOperation"
+    /// operationData: JSON payload specific to the operation type
+    func signStructured(
+        operationType: String,
+        operationData: Data,
+        requestID: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
 }
 
 let xpcServiceName = "com.bastion.xpc"

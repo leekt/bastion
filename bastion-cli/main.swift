@@ -8,6 +8,7 @@ import Foundation
     func ping(withReply reply: @escaping (Bool) -> Void)
     func getRules(withReply reply: @escaping (Data?, Error?) -> Void)
     func getState(withReply reply: @escaping (Data?, Error?) -> Void)
+    func signStructured(operationType: String, operationData: Data, requestID: String, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
 // MARK: - Helpers
@@ -43,6 +44,39 @@ func getProxy(_ connection: NSXPCConnection) -> BastionXPCProtocol {
         exitWithError("Failed to get XPC proxy. Is Bastion.app running?")
     }
     return proxy
+}
+
+// MARK: - Structured Signing Helper
+
+func callSignStructured(type: String, data: Data) {
+    let requestID = UUID().uuidString
+    let connection = createConnection()
+    let proxy = getProxy(connection)
+    let semaphore = DispatchSemaphore(value: 0)
+
+    proxy.signStructured(operationType: type, operationData: data, requestID: requestID) { responseData, error in
+        defer { semaphore.signal() }
+
+        if let error = error {
+            exitWithError(error.localizedDescription)
+        }
+
+        guard let responseData = responseData else {
+            exitWithError("No response data")
+        }
+
+        guard let response = try? JSONDecoder().decode(SignResponse.self, from: responseData) else {
+            exitWithError("Invalid response format")
+        }
+
+        printJSON(response)
+    }
+
+    if semaphore.wait(timeout: .now() + 65) == .timedOut {
+        exitWithError("Request timed out (65s)")
+    }
+
+    connection.invalidate()
 }
 
 // MARK: - Commands
@@ -81,6 +115,85 @@ func cmdSign(dataHex: String) {
     }
 
     connection.invalidate()
+}
+
+func cmdEthMessage(_ args: ArraySlice<String>) {
+    guard let message = args.first else {
+        exitWithError("Usage: bastion eth message <text>")
+    }
+    let text = args.joined(separator: " ")
+    callSignStructured(type: "message", data: Data(text.utf8))
+}
+
+func cmdEthTypedData(_ args: ArraySlice<String>) {
+    var jsonString: String?
+
+    var i = args.startIndex
+    while i < args.endIndex {
+        if args[i] == "--json" {
+            let next = args.index(after: i)
+            guard next < args.endIndex else {
+                exitWithError("--json requires a value")
+            }
+            jsonString = args[next]
+            break
+        }
+        i = args.index(after: i)
+    }
+
+    guard let json = jsonString else {
+        // Try reading from stdin if no --json flag
+        if let stdinData = try? FileHandle.standardInput.availableData, !stdinData.isEmpty {
+            callSignStructured(type: "typedData", data: stdinData)
+            return
+        }
+        exitWithError("Usage: bastion eth typedData --json '{...}' or pipe JSON to stdin")
+    }
+
+    guard let data = json.data(using: .utf8) else {
+        exitWithError("Invalid JSON string")
+    }
+
+    callSignStructured(type: "typedData", data: data)
+}
+
+func cmdEthUserOp(_ args: ArraySlice<String>) {
+    // Accept either --json '{...}' or stdin
+    var jsonString: String?
+
+    var i = args.startIndex
+    while i < args.endIndex {
+        if args[i] == "--json" {
+            let next = args.index(after: i)
+            guard next < args.endIndex else {
+                exitWithError("--json requires a value")
+            }
+            jsonString = args[next]
+            break
+        }
+        i = args.index(after: i)
+    }
+
+    if let json = jsonString {
+        guard let data = json.data(using: .utf8) else {
+            exitWithError("Invalid JSON string")
+        }
+        callSignStructured(type: "userOperation", data: data)
+    } else if let stdinData = try? FileHandle.standardInput.availableData, !stdinData.isEmpty {
+        callSignStructured(type: "userOperation", data: stdinData)
+    } else {
+        exitWithError("""
+        Usage: bastion eth userOp --json '{...}' or pipe JSON to stdin
+
+        Required JSON fields:
+          sender, nonce, callData, verificationGasLimit, callGasLimit,
+          preVerificationGas, maxPriorityFeePerGas, maxFeePerGas,
+          chainId, entryPoint, entryPointVersion ("v0.7"|"v0.8"|"v0.9")
+
+        Optional: factory, factoryData, paymaster, paymasterVerificationGasLimit,
+                  paymasterPostOpGasLimit, paymasterData
+        """)
+    }
 }
 
 func cmdPubkey() {
@@ -173,15 +286,12 @@ func cmdState() {
             exitWithError(error.localizedDescription)
         }
 
-        guard let responseData = responseData else {
+        guard let responseData = responseData,
+              let json = String(data: responseData, encoding: .utf8) else {
             exitWithError("No response data")
         }
 
-        guard let response = try? JSONDecoder().decode(StateResponse.self, from: responseData) else {
-            exitWithError("Invalid response format")
-        }
-
-        printJSON(response)
+        print(json)
     }
 
     if semaphore.wait(timeout: .now() + 10) == .timedOut {
@@ -205,20 +315,17 @@ struct PublicKeyResponse: Codable {
     let y: String
 }
 
-struct StateResponse: Codable {
-    let todayCount: Int
-    let dailyLimit: Int?
-    let remaining: Int?
-}
+// MARK: - Hex Helpers
 
 extension Data {
     init?(hexString: String) {
-        let len = hexString.count / 2
+        let hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
+        let len = hex.count / 2
         var data = Data(capacity: len)
-        var index = hexString.startIndex
+        var index = hex.startIndex
         for _ in 0..<len {
-            let nextIndex = hexString.index(index, offsetBy: 2)
-            guard let byte = UInt8(hexString[index..<nextIndex], radix: 16) else { return nil }
+            let nextIndex = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<nextIndex], radix: 16) else { return nil }
             data.append(byte)
             index = nextIndex
         }
@@ -233,11 +340,19 @@ let args = CommandLine.arguments
 guard args.count >= 2 else {
     FileHandle.standardError.write(Data("""
     Usage:
-      bastion sign --data <32byte hex>   # Request signing
-      bastion pubkey                      # Get public key
-      bastion status                      # Check app status
-      bastion rules                       # Get current rules
-      bastion state                       # Get signing state (tx count, limits)
+      bastion sign --data <32byte hex>              # Legacy: sign raw hash
+      bastion eth message <text>                    # EIP-191 personal sign
+      bastion eth typedData --json '{...}'          # EIP-712 typed data
+      bastion eth userOp --json '{...}'             # ERC-4337 UserOperation (v0.7+)
+      bastion pubkey                                # Get public key
+      bastion status                                # Check app status
+      bastion rules                                 # Get current rules
+      bastion state                                 # Get signing state
+
+    UserOp JSON fields (all hex-encoded with 0x prefix):
+      sender, nonce, callData, verificationGasLimit, callGasLimit,
+      preVerificationGas, maxPriorityFeePerGas, maxFeePerGas,
+      chainId (int), entryPoint, entryPointVersion ("v0.7"|"v0.8"|"v0.9")
 
     """.utf8))
     exit(1)
@@ -249,6 +364,21 @@ case "sign":
         exitWithError("Usage: bastion sign --data <32byte hex>")
     }
     cmdSign(dataHex: args[3])
+
+case "eth":
+    guard args.count >= 3 else {
+        exitWithError("Usage: bastion eth <message|typedData|tx> ...")
+    }
+    switch args[2] {
+    case "message":
+        cmdEthMessage(args[3...])
+    case "typedData":
+        cmdEthTypedData(args[3...])
+    case "userOp":
+        cmdEthUserOp(args[3...])
+    default:
+        exitWithError("Unknown eth subcommand: \(args[2]). Use: message, typedData, userOp")
+    }
 
 case "pubkey":
     cmdPubkey()
