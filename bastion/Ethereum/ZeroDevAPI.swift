@@ -9,7 +9,11 @@ nonisolated final class ZeroDevAPI: Sendable {
     let projectId: String
 
     init(projectId: String) {
-        self.projectId = projectId
+        if projectId.hasPrefix("0x") {
+            self.projectId = String(projectId.dropFirst(2))
+        } else {
+            self.projectId = projectId
+        }
     }
 
     // MARK: - RPC Endpoint
@@ -43,6 +47,15 @@ nonisolated final class ZeroDevAPI: Sendable {
         )
     }
 
+    /// Get bundler-recommended gas prices for UserOperations.
+    func userOperationGasPrice(chainId: Int) async throws -> UserOperationGasPriceResult {
+        try await jsonRPC(
+            method: "pimlico_getUserOperationGasPrice",
+            params: [] as [String],
+            chainId: chainId
+        )
+    }
+
     /// Send a signed UserOperation to the bundler.
     func sendUserOperation(
         _ op: UserOperationRPC,
@@ -61,7 +74,7 @@ nonisolated final class ZeroDevAPI: Sendable {
         userOpHash: String,
         chainId: Int
     ) async throws -> UserOperationReceipt? {
-        try await jsonRPC(
+        try await jsonRPCOptional(
             method: "eth_getUserOperationReceipt",
             params: [userOpHash],
             chainId: chainId
@@ -109,6 +122,13 @@ nonisolated final class ZeroDevAPI: Sendable {
         )
         request.httpBody = try JSONEncoder().encode(body)
 
+        #if DEBUG
+        if method == "eth_sendUserOperation" || method == "eth_estimateUserOperationGas",
+           let jsonStr = String(data: request.httpBody!, encoding: .utf8) {
+            print("[\(method)] JSON payload:\n\(jsonStr)")
+        }
+        #endif
+
         let (data, response) = try await URLSession.shared.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -131,6 +151,44 @@ nonisolated final class ZeroDevAPI: Sendable {
         }
 
         return result
+    }
+
+    private func jsonRPCOptional<T: Decodable>(
+        method: String,
+        params: [any Encodable],
+        chainId: Int
+    ) async throws -> T? {
+        let url = rpcURL(chainId: chainId)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body = JSONRPCRequest(
+            jsonrpc: "2.0",
+            id: 1,
+            method: method,
+            params: params.map { AnyCodableRPC($0) }
+        )
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ZeroDevError.networkError("Invalid response")
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            let body = String(data: data, encoding: .utf8) ?? "unknown"
+            throw ZeroDevError.httpError(httpResponse.statusCode, body)
+        }
+
+        let rpcResponse = try JSONDecoder().decode(JSONRPCResponse<T>.self, from: data)
+
+        if let error = rpcResponse.error {
+            throw ZeroDevError.rpcError(error.code, error.message)
+        }
+
+        return rpcResponse.result
     }
 }
 
@@ -201,6 +259,17 @@ nonisolated struct GasEstimate: Codable, Sendable {
     let preVerificationGas: String
     let paymasterVerificationGasLimit: String?
     let paymasterPostOpGasLimit: String?
+}
+
+nonisolated struct UserOperationGasPriceTier: Codable, Sendable {
+    let maxFeePerGas: String
+    let maxPriorityFeePerGas: String
+}
+
+nonisolated struct UserOperationGasPriceResult: Codable, Sendable {
+    let slow: UserOperationGasPriceTier
+    let standard: UserOperationGasPriceTier
+    let fast: UserOperationGasPriceTier
 }
 
 nonisolated struct UserOperationReceipt: Codable, Sendable {
@@ -300,4 +369,3 @@ nonisolated enum KernelV3_3 {
     /// ERC-1967 proxy init code hash for Kernel v3.3 factory (for CREATE2 address computation)
     static let initCodeHash = "0xc452397f1e7518f8cea0566ac057e243bb1643f6298aba8eec8cdee78ee3b3dd"
 }
-
