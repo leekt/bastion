@@ -17,13 +17,11 @@ final class SigningManager {
     private let authManager = AuthManager.shared
     private let ruleEngine = RuleEngine.shared
     private let auditLog = AuditLog.shared
-    private let stateStore = StateStore.shared
 
     private init() {}
 
-    func processSignRequest(data: Data, requestID: String) async throws -> SignResponse {
-        let request = SignRequest(data: data, requestID: requestID, timestamp: Date())
-        let dataPrefix = String(data.prefix(8).hex.prefix(16))
+    func processSignRequest(_ request: SignRequest) async throws -> SignResponse {
+        let dataPrefix = request.requestID.prefix(8).description
 
         let config = ruleEngine.config
 
@@ -31,27 +29,16 @@ final class SigningManager {
         var requiresMasterKey = false
         var violations: [String] = []
 
-        // Rule check
         let validation = ruleEngine.validate(request, config: config)
         if case .denied(let reasons) = validation {
             requiresMasterKey = true
             violations.append(contentsOf: reasons)
         }
 
-        // Rate limit check
-        if let limit = config.rules.maxTxPerDayWithoutAuth {
-            let todayCount = stateStore.todayCount()
-            if todayCount >= limit {
-                requiresMasterKey = true
-                violations.append("Daily limit reached (\(todayCount)/\(limit))")
-            }
-        }
-
         if requiresMasterKey {
             let reason = violations.joined(separator: "; ")
             auditLog.record(AuditEvent(type: .ruleViolation, dataPrefix: dataPrefix, reason: reason))
 
-            // Show approval popup so user can see what rule is being broken
             state = .pendingApproval(request)
 
             let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
@@ -65,7 +52,6 @@ final class SigningManager {
                 throw BastionError.userDenied
             }
 
-            // Master key auth (biometric) — non-negotiable for rule overrides
             do {
                 try await authManager.authenticate(
                     policy: .biometricOrPasscode,
@@ -76,7 +62,6 @@ final class SigningManager {
                 throw BastionError.authFailed
             }
         } else {
-            // Within rules — check if explicit approval popup is configured
             if config.rules.requireExplicitApproval {
                 state = .pendingApproval(request)
 
@@ -92,7 +77,6 @@ final class SigningManager {
                 }
             }
 
-            // Normal auth policy (could be .open for fully autonomous signing)
             if config.authPolicy != .open {
                 do {
                     try await authManager.authenticate(
@@ -110,11 +94,12 @@ final class SigningManager {
         state = .signing
         defer { state = .idle }
 
-        let result = try seManager.sign(data: data)
+        let hash = request.data  // 32-byte keccak256 hash computed from the operation
+        let result = try seManager.sign(data: hash)
 
-        // Record success and increment tamper-proof counter
+        // Record success — update rate limit and spending counters
         auditLog.record(AuditEvent(type: .signSuccess, dataPrefix: dataPrefix))
-        stateStore.increment()
+        ruleEngine.recordSuccess(request: request, config: config)
 
         return result
     }
