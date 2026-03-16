@@ -66,7 +66,7 @@ struct RulesSettingsView: View {
             icon: "shield.lefthalf.filled.badge.checkmark",
             accent: Color(red: 0.82, green: 0.46, blue: 0.16),
             title: "Bastion Rules",
-            subtitle: "Define who can request signatures, when they can request them, and how aggressively Bastion should interrupt."
+            subtitle: "Control when Bastion can sign autonomously, which clients and targets are trusted, and when manual review becomes mandatory."
         ) {
             HStack(spacing: 12) {
                 SummaryPill(
@@ -98,7 +98,7 @@ struct RulesSettingsView: View {
             icon: "lock.shield",
             accent: Color(red: 0.13, green: 0.38, blue: 0.60),
             title: "Authentication",
-            subtitle: "This policy applies after the request clears the configured rules."
+            subtitle: "Allowed requests use this auth policy. Rule overrides still require approval plus owner authentication."
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 Picker("Auth Policy", selection: authPolicyBinding) {
@@ -123,7 +123,7 @@ struct RulesSettingsView: View {
             icon: "slider.horizontal.3",
             accent: Color(red: 0.18, green: 0.45, blue: 0.34),
             title: "Access Controls",
-            subtitle: "Scope which chains, accounts, and time windows can request autonomous signing."
+            subtitle: "Scope autonomous signing by local time, chain, decoded destination targets, and smart-account activity."
         ) {
             VStack(alignment: .leading, spacing: 20) {
                 Toggle("Enable rule enforcement", isOn: rulesEnabledBinding)
@@ -213,7 +213,7 @@ struct RulesSettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     sectionLabel("Allowed Targets")
 
-                    Text("Matches inner execution targets decoded from Kernel execute() calldata on each chain.")
+                    Text("Matches decoded inner-call destinations from Kernel execute() calldata. If Bastion cannot inspect a UserOp while this allowlist is enabled, the request is blocked.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -271,7 +271,7 @@ struct RulesSettingsView: View {
             icon: "desktopcomputer.trianglebadge.exclamationmark",
             accent: Color(red: 0.48, green: 0.34, blue: 0.16),
             title: "Allowed XPC Clients",
-            subtitle: "By default any binary signed by your team can connect. Add bundle IDs here if you want a tighter allowlist."
+            subtitle: "Same-team code signing is always required. Add bundle IDs here if you want Bastion to trust only specific clients."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 if allowedClients.isEmpty {
@@ -329,7 +329,7 @@ struct RulesSettingsView: View {
             icon: "speedometer",
             accent: Color(red: 0.55, green: 0.29, blue: 0.18),
             title: "Rate Limits",
-            subtitle: "Throttle how frequently Bastion may sign before it forces a manual override."
+            subtitle: "Throttle autonomous signing frequency before Bastion escalates to manual approval."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 if draftConfig.rules.rateLimits.isEmpty {
@@ -392,13 +392,13 @@ struct RulesSettingsView: View {
             icon: "banknote",
             accent: Color(red: 0.21, green: 0.47, blue: 0.33),
             title: "Spending Limits",
-            subtitle: "Direct native transfers plus ERC-20 transfer/approve/transferFrom calls are enforced from decoded Kernel execute() calldata."
+            subtitle: "Bastion enforces direct native value plus ERC-20 transfer, approve, and transferFrom amounts decoded from Kernel execute() calldata."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(Color(red: 0.72, green: 0.43, blue: 0.11))
-                    Text("Complex protocol calls can still move assets indirectly. Treat these limits as direct-call enforcement, not full semantic simulation.")
+                    Text("Complex protocol calls can still move assets indirectly. Treat these budgets as direct-call enforcement, then pair them with target allowlists or explicit approval for protocol-heavy flows.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -493,7 +493,7 @@ struct RulesSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(statusIsError ? .red : .green)
                 } else {
-                    Text("Hidden config fields are preserved unless this screen explicitly edits them.")
+                    Text("Saving updates the Keychain-backed policy in place. Existing fields stay intact unless this screen edits them.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
