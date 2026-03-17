@@ -15,11 +15,21 @@ import Foundation
         withReply reply: @escaping (Bool) -> Void
     )
 
+    func openUI(
+        target: String,
+        withReply reply: @escaping (Bool, Error?) -> Void
+    )
+
     func getRules(
         withReply reply: @escaping (Data?, Error?) -> Void
     )
 
     func getState(
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    func prepareSelfUserOperation(
+        requestData: Data,
         withReply reply: @escaping (Data?, Error?) -> Void
     )
 
