@@ -10,3 +10,6 @@ build/
 # Debug artifacts
 bastion-debug.log
 bastion-init-marker.txt
+
+# Release artifacts
+dist/

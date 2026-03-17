@@ -14,11 +14,19 @@
 			remoteGlobalIDString = 06779EEE2F63D53A0058B67A;
 			remoteInfo = bastion;
 		};
+		CC000008AAAA000000000008 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 06779EE72F63D53A0058B67A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CC000004AAAA000000000004;
+			remoteInfo = "bastion-helper";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		06779EEF2F63D53A0058B67A /* bastion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = bastion.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA000002AAAA000000000002 /* bastionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = bastionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC000001AAAA000000000001 /* bastion-helper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "bastion-helper.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -49,6 +57,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC000002AAAA000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -66,6 +81,7 @@
 			children = (
 				06779EEF2F63D53A0058B67A /* bastion.app */,
 				AA000002AAAA000000000002 /* bastionTests.xctest */,
+				CC000001AAAA000000000001 /* bastion-helper.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -85,6 +101,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				CC000009AAAA000000000009 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				06779EF12F63D53A0058B67A /* bastion */,
@@ -117,6 +134,28 @@
 			productReference = AA000002AAAA000000000002 /* bastionTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		CC000004AAAA000000000004 /* bastion-helper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC000005AAAA000000000005 /* Build configuration list for PBXNativeTarget "bastion-helper" */;
+			buildPhases = (
+				CC000003AAAA000000000003 /* Sources */,
+				CC000002AAAA000000000002 /* Frameworks */,
+				CC00000AAAAA00000000000A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				06779EF12F63D53A0058B67A /* bastion */,
+			);
+			name = "bastion-helper";
+			packageProductDependencies = (
+			);
+			productName = "bastion-helper";
+			productReference = CC000001AAAA000000000001 /* bastion-helper.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -133,6 +172,9 @@
 					AA000005AAAA000000000005 = {
 						CreatedOnToolsVersion = 26.3;
 						TestTargetID = 06779EEE2F63D53A0058B67A;
+					};
+					CC000004AAAA000000000004 = {
+						CreatedOnToolsVersion = 26.3;
 					};
 				};
 			};
@@ -151,6 +193,7 @@
 			projectRoot = "";
 			targets = (
 				06779EEE2F63D53A0058B67A /* bastion */,
+				CC000004AAAA000000000004 /* bastion-helper */,
 				AA000005AAAA000000000005 /* bastionTests */,
 			);
 		};
@@ -165,6 +208,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		AA000007AAAA000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC00000AAAAA00000000000A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -212,6 +262,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CC000003AAAA000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -219,6 +276,11 @@
 			isa = PBXTargetDependency;
 			target = 06779EEE2F63D53A0058B67A /* bastion */;
 			targetProxy = AA000001AAAA000000000001 /* PBXContainerItemProxy */;
+		};
+		CC000009AAAA000000000009 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CC000004AAAA000000000004 /* bastion-helper */;
+			targetProxy = CC000008AAAA000000000008 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -355,6 +417,7 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -390,6 +453,7 @@
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -459,6 +523,76 @@
 			};
 			name = Release;
 		};
+		CC000006AAAA000000000006 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = bastion/bastion.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 926A27BQ7W;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSUIElement = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -DBASTION_HELPER";
+				PRODUCT_BUNDLE_IDENTIFIER = taek.bastion.helper;
+				PRODUCT_NAME = "bastion-helper";
+				REGISTER_APP_GROUPS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "bastion/Crypto/bastion-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		CC000007AAAA000000000007 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = bastion/bastion.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 926A27BQ7W;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = NO;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSUIElement = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -DBASTION_HELPER";
+				PRODUCT_BUNDLE_IDENTIFIER = taek.bastion.helper;
+				PRODUCT_NAME = "bastion-helper";
+				REGISTER_APP_GROUPS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "bastion/Crypto/bastion-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -485,6 +619,15 @@
 			buildConfigurations = (
 				AA000011AAAA000000000011 /* Debug */,
 				AA000012AAAA000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC000005AAAA000000000005 /* Build configuration list for PBXNativeTarget "bastion-helper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC000006AAAA000000000006 /* Debug */,
+				CC000007AAAA000000000007 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

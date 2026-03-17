@@ -1,6 +1,6 @@
 # Bastion
 
-Hardware-backed signing guard for AI agents on macOS. Bastion uses Apple Secure Enclave to hold private keys and macOS Keychain for tamper-resistant state storage. Agents interact through a CLI that communicates with the app over XPC. Requests that stay within policy can be signed autonomously; requests outside policy require explicit approval plus owner authentication.
+Hardware-backed signing guard for AI agents on macOS. Bastion uses Apple Secure Enclave to hold private keys and macOS Keychain for tamper-resistant state storage. Agents interact through a CLI that communicates with the app over XPC. Requests are reviewed against per-client policy, and rule overrides require explicit approval plus owner authentication.
 
 ## Why
 
@@ -8,17 +8,20 @@ AI agents that interact with blockchains need to sign transactions. Giving an ag
 
 - The private key **never leaves the Secure Enclave**. It cannot be exported, copied, or read — even by Bastion itself.
 - Every signing request goes through a **rule engine** (rate limits, allowed hours, whitelist).
-- Within rules: signing is **silent and autonomous** — no user interaction needed.
-- Breaking rules: requires **explicit approval plus owner authentication** (biometric or passcode).
+- Every request is checked against a **per-client rule set** before signing.
+- Matching requests can follow the configured approval/auth policy for that client.
+- Breaking rules requires **explicit approval plus owner authentication** (biometric or passcode).
 - Config and state are in **macOS Keychain** — agents cannot read, modify, or delete them.
 - A tamper-proof **audit log** records every request, approval, and denial.
 
 ## Architecture
 
+Service lifecycle notes and the target migration path are documented in [docs/SERVICE_LIFECYCLE.md](./docs/SERVICE_LIFECYCLE.md). The broader release execution plan is in [PLAN.md](./PLAN.md). The concrete release/notarization/install flow is in [docs/RELEASE.md](./docs/RELEASE.md).
+
 ```
 Agent (Python / TypeScript / any process)
   |
-  |  subprocess: bastion eth userOp --json-file /tmp/userop.json
+  |  subprocess: bastion eth userOp --op 0xTarget,0,0x
   v
 bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
                                         |
@@ -56,13 +59,16 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 | XPC code signing | IPC channel | Rejects connections from binaries not signed by the same team |
 | Rule engine | Operational limits | Rate limits, time windows, address whitelist |
 | Owner auth | Rule changes + overrides | `LAContext` with `.biometricOrPasscode` for config saves and rule violations |
-| Audit log | Accountability | Append-only JSON Lines, no delete API |
+| Audit log | Accountability | Request-level JSON log with per-request timeline (`Signed -> Submitted -> Confirmed`) |
 
 ### What agents can do
 
-- **Sign raw data** (`bastion sign`) — within rules, silently; outside rules, with user biometric override
-- **Sign Ethereum operations** (`bastion eth message|typedData|userOp`) — structured signing with calldata decoding
-  Use `--json-file` for `typedData` and `userOp` payloads; the documented examples are in `docs/CLI_REQUEST_EXAMPLES.md`.
+- **Sign raw data** (`bastion sign`) — controlled by a simple on/off raw-message policy
+- **Sign Ethereum operations** (`bastion eth message|typedData|userOp`) — structured signing with operation-specific policy:
+  - raw / personal-sign: toggle only
+  - EIP-712 typed data: domain + primary-type + JSON subset matching
+  - UserOperation: chain, target, rate, and spending controls
+  Prefer `bastion eth userOp --op <target,value,data>` for normal use. Bastion builds the Kernel `execute()` calldata and final ERC-4337 UserOperation inside the app. Use `--json-file` only for advanced explicit UserOperation debugging. The documented examples are in `docs/CLI_REQUEST_EXAMPLES.md`.
 - **Read public key** (`bastion pubkey`) — always allowed
 - **Read rules** (`bastion rules`) — always allowed
 - **Read state** (`bastion state`) — check remaining quota per rate limit window
@@ -80,14 +86,12 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 
 ### Signing key
 
-| | Key B ("Signing Key") |
-|---|---|
-| **Tag** | `com.bastion.signingkey` |
-| **Purpose** | Sign user data (ECDSA P-256 / secp256r1) |
-| **SE access control** | `.privateKeyUsage` (silent — no auth prompt) |
-| **Auth gate** | Software-enforced via rule engine + `LAContext` |
+| Scope | Key tag | Notes |
+|---|---|---|
+| Default profile | `com.bastion.signingkey` | Used before a dedicated client profile exists |
+| Client profile | `com.bastion.signingkey.client.<uuid>` | Each client gets its own Secure Enclave key and derived account address |
 
-The key's SE access control is intentionally open so signing doesn't prompt. The real gate is the rule engine and `LAContext` authentication before the SE call. Auth policy is configurable (open, passcode, biometric, biometricOrPasscode).
+Every key uses `.privateKeyUsage` in the Secure Enclave so the hardware signing operation itself stays silent. The real gate is Bastion policy plus `LAContext` authentication before the SE call. Auth policy is configurable per client (open, passcode, biometric, biometricOrPasscode).
 
 ### Signing flow
 
@@ -105,8 +109,8 @@ The key's SE access control is intentionally open so signing doesn't prompt. The
    - Spending limits (direct native/ERC-20 amounts from decoded calldata)
 
    If all rules pass:
-     6a. Optional explicit approval popup (shows decoded calldata)
-     6b. Auth per policy (.open skips, .biometric prompts, etc.)
+     6a. Show the approval popup for the request
+     6b. Apply the configured client auth policy (.open skips owner auth, `.biometric` prompts, etc.)
      6c. Sign with Secure Enclave Key B
 
    If any rule fails:
@@ -137,10 +141,16 @@ Audit log (display only, not security-critical): `~/Library/Application Support/
 
 ## Rule settings and approval UI
 
-- **Rules Settings** is split into Authentication, Access Controls, Allowed XPC Clients, Rate Limits, and Spending Limits.
-- **Allowed Targets** matches decoded inner destinations from Kernel `execute()` calldata, not just the smart-account address.
-- **Spending Limits** enforce direct native value plus ERC-20 `transfer`, `approve`, and `transferFrom` amounts decoded from UserOps.
-- **Approval Popup** shows request metadata, the exact digest to sign, decoded action summaries, and rule-override reasons when Bastion blocks a request.
+- **Rules Settings** uses a left sidebar with `Default` plus per-client profiles.
+- **Default** is the template copied into a new client profile on first connection.
+- **Each client page** edits its own auth policy, signing rules, Secure Enclave key, and account address.
+- **App Preferences** live under `Default` and include the ZeroDev project ID plus per-chain RPC endpoints used for `eth_call`, nonce lookup, and fee estimation.
+- **Raw / Message Signing** is a simple allow/deny toggle.
+- **EIP-712 Signing** supports domain allowlists plus JSON subset matching for struct values, so fields can be pinned or hardened.
+- **UserOperation Policy** keeps the calldata-aware chain, target, rate-limit, and spending-limit controls.
+- **Audit History** is a separate window that shows one row per request, with full payload detail plus a timeline of `Signed`, `Submitted`, `Confirmed`, `Failed`, or `Pending`.
+- **macOS notifications** are used for UserOperation submission results. Clicking the notification opens `Audit History`.
+- **Approval Popup** is compact by design and surfaces the request mode, client/account, digest, decoded action summary, and rule-override reasons.
 
 ---
 
@@ -183,7 +193,7 @@ bastion.xcodeproj
 │   │   └── XPCServer.swift            # XPC listener + code signing verification
 │   ├── UI/
 │   │   ├── SigningRequestView.swift   # Approval popup with decoded calldata
-│   │   └── RulesSettingsView.swift    # Full settings UI (rules, targets, spending)
+│   │   └── RulesSettingsView.swift    # Sidebar settings UI + per-client policy pages + audit history
 │   └── Utilities/
 │       ├── KeychainStore.swift
 │       ├── CLIInstaller.swift
@@ -221,28 +231,47 @@ These should already be set:
 2. Run — a lock icon appears in the menu bar
 3. On first launch the app:
    - Creates Secure Enclave signing key
-   - Installs `~/Library/LaunchAgents/com.bastion.xpc.plist` for XPC
-   - Attempts to symlink `bastion-cli` to `/usr/local/bin/bastion`
+   - Registers the bundled `SMAppService` agent for XPC
+   - Starts the dedicated background helper at `bastion.app/Contents/Helpers/bastion-helper.app`
+   - Attempts to symlink `bastion-cli` to `/usr/local/bin/bastion` when running from `/Applications` or `~/Applications`
    - Bundles the CLI at `bastion.app/Contents/MacOS/bastion-cli`
 
-### 4. Activate the LaunchAgent
-
-The app writes the plist automatically. To activate:
+For day-to-day development, prefer the signed rebuild helper instead of raw `xcodebuild`. It rebuilds to a fixed DerivedData path, copies the signed app to `~/Applications/Bastion Dev.app`, unregisters stale Bastion app bundles, kills stale relay/helper processes, registers the bundled `SMAppService` agent from that stable install path, kickstarts the helper, and verifies the CLI/XPC path cleanly:
 
 ```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bastion.xpc.plist
+./scripts/dev-rebuild-signed.sh
 ```
 
-Verify it's loaded:
+This helper also disables Xcode's debug dylib / previews path for the development build (`ENABLE_DEBUG_DYLIB=NO`, `ENABLE_PREVIEWS=NO`). That reduces extra code-sign steps and avoids stale-service / duplicate-process XPC issues during iteration. If notifications ever seem to open the wrong build, rerun this script.
+
+For release packaging, notarization, installation, and manifest generation, use:
+
+```bash
+./scripts/release-build.sh
+./scripts/release-notarize.sh
+./scripts/release-create-dmg.sh
+./scripts/release-generate-manifest.sh
+./scripts/release-install.sh
+```
+
+### 4. Verify the registered background service
+
+The app now uses `ServiceManagement` (`SMAppService`) rather than a manually bootstrapped LaunchAgent plist. After running `./scripts/dev-rebuild-signed.sh`, verify the registered job:
 
 ```bash
 launchctl print gui/$(id -u)/com.bastion.xpc
 ```
 
+You should see a running job managed by `com.apple.xpc.ServiceManagement`. The program identifier should point at the embedded helper:
+
+```text
+Contents/Helpers/bastion-helper.app/Contents/MacOS/bastion-helper
+```
+
 ### 5. Install the CLI manually (if auto-install failed)
 
 ```bash
-BASTION_APP=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Build/Products/*/bastion.app" -type d | head -1)
+BASTION_APP="$HOME/Applications/Bastion Dev.app"
 sudo ln -sf "$BASTION_APP/Contents/MacOS/bastion-cli" /usr/local/bin/bastion
 ```
 
@@ -272,14 +301,21 @@ bastion sign --data a3f1c2d4e5b67890abcdef1234567890abcdef1234567890abcdef123456
 # Ethereum structured signing
 bastion eth message "Hello, world!"
 bastion eth typedData --json-file /tmp/typed-data.json
+bastion eth userOp --op 0x0000000000000000000000000000000000000001,0,0x
+bastion eth userOp --submit --op 0x0000000000000000000000000000000000000001,0,0x
 bastion eth userOp --json-file /tmp/userop.json
+bastion eth userOp --submit --json-file /tmp/userop.json
 ```
 
 All output is JSON on stdout. Errors go to stderr with exit code 1.
 
 For structured requests, `--json-file` is the most reliable path for large JSON payloads.
 
-For `bastion eth userOp`, the byte fields `callData`, `factoryData`, and `paymasterData` must be passed as `0x`-prefixed hex strings. Base64-encoded values are rejected.
+For `bastion eth userOp --op`, each action is `target,value,data`, where `value` is decimal or `0x` hex and `data` is `0x`-prefixed hex.
+
+For `bastion eth userOp --json-file`, the byte fields `callData`, `factoryData`, and `paymasterData` must be passed as `0x`-prefixed hex strings. Base64-encoded values are rejected.
+
+If `--submit` is set, Bastion will sign the UserOperation, submit it to the ZeroDev bundler after approval, and return a `submission` object with the immediate send result. The ZeroDev project ID defaults to the value stored in `Default -> App Preferences`. Chain RPC endpoints for `eth_call`/fee lookup are also read from `Default -> App Preferences`. Receipt updates are written to `Audit History` asynchronously and grouped under the same request row.
 
 See `docs/CLI_REQUEST_EXAMPLES.md` for validated `message`, `typedData`, and `userOp` examples.
 
@@ -330,9 +366,8 @@ xcodebuild -project bastion.xcodeproj -scheme bastion test
 ## Uninstall
 
 ```bash
-# Remove LaunchAgent
+# Stop the registered background service
 launchctl bootout gui/$(id -u)/com.bastion.xpc
-rm ~/Library/LaunchAgents/com.bastion.xpc.plist
 
 # Remove CLI symlink
 sudo rm /usr/local/bin/bastion
@@ -341,7 +376,7 @@ sudo rm /usr/local/bin/bastion
 rm -rf ~/Library/Application\ Support/Bastion/
 
 # Remove the app
-# (drag from /Applications to Trash, or delete build products)
+# (drag /Applications/Bastion.app or ~/Applications/Bastion\ Dev.app to Trash)
 ```
 
 Secure Enclave keys persist in the hardware keychain. To delete them, use Keychain Access.app and search for `com.bastion.signingkey`.
