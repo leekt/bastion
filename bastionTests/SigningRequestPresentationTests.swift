@@ -5,6 +5,18 @@ import Testing
 @Suite("Signing Request Presentation")
 struct SigningRequestPresentationTests {
 
+    private func makeContext(bundleId: String?) -> ClientSigningContext {
+        ClientSigningContext(
+            bundleId: bundleId,
+            profileId: bundleId,
+            profileLabel: nil,
+            authPolicy: .biometricOrPasscode,
+            keyTag: "com.bastion.signingkey.test",
+            accountAddress: "0x1234567890abcdef1234567890abcdef12345678",
+            rules: .default
+        )
+    }
+
     @Test("Policy review message request uses within-policy copy")
     func policyReviewMessageRequest() {
         let request = SignRequest(
@@ -14,13 +26,13 @@ struct SigningRequestPresentationTests {
             clientBundleId: "com.example.agent"
         )
         let presentation = SigningRequestPresentation(
-            approval: ApprovalRequest(request: request, mode: .policyReview)
+            approval: ApprovalRequest(request: request, mode: .policyReview, clientContext: makeContext(bundleId: request.clientBundleId))
         )
 
         #expect(presentation.approvalModeLabel == "Within Policy")
         #expect(presentation.approveLabel == "Approve")
-        #expect(presentation.requestKindLabel == "Message")
-        #expect(presentation.operationTitle == "Personal Message")
+        #expect(presentation.requestKindLabel == "Raw Message")
+        #expect(presentation.operationTitle == "Raw Message Review")
         #expect(presentation.headerIcon == "checkmark.shield.fill")
         #expect(presentation.shortClientLabel == "agent")
     }
@@ -36,7 +48,8 @@ struct SigningRequestPresentationTests {
         let presentation = SigningRequestPresentation(
             approval: ApprovalRequest(
                 request: request,
-                mode: .ruleOverride(["Outside allowed hours", "Target 0x1234... not in allowlist"])
+                mode: .ruleOverride(["Outside allowed hours", "Target 0x1234... not in allowlist"]),
+                clientContext: makeContext(bundleId: request.clientBundleId)
             )
         )
 
@@ -80,7 +93,7 @@ struct SigningRequestPresentationTests {
             clientBundleId: "com.bastion.cli"
         )
         let presentation = SigningRequestPresentation(
-            approval: ApprovalRequest(request: request, mode: .policyReview)
+            approval: ApprovalRequest(request: request, mode: .policyReview, clientContext: makeContext(bundleId: request.clientBundleId))
         )
 
         let preview = presentation.typedDataMessagePreview
@@ -119,12 +132,49 @@ struct SigningRequestPresentationTests {
             clientBundleId: "com.example.worker"
         )
         let presentation = SigningRequestPresentation(
-            approval: ApprovalRequest(request: request, mode: .policyReview)
+            approval: ApprovalRequest(request: request, mode: .policyReview, clientContext: makeContext(bundleId: request.clientBundleId))
         )
 
         #expect(presentation.requestKindLabel == "UserOp")
-        #expect(presentation.operationTitle == "UserOperation Review")
-        #expect(presentation.operationSubtitle.contains("decoded Kernel execution details"))
+        #expect(presentation.operationTitle == "UserOp Review")
+        #expect(presentation.operationSubtitle.contains("decoded execution details"))
         #expect(presentation.shortClientLabel == "worker")
+    }
+
+    @Test("Submitting UserOperation updates approval copy")
+    func submittingUserOperationPresentation() {
+        let op = UserOperation(
+            sender: "0x1234567890abcdef1234567890abcdef12345678",
+            nonce: "0x1",
+            callData: Data(),
+            factory: nil,
+            factoryData: nil,
+            verificationGasLimit: "0x0f4240",
+            callGasLimit: "0x0f4240",
+            preVerificationGas: "0x5208",
+            maxPriorityFeePerGas: "0x3b9aca00",
+            maxFeePerGas: "0x77359400",
+            paymaster: nil,
+            paymasterVerificationGasLimit: nil,
+            paymasterPostOpGasLimit: nil,
+            paymasterData: nil,
+            chainId: 11155111,
+            entryPoint: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+            entryPointVersion: .v0_7
+        )
+        let request = SignRequest(
+            operation: .userOperation(op),
+            requestID: "req-5",
+            timestamp: Date(timeIntervalSince1970: 1_710_000_400),
+            clientBundleId: "com.example.worker",
+            userOperationSubmission: UserOperationSubmissionRequest(projectId: "project-123")
+        )
+        let presentation = SigningRequestPresentation(
+            approval: ApprovalRequest(request: request, mode: .policyReview, clientContext: makeContext(bundleId: request.clientBundleId))
+        )
+
+        #expect(presentation.approveLabel == "Approve & Send")
+        #expect(presentation.heroSubtitle.contains("submit"))
+        #expect(presentation.operationSubtitle.contains("ZeroDev"))
     }
 }

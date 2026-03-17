@@ -75,6 +75,52 @@ private func makeUserOpRequest(
     )
 }
 
+private func makeTypedDataRequest(
+    domainName: String = "Permit2",
+    version: String = "1",
+    chainId: Int = 11155111,
+    verifyingContract: String = "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    primaryType: String = "Permit",
+    message: [String: AnyCodable] = [
+        "owner": AnyCodable("0x1234567890abcdef1234567890abcdef12345678"),
+        "spender": AnyCodable("0x7777777777777777777777777777777777777777"),
+        "value": AnyCodable("50000000"),
+    ],
+    clientBundleId: String? = nil
+) -> SignRequest {
+    let typedData = EIP712TypedData(
+        types: [
+            "EIP712Domain": [
+                EIP712Field(name: "name", type: "string"),
+                EIP712Field(name: "version", type: "string"),
+                EIP712Field(name: "chainId", type: "uint256"),
+                EIP712Field(name: "verifyingContract", type: "address"),
+            ],
+            primaryType: [
+                EIP712Field(name: "owner", type: "address"),
+                EIP712Field(name: "spender", type: "address"),
+                EIP712Field(name: "value", type: "uint256"),
+            ],
+        ],
+        primaryType: primaryType,
+        domain: EIP712Domain(
+            name: domainName,
+            version: version,
+            chainId: chainId,
+            verifyingContract: verifyingContract,
+            salt: nil
+        ),
+        message: message
+    )
+
+    return SignRequest(
+        operation: .typedData(typedData),
+        requestID: UUID().uuidString,
+        timestamp: Date(),
+        clientBundleId: clientBundleId
+    )
+}
+
 private func makeKernelSingleCallData(target: String, value: UInt64 = 0, calldata: Data = Data()) -> Data {
     KernelEncoding.executeCalldata(single: .init(to: target, value: value, data: calldata))
 }
@@ -340,6 +386,106 @@ struct RuleEngineConfigTests {
         #expect(loaded.rules.allowedTargets?["1"]?.count == 2)
         #expect(loaded.rules.allowedTargets?["8453"]?.first == "0xcafe")
     }
+
+    @Test("Save and load operation-specific policies")
+    func saveAndLoadOperationSpecificPolicies() throws {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+
+        var newConfig = BastionConfig.default
+        newConfig.rules.rawMessagePolicy.enabled = false
+        newConfig.rules.typedDataPolicy.enabled = true
+        newConfig.rules.typedDataPolicy.requireExplicitApproval = true
+        newConfig.rules.typedDataPolicy.domainRules = [
+            TypedDataDomainRule(
+                id: "domain-1",
+                label: "Permit2",
+                primaryType: "Permit",
+                name: "Permit2",
+                version: "1",
+                chainId: 11155111,
+                verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+            )
+        ]
+        newConfig.rules.typedDataPolicy.structRules = [
+            TypedDataStructRule(
+                id: "struct-1",
+                label: "Fixed spender",
+                primaryType: "Permit",
+                matcherJSON: "{\"spender\":\"0x7777777777777777777777777777777777777777\"}"
+            )
+        ]
+
+        try engine.saveConfig(newConfig)
+        let loaded = engine.loadConfig()
+        #expect(loaded.rules.rawMessagePolicy.enabled == false)
+        #expect(loaded.rules.typedDataPolicy.requireExplicitApproval == true)
+        #expect(loaded.rules.typedDataPolicy.domainRules.first?.name == "Permit2")
+        #expect(loaded.rules.typedDataPolicy.structRules.first?.primaryType == "Permit")
+    }
+
+    @Test("Materializing client profile copies global defaults")
+    func materializeClientProfileCopiesGlobalDefaults() throws {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+
+        var config = BastionConfig.default
+        config.authPolicy = .biometric
+        config.rules.allowedChains = [1]
+        config.rules.allowedTargets = ["1": ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]
+        config.rules.allowedClients = [
+            AllowedClient(id: "legacy", bundleId: "com.legacy.agent", label: "Legacy")
+        ]
+        config.rules.rateLimits = [
+            RateLimitRule(id: "r1", maxRequests: 5, windowSeconds: 3600)
+        ]
+        config.rules.spendingLimits = [
+            SpendingLimitRule(id: "s1", token: .eth, allowance: "100", windowSeconds: nil)
+        ]
+
+        try engine.saveConfig(config)
+        engine.loadConfigOnStartup()
+
+        let profile = engine.ensureClientProfile(bundleId: "com.example.agent")
+
+        #expect(profile?.bundleId == "com.example.agent")
+        #expect(profile?.authPolicy == .biometric)
+        #expect(profile?.rules.allowedChains == [1])
+        #expect(profile?.rules.allowedTargets?["1"]?.first == "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        #expect(profile?.rules.allowedClients == nil)
+        #expect(profile?.rules.rateLimits.first?.id != "r1")
+        #expect(profile?.rules.spendingLimits.first?.id != "s1")
+        #expect(engine.config.clientProfiles.count == 1)
+    }
+
+    @Test("Existing client profile overrides global defaults")
+    func existingClientProfileOverridesGlobalDefaults() throws {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+
+        var profileRules = RuleConfig.default
+        profileRules.allowedChains = [8453]
+
+        var config = BastionConfig.default
+        config.rules.allowedChains = [1]
+        config.clientProfiles = [
+            ClientProfile(
+                id: "client-1",
+                bundleId: "com.example.agent",
+                label: "Example Agent",
+                authPolicy: .passcode,
+                keyTag: "com.bastion.signingkey.client.test-agent",
+                rules: profileRules
+            )
+        ]
+
+        try engine.saveConfig(config)
+        engine.loadConfigOnStartup()
+
+        let effective = engine.effectiveRules(for: "com.example.agent")
+        #expect(effective.allowedChains == [8453])
+        #expect(engine.clientProfile(bundleId: "com.example.agent")?.authPolicy == .passcode)
+    }
 }
 
 // MARK: - RuleEngine Validation Tests
@@ -419,13 +565,103 @@ struct RuleEngineValidationTests {
         }
     }
 
+    @Test("Raw message signing can be disabled")
+    func rawMessageDisabled() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.rawMessagePolicy.enabled = false
+        let result = engine.validate(makeMessageRequest(), config: config)
+        if case .denied(let reasons) = result {
+            #expect(reasons.first?.contains("disabled") == true)
+        } else {
+            Issue.record("Expected .denied when raw signing is disabled")
+        }
+    }
+
+    @Test("Typed-data domain rule allows matching payload")
+    func typedDataDomainRulePasses() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.typedDataPolicy.domainRules = [
+            TypedDataDomainRule(
+                id: "d1",
+                label: nil,
+                primaryType: "Permit",
+                name: "Permit2",
+                version: "1",
+                chainId: 11155111,
+                verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+            )
+        ]
+        let result = engine.validate(makeTypedDataRequest(), config: config)
+        if case .allowed = result { } else {
+            Issue.record("Expected matching typed-data domain to pass")
+        }
+    }
+
+    @Test("Typed-data domain rule denies non-matching payload")
+    func typedDataDomainRuleDenies() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.typedDataPolicy.domainRules = [
+            TypedDataDomainRule(
+                id: "d1",
+                label: nil,
+                primaryType: "Permit",
+                name: "Permit2",
+                version: "1",
+                chainId: 1,
+                verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+            )
+        ]
+        let result = engine.validate(makeTypedDataRequest(chainId: 11155111), config: config)
+        if case .denied(let reasons) = result {
+            #expect(reasons.first?.contains("domain") == true)
+        } else {
+            Issue.record("Expected mismatched typed-data domain to deny")
+        }
+    }
+
+    @Test("Typed-data struct matcher hardens selected values")
+    func typedDataStructMatcher() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.typedDataPolicy.structRules = [
+            TypedDataStructRule(
+                id: "s1",
+                label: nil,
+                primaryType: "Permit",
+                matcherJSON: "{\"spender\":\"0x7777777777777777777777777777777777777777\",\"value\":\"50000000\"}"
+            )
+        ]
+
+        let matching = engine.validate(makeTypedDataRequest(), config: config)
+        if case .allowed = matching { } else {
+            Issue.record("Expected matching struct subset to pass")
+        }
+
+        let mismatched = engine.validate(
+            makeTypedDataRequest(message: [
+                "owner": AnyCodable("0x1234567890abcdef1234567890abcdef12345678"),
+                "spender": AnyCodable("0x9999999999999999999999999999999999999999"),
+                "value": AnyCodable("50000000"),
+            ]),
+            config: config
+        )
+        if case .denied(let reasons) = mismatched {
+            #expect(reasons.first?.contains("struct") == true)
+        } else {
+            Issue.record("Expected mismatched struct subset to deny")
+        }
+    }
+
     @Test("Allowed hours within range passes")
     func allowedHoursWithinRange() {
         let engine = RuleEngine(keychain: MockKeychainBackend())
         let hour = Calendar.current.component(.hour, from: Date())
         var config = BastionConfig.default
         config.rules.allowedHours = AllowedHours(start: hour, end: (hour + 1) % 24)
-        let result = engine.validate(makeMessageRequest(), config: config)
+        let result = engine.validate(makeUserOpRequest(), config: config)
         if case .allowed = result { } else {
             Issue.record("Expected .allowed within allowed hours")
         }
@@ -439,7 +675,7 @@ struct RuleEngineValidationTests {
         let end = (hour + 3) % 24
         var config = BastionConfig.default
         config.rules.allowedHours = AllowedHours(start: start, end: end)
-        let result = engine.validate(makeMessageRequest(), config: config)
+        let result = engine.validate(makeUserOpRequest(), config: config)
         if case .denied = result { } else {
             Issue.record("Expected .denied outside allowed hours")
         }
@@ -621,6 +857,16 @@ struct RuleEngineValidationTests {
         if case .allowed = result { } else {
             Issue.record("Expected .allowed when no client allowlist")
         }
+    }
+
+    @Test("All signing operation types require approval review")
+    func allOperationsRequireApprovalReview() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        let config = BastionConfig.default
+
+        #expect(engine.requiresExplicitApproval(for: makeMessageRequest(), config: config))
+        #expect(engine.requiresExplicitApproval(for: makeTypedDataRequest(), config: config))
+        #expect(engine.requiresExplicitApproval(for: makeUserOpRequest(), config: config))
     }
 
     @Test("Spending limit state tracking works")
