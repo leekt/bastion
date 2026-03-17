@@ -4,18 +4,22 @@ import Security
 
 nonisolated final class SecureEnclaveManager: Sendable {
     static let shared = SecureEnclaveManager()
+    nonisolated static let defaultSigningKeyIdentifier = "com.bastion.signingkey.default"
+    nonisolated static let legacySigningKeyIdentifier = "com.bastion.signingkey"
 
-    private let signingKeyTag = "com.bastion.signingkey".data(using: .utf8)!
+    private let defaultSigningKeyTag = SecureEnclaveManager.defaultSigningKeyIdentifier.data(using: .utf8)!
+    private let legacySigningKeyTag = SecureEnclaveManager.legacySigningKeyIdentifier.data(using: .utf8)!
 
     private init() {}
 
     // MARK: - Key Management
 
     nonisolated func loadOrCreateSigningKey() throws -> SecKey {
-        if let existing = try? loadKey(tag: signingKeyTag, context: silentContext()) {
-            return existing
-        }
-        return try createSilentKey(tag: signingKeyTag)
+        try loadOrCreateSigningKey(keyTag: Self.defaultSigningKeyIdentifier, allowLegacyFallback: true)
+    }
+
+    nonisolated func loadOrCreateSigningKey(keyTag: String) throws -> SecKey {
+        try loadOrCreateSigningKey(keyTag: keyTag, allowLegacyFallback: false)
     }
 
     // MARK: - Signing (Key B)
@@ -24,7 +28,14 @@ nonisolated final class SecureEnclaveManager: Sendable {
     /// This is not appropriate for Ethereum signing flows because those requests
     /// already provide a finalized 32-byte Keccak digest.
     nonisolated func sign(data: Data) throws -> SignResponse {
-        let privateKey = try loadOrCreateSigningKey()
+        try sign(data: data, keyTag: Self.defaultSigningKeyIdentifier)
+    }
+
+    nonisolated func sign(data: Data, keyTag: String) throws -> SignResponse {
+        let privateKey = try loadOrCreateSigningKey(
+            keyTag: keyTag,
+            allowLegacyFallback: keyTag == Self.defaultSigningKeyIdentifier
+        )
 
         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
             throw BastionError.keyNotFound
@@ -50,7 +61,10 @@ nonisolated final class SecureEnclaveManager: Sendable {
             pubkeyX: pubData.subdata(in: 1..<33).hex,
             pubkeyY: pubData.subdata(in: 33..<65).hex,
             r: r.hex,
-            s: s.hex
+            s: s.hex,
+            accountAddress: accountAddress(for: pubData),
+            clientBundleId: nil,
+            submission: nil
         )
     }
 
@@ -58,7 +72,14 @@ nonisolated final class SecureEnclaveManager: Sendable {
     /// Uses `.ecdsaSignatureDigestX962SHA256` so the Secure Enclave signs the digest as-is.
     /// This is the correct path for Ethereum message, typed-data, and UserOperation signing.
     nonisolated func signDigest(hash: Data) throws -> SignResponse {
-        let privateKey = try loadOrCreateSigningKey()
+        try signDigest(hash: hash, keyTag: Self.defaultSigningKeyIdentifier)
+    }
+
+    nonisolated func signDigest(hash: Data, keyTag: String) throws -> SignResponse {
+        let privateKey = try loadOrCreateSigningKey(
+            keyTag: keyTag,
+            allowLegacyFallback: keyTag == Self.defaultSigningKeyIdentifier
+        )
 
         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
             throw BastionError.keyNotFound
@@ -84,12 +105,22 @@ nonisolated final class SecureEnclaveManager: Sendable {
             pubkeyX: pubData.subdata(in: 1..<33).hex,
             pubkeyY: pubData.subdata(in: 33..<65).hex,
             r: r.hex,
-            s: s.hex
+            s: s.hex,
+            accountAddress: accountAddress(for: pubData),
+            clientBundleId: nil,
+            submission: nil
         )
     }
 
     nonisolated func getPublicKey() throws -> PublicKeyResponse {
-        let privateKey = try loadOrCreateSigningKey()
+        try getPublicKey(keyTag: Self.defaultSigningKeyIdentifier)
+    }
+
+    nonisolated func getPublicKey(keyTag: String) throws -> PublicKeyResponse {
+        let privateKey = try loadOrCreateSigningKey(
+            keyTag: keyTag,
+            allowLegacyFallback: keyTag == Self.defaultSigningKeyIdentifier
+        )
 
         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
             throw BastionError.keyNotFound
@@ -102,7 +133,8 @@ nonisolated final class SecureEnclaveManager: Sendable {
 
         return PublicKeyResponse(
             x: pubData.subdata(in: 1..<33).hex,
-            y: pubData.subdata(in: 33..<65).hex
+            y: pubData.subdata(in: 33..<65).hex,
+            accountAddress: accountAddress(for: pubData)
         )
     }
 
@@ -154,6 +186,32 @@ nonisolated final class SecureEnclaveManager: Sendable {
     }
 
     // MARK: - Private Helpers
+
+    private nonisolated func loadOrCreateSigningKey(keyTag: String, allowLegacyFallback: Bool) throws -> SecKey {
+        let tag = keyTag.data(using: .utf8) ?? defaultSigningKeyTag
+        if let existing = try? loadKey(tag: tag, context: silentContext()) {
+            return existing
+        }
+        if allowLegacyFallback,
+           let existing = try? loadKey(tag: legacySigningKeyTag, context: silentContext()) {
+            return existing
+        }
+        return try createSilentKey(tag: tag)
+    }
+
+    private nonisolated func accountAddress(for publicKeyData: Data) -> String? {
+        guard publicKeyData.count == 65 else {
+            return nil
+        }
+
+        let validator = P256Validator(
+            validatorAddress: ValidatorAddress.p256Validator,
+            publicKeyX: publicKeyData.subdata(in: 1..<33),
+            publicKeyY: publicKeyData.subdata(in: 33..<65),
+            sign: { _ in Data(repeating: 0, count: 64) }
+        )
+        return SmartAccount(validator: validator).computeAddress()
+    }
 
     private nonisolated func loadKey(tag: Data, context: LAContext? = nil) throws -> SecKey {
         var query: [String: Any] = [
