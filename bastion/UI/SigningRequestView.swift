@@ -26,21 +26,21 @@ struct SigningRequestView: View {
                 .ignoresSafeArea()
 
             ScrollView {
-                VStack(spacing: 18) {
-                    heroCard
-                    approvalStateCard
-                    operationCard
-                    metadataCard
-                    digestCard
+                VStack(alignment: .leading, spacing: 14) {
+                    headerSection
+                    approvalBanner
+                    operationSection
+                    requestContextSection
                 }
-                .padding(24)
-                .padding(.bottom, 132)
+                .frame(maxWidth: 860, alignment: .leading)
+                .padding(16)
+                .padding(.bottom, 84)
             }
         }
         .safeAreaInset(edge: .bottom) {
             actionBar
         }
-        .frame(minWidth: 560, minHeight: 720)
+        .frame(minWidth: 760, minHeight: 520)
         .onReceive(timer) { _ in
             if remainingSeconds > 0 {
                 remainingSeconds -= 1
@@ -53,28 +53,40 @@ struct SigningRequestView: View {
     private var backgroundGradient: some View {
         LinearGradient(
             colors: [
-                Color(red: 0.96, green: 0.94, blue: 0.89),
-                Color(red: 0.92, green: 0.95, blue: 0.97),
-                Color(red: 0.98, green: 0.97, blue: 0.94),
+                Color(red: 0.965, green: 0.962, blue: 0.952),
+                Color(red: 0.952, green: 0.958, blue: 0.964),
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
     }
 
-    private var heroCard: some View {
-        ApprovalCard(
-            icon: headerIcon,
-            accent: approvalAccent,
-            title: "Signing Approval",
-            subtitle: heroSubtitle
-        ) {
-            HStack(spacing: 12) {
-                ApprovalPill(
-                    title: "Mode",
-                    value: approvalModeLabel,
-                    tint: approvalAccent
-                )
+    private var headerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: headerIcon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(approvalAccent)
+                    .frame(width: 22, height: 22)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(operationTitle)
+                        .font(.title3.weight(.semibold))
+                    Text(heroSubtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 12)
+
+                Text(approvalModeLabel.uppercased())
+                    .font(.caption2.weight(.black))
+                    .kerning(1)
+                    .foregroundStyle(approvalAccent)
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 8)], alignment: .leading, spacing: 8) {
                 ApprovalPill(
                     title: "Request",
                     value: requestKindLabel,
@@ -85,64 +97,70 @@ struct SigningRequestView: View {
                     value: shortClientLabel,
                     tint: Color(red: 0.18, green: 0.45, blue: 0.34)
                 )
+                if let accountAddress = approval.clientContext.accountAddress {
+                    ApprovalPill(
+                        title: "Account",
+                        value: shortAddress(accountAddress),
+                        tint: Color(red: 0.59, green: 0.27, blue: 0.19)
+                    )
+                }
                 ApprovalPill(
                     title: "Timeout",
                     value: "\(remainingSeconds)s",
-                    tint: remainingSeconds <= 10
-                        ? Color(red: 0.68, green: 0.24, blue: 0.20)
-                        : Color(red: 0.52, green: 0.33, blue: 0.18)
+                    tint: countdownColor
                 )
             }
+        }
+        .padding(.bottom, 10)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.black.opacity(0.08))
+                .frame(height: 1)
         }
     }
 
     @ViewBuilder
-    private var approvalStateCard: some View {
+    private var approvalBanner: some View {
         switch approval.mode {
         case .policyReview:
-            ApprovalCard(
-                icon: "hand.raised.fill",
-                accent: Color(red: 0.13, green: 0.38, blue: 0.60),
-                title: "Manual Review Enabled",
-                subtitle: "This request matched the current rules, but Bastion is configured to require an explicit approval step."
-            ) {
-                Text("Approving continues with the auth policy selected in Rules Settings. Denying ends the request immediately.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            EmptyView()
         case .ruleOverride(let reasons):
-            ApprovalCard(
-                icon: "exclamationmark.triangle.fill",
-                accent: Color(red: 0.72, green: 0.43, blue: 0.11),
-                title: "Rule Override Required",
-                subtitle: "Bastion blocked this request under the current policy. Approving will continue with owner authentication."
-            ) {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(reasons.enumerated()), id: \.offset) { index, reason in
-                        HStack(alignment: .top, spacing: 10) {
-                            Text("\(index + 1).")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 16, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(approvalAccent)
+                    Text("Rule Override")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                }
 
-                            Text(reason)
-                                .font(.subheadline)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(12)
-                        .background(cardRowBackground)
+                ForEach(Array(reasons.enumerated()), id: \.offset) { index, reason in
+                    HStack(alignment: .top, spacing: 10) {
+                        Text("\(index + 1).")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18, alignment: .leading)
+
+                        Text(reason)
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            }
+            .padding(.bottom, 10)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color.black.opacity(0.08))
+                    .frame(height: 1)
             }
         }
     }
 
-    private var operationCard: some View {
+    private var operationSection: some View {
         ApprovalCard(
             icon: "signature",
             accent: headerColor,
-            title: operationTitle,
+            title: "Payload",
             subtitle: operationSubtitle
         ) {
             operationDetails
@@ -188,10 +206,10 @@ struct SigningRequestView: View {
         case .userOperation(let op):
             let decoded = CalldataDecoder.decode(op)
             VStack(alignment: .leading, spacing: 12) {
-                ApprovalKeyValueRow(label: "Type", value: decoded.isDeployment ? "UserOperation (deployment)" : "UserOperation")
+                ApprovalKeyValueRow(label: "Type", value: decoded.isDeployment ? "Deployment UserOperation" : "UserOperation")
                 ApprovalKeyValueRow(label: "Chain", value: "\(decoded.chainName) (\(op.chainId))")
-                ApprovalCodeBlock(title: "Smart Account", value: decoded.sender)
                 ApprovalKeyValueRow(label: "EntryPoint", value: op.entryPointVersion.rawValue)
+                ApprovalCodeBlock(title: "Smart Account", value: decoded.sender)
                 if decoded.isDeployment, let factory = op.factory {
                     ApprovalCodeBlock(title: "Factory", value: factory)
                 }
@@ -202,9 +220,10 @@ struct SigningRequestView: View {
                         title: "No decoded execution",
                         detail: "Bastion could not find user-visible execution details in this payload."
                     )
+                    ApprovalCodeBlock(title: "Call Data", value: "0x" + op.callData.hex)
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
-                        sectionLabel(decoded.executions.count == 1 ? "Action" : "Actions")
+                        sectionLabel(decoded.executions.count == 1 ? "Decoded Action" : "Decoded Actions")
 
                         ForEach(Array(decoded.executions.enumerated()), id: \.offset) { index, execution in
                             ApprovalActionCard(
@@ -219,71 +238,72 @@ struct SigningRequestView: View {
         }
     }
 
-    private var metadataCard: some View {
+    private var requestContextSection: some View {
         ApprovalCard(
-            icon: "tray.full.fill",
+            icon: "rectangle.stack.badge.person.crop",
             accent: Color(red: 0.18, green: 0.45, blue: 0.34),
-            title: "Request Metadata",
-            subtitle: "These fields identify who asked Bastion to sign and when the request was created."
+            title: "Request Context",
+            subtitle: "Client identity, timestamp, request ID, and exact digest."
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                ApprovalKeyValueRow(label: "Client", value: request.clientBundleId ?? "Unknown client")
+            VStack(alignment: .leading, spacing: 10) {
+                ApprovalKeyValueRow(label: "Client", value: approval.clientContext.displayName)
+                if let bundleId = approval.clientContext.bundleId {
+                    ApprovalKeyValueRow(label: "Bundle ID", value: bundleId)
+                }
+                if let accountAddress = approval.clientContext.accountAddress {
+                    ApprovalKeyValueRow(label: "Account", value: accountAddress)
+                }
+                if let submission = request.userOperationSubmission {
+                    ApprovalKeyValueRow(
+                        label: "Post-Approval",
+                        value: "Submit to \(submission.provider.displayName)"
+                    )
+                }
                 ApprovalKeyValueRow(label: "Request ID", value: request.requestID)
                 ApprovalKeyValueRow(
                     label: "Time",
                     value: request.timestamp.formatted(date: .abbreviated, time: .standard)
                 )
+                ApprovalCodeBlock(title: "Digest", value: "0x" + request.data.hex)
             }
         }
     }
 
-    private var digestCard: some View {
-        ApprovalCard(
-            icon: "number.square.fill",
-            accent: Color(red: 0.48, green: 0.34, blue: 0.16),
-            title: "Digest To Sign",
-            subtitle: "This is the 32-byte Ethereum digest Bastion sends to the Secure Enclave."
-        ) {
-            ApprovalCodeBlock(title: "Digest", value: "0x" + request.data.hex)
-        }
-    }
-
     private var actionBar: some View {
-        VStack(spacing: 12) {
+        HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
+                HStack(spacing: 8) {
                     Image(systemName: "clock")
                         .foregroundStyle(countdownColor)
                     Text("Auto-deny in \(remainingSeconds) seconds")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(countdownColor)
-                    Spacer()
                 }
 
                 ProgressView(value: countdownProgress)
                     .tint(countdownColor)
+                    .frame(width: 220)
             }
 
-            HStack(spacing: 14) {
-                Button(action: onDeny) {
-                    Text("Deny")
-                        .frame(maxWidth: .infinity)
-                }
-                .keyboardShortcut(.escape)
-                .controlSize(.large)
-                .buttonStyle(.bordered)
+            Spacer()
 
-                Button(action: onApprove) {
-                    Text(approveLabel)
-                        .frame(maxWidth: .infinity)
-                }
-                .keyboardShortcut(.return)
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
+            Button(action: onDeny) {
+                Text("Deny")
+                    .frame(width: 110)
             }
+            .keyboardShortcut(.escape)
+            .controlSize(.regular)
+            .buttonStyle(.bordered)
+
+            Button(action: onApprove) {
+                Text(approveLabel)
+                    .frame(width: 156)
+            }
+            .controlSize(.regular)
+            .buttonStyle(.borderedProminent)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
         .background(.ultraThinMaterial)
     }
 
@@ -343,6 +363,13 @@ struct SigningRequestView: View {
         presentation.shortClientLabel
     }
 
+    private func shortAddress(_ address: String) -> String {
+        guard address.count > 14 else {
+            return address
+        }
+        return "\(address.prefix(10))...\(address.suffix(4))"
+    }
+
     private var countdownColor: Color {
         remainingSeconds <= 10
             ? Color(red: 0.68, green: 0.24, blue: 0.20)
@@ -353,14 +380,9 @@ struct SigningRequestView: View {
         Double(remainingSeconds) / Double(initialCountdownSeconds)
     }
 
-    private var cardRowBackground: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(Color.white.opacity(0.55))
-    }
-
     private func sectionLabel(_ title: String) -> some View {
         Text(title)
-            .font(.headline)
+            .font(.subheadline.weight(.semibold))
     }
 
     private func executionTitle(_ execution: CalldataDecoder.DecodedExecution) -> String {
@@ -379,11 +401,20 @@ nonisolated struct SigningRequestPresentation: Sendable {
     }
 
     var heroSubtitle: String {
+        if request.requiresUserOperationSubmission {
+            switch approval.mode {
+            case .policyReview:
+                return "Review the payload carefully. Bastion will sign it and immediately submit the UserOperation to the configured bundler."
+            case .ruleOverride:
+                return "This request exceeded the current rules. If you continue, Bastion will override the policy and submit the signed UserOperation."
+            }
+        }
+
         switch approval.mode {
         case .policyReview:
-            return "Review the request details before Bastion applies your configured authentication policy."
+            return "Review the exact payload, then continue with the configured authentication policy."
         case .ruleOverride:
-            return "This request exceeded the current rules. Review the payload carefully before overriding the policy."
+            return "This request exceeded the current rules. Review the payload carefully before overriding."
         }
     }
 
@@ -399,16 +430,16 @@ nonisolated struct SigningRequestPresentation: Sendable {
     var approveLabel: String {
         switch approval.mode {
         case .policyReview:
-            return "Approve"
+            return request.requiresUserOperationSubmission ? "Approve & Send" : "Approve"
         case .ruleOverride:
-            return "Override & Approve"
+            return request.requiresUserOperationSubmission ? "Override & Send" : "Override & Approve"
         }
     }
 
     var requestKindLabel: String {
         switch request.operation {
         case .message:
-            return "Message"
+            return "Raw Message"
         case .typedData:
             return "Typed Data"
         case .userOperation:
@@ -419,30 +450,30 @@ nonisolated struct SigningRequestPresentation: Sendable {
     var operationTitle: String {
         switch request.operation {
         case .message:
-            return "Personal Message"
+            return "Raw Message Review"
         case .typedData:
             return "Typed Data Review"
         case .userOperation:
-            return "UserOperation Review"
+            return "UserOp Review"
         }
     }
 
     var operationSubtitle: String {
         switch request.operation {
         case .message:
-            return "The payload below will be wrapped using the Ethereum personal-sign prefix before verification."
+            return "The payload below will be wrapped with the Ethereum personal-sign prefix before verification."
         case .typedData:
-            return "Bastion hashes this payload using the EIP-712 domain separator and structured message rules."
+            return "Bastion hashes this payload with the EIP-712 domain separator and structured message fields."
         case .userOperation:
-            return "Bastion is showing the decoded Kernel execution details, not just the smart-account envelope."
+            if let submission = request.userOperationSubmission {
+                return "Bastion is showing the decoded execution details and will send the signed UserOperation to \(submission.provider.displayName) after approval."
+            }
+            return "Bastion is showing the decoded execution details, not just the smart-account envelope."
         }
     }
 
     var shortClientLabel: String {
-        guard let bundleId = request.clientBundleId, !bundleId.isEmpty else {
-            return "Unknown"
-        }
-        return bundleId.split(separator: ".").last.map(String.init) ?? bundleId
+        approval.clientContext.shortBundleName
     }
 
     var headerIcon: String {
@@ -514,42 +545,38 @@ private struct ApprovalCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(accent.opacity(0.15))
-                        .frame(width: 48, height: 48)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(accent)
+                    .frame(width: 14)
 
-                    Image(systemName: icon)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(accent)
-                }
+                Text(title.uppercased())
+                    .font(.caption2.weight(.black))
+                    .kerning(1.1)
+                    .foregroundStyle(accent)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.title3.weight(.bold))
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, 4)
 
-                Spacer()
+            if !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 8)
             }
 
             content
+                .padding(.bottom, 10)
+
+            Rectangle()
+                .fill(accent.opacity(0.16))
+                .frame(height: 1)
         }
-        .padding(22)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color.white.opacity(0.74))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Color.white.opacity(0.55), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.06), radius: 16, x: 0, y: 10)
+        .padding(.horizontal, 2)
     }
 }
 
@@ -568,11 +595,15 @@ private struct ApprovalPill: View {
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(tint.opacity(0.12))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(tint.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(tint.opacity(0.10), lineWidth: 1)
         )
     }
 }
@@ -586,18 +617,14 @@ private struct ApprovalKeyValueRow: View {
             Text(label.uppercased())
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 120, alignment: .leading)
+                .frame(width: 86, alignment: .leading)
 
             Text(value)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.55))
-        )
+        .padding(.vertical, 3)
     }
 }
 
@@ -612,13 +639,17 @@ private struct ApprovalCodeBlock: View {
                 .foregroundStyle(.secondary)
 
             Text(value)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
+                .padding(7)
                 .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.white.opacity(0.55))
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.black.opacity(0.035))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.black.opacity(0.04), lineWidth: 1)
                 )
         }
     }
@@ -630,27 +661,35 @@ private struct ApprovalActionCard: View {
     let detail: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Action \(index)")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(index)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 18, height: 18)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.black.opacity(0.04))
+                )
+
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
+
+                Text(detail)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Text(detail)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 0)
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.55))
-        )
+        .padding(.vertical, 6)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.black.opacity(0.06))
+                .frame(height: 1)
+        }
     }
 }
 
@@ -660,11 +699,11 @@ private struct ApprovalEmptyState: View {
     let detail: String
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.title3)
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 32)
+                .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -677,16 +716,13 @@ private struct ApprovalEmptyState: View {
 
             Spacer()
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.55))
-        )
+        .padding(.vertical, 6)
     }
 }
 
 // MARK: - Panel Manager
 
+@MainActor
 final class SigningRequestPanelManager {
     static let shared = SigningRequestPanelManager()
     private var panel: NSPanel?
@@ -711,8 +747,8 @@ final class SigningRequestPanelManager {
         let hostingView = NSHostingView(rootView: view)
 
         let newPanel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 720),
-            styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
+            contentRect: NSRect(x: 0, y: 0, width: 780, height: 580),
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -725,8 +761,12 @@ final class SigningRequestPanelManager {
         newPanel.center()
         newPanel.isFloatingPanel = true
         newPanel.becomesKeyOnlyIfNeeded = false
+        newPanel.hidesOnDeactivate = false
+        newPanel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        newPanel.makeKeyAndOrderFront(nil)
         newPanel.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
+        NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
 
         self.panel = newPanel
     }
