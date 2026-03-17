@@ -1,13 +1,27 @@
+import Combine
 import SwiftUI
 
 struct RulesSettingsView: View {
     @State private var draftConfig: BastionConfig = .default
+    @State private var selectedProfileID: String?
+    @State private var clientAccountAddresses: [String: String] = [:]
 
     @State private var newAllowedChain = ""
     @State private var newAllowedAccountChain = ""
     @State private var newAllowedAccountAddress = ""
     @State private var newClientBundleId = ""
     @State private var newClientLabel = ""
+    @State private var newRPCChainId = ""
+    @State private var newRPCURL = ""
+    @State private var newTypedDomainLabel = ""
+    @State private var newTypedDomainPrimaryType = ""
+    @State private var newTypedDomainName = ""
+    @State private var newTypedDomainVersion = ""
+    @State private var newTypedDomainChainId = ""
+    @State private var newTypedDomainVerifyingContract = ""
+    @State private var newTypedStructLabel = ""
+    @State private var newTypedStructPrimaryType = ""
+    @State private var newTypedStructMatcherJSON = "{\n  \n}"
     @State private var newRLMax = ""
     @State private var newRLWindow = "3600"
     @State private var newSLToken = "eth"
@@ -23,27 +37,19 @@ struct RulesSettingsView: View {
     private let ruleEngine = RuleEngine.shared
 
     var body: some View {
-        ZStack {
-            backgroundGradient
-                .ignoresSafeArea()
+        NavigationSplitView {
+            sidebar
+                .navigationSplitViewColumnWidth(min: 248, ideal: 280, max: 312)
+        } detail: {
+            ZStack {
+                backgroundGradient
+                    .ignoresSafeArea()
 
-            ScrollView {
-                VStack(spacing: 18) {
-                    heroCard
-                    authenticationCard
-                    accessControlsCard
-                    clientCard
-                    rateLimitCard
-                    spendingLimitCard
-                }
-                .padding(24)
-                .padding(.bottom, 112)
+                policyPage
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            saveBar
-        }
-        .frame(minWidth: 760, minHeight: 860)
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 1180, minHeight: 860)
         .onAppear {
             loadCurrentConfig()
         }
@@ -52,44 +58,289 @@ struct RulesSettingsView: View {
     private var backgroundGradient: some View {
         LinearGradient(
             colors: [
-                Color(red: 0.96, green: 0.94, blue: 0.89),
-                Color(red: 0.92, green: 0.95, blue: 0.97),
-                Color(red: 0.98, green: 0.97, blue: 0.94),
+                Color(red: 0.965, green: 0.962, blue: 0.952),
+                Color(red: 0.952, green: 0.958, blue: 0.964),
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
     }
 
+    private var summaryPillColumns: [GridItem] {
+        [
+            GridItem(.adaptive(minimum: 128), spacing: 8, alignment: .leading),
+        ]
+    }
+
+    private var sidebar: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.84, green: 0.81, blue: 0.75),
+                    Color(red: 0.84, green: 0.88, blue: 0.90),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("POLICY WORKSPACE")
+                        .font(.caption2.weight(.black))
+                        .kerning(1.3)
+                        .foregroundStyle(Color(red: 0.45, green: 0.25, blue: 0.14))
+                    Text("Bastion")
+                        .font(.title2.weight(.bold))
+                    Text("Default first. Client overrides second.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            sidebarSectionLabel("Configuration")
+                            sidebarRow(
+                                title: "Default",
+                                subtitle: "Template for new clients",
+                                accountAddress: nil,
+                                systemImage: "square.stack.3d.up.fill",
+                                isSelected: selectedProfileID == nil
+                            ) {
+                                selectedProfileID = nil
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            sidebarSectionLabel("Clients")
+
+                            if clientProfiles.isEmpty {
+                                EmptyStateRow(
+                                    icon: "person.badge.plus",
+                                    title: "No clients yet",
+                                    detail: "Profiles appear on first request, or you can pre-create them below."
+                                )
+                            } else {
+                                ForEach(clientProfiles) { profile in
+                                    sidebarRow(
+                                        title: profile.displayDescription,
+                                        subtitle: profile.bundleId,
+                                        accountAddress: clientAccountAddresses[profile.id],
+                                        systemImage: "person.crop.rectangle.stack.fill",
+                                        isSelected: selectedProfileID == profile.id
+                                    ) {
+                                        selectedProfileID = profile.id
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                }
+
+                sidebarAddProfileForm
+            }
+        }
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color.white.opacity(0.65))
+                .frame(width: 1)
+                .ignoresSafeArea()
+        }
+    }
+
+    private var policyPage: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                heroCard
+                if selectedClientProfile == nil {
+                    appPreferencesCard
+                }
+                scopeSummaryCard
+                authenticationCard
+                rawMessageCard
+                typedDataCard
+                accessControlsCard
+                rateLimitCard
+                spendingLimitCard
+            }
+            .padding(16)
+            .padding(.bottom, 96)
+            .frame(maxWidth: 940, alignment: .leading)
+        }
+        .safeAreaInset(edge: .bottom) {
+            saveBar
+        }
+    }
+
+    private var appPreferencesCard: some View {
+        SettingsCard(
+            icon: "paperplane.circle",
+            accent: Color(red: 0.17, green: 0.40, blue: 0.58),
+            title: "App Preferences",
+            subtitle: "Global submit/build settings used when clients do not pass a bundler override."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("ZeroDev Project ID", text: zeroDevProjectIdBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+
+                Text("Bastion-managed UserOp builds and submit flows use this project ID by default. CLI `--project-id` stays as an optional override for debugging.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let projectId = draftConfig.bundlerPreferences.zeroDevProjectId, !projectId.isEmpty {
+                    SettingsKeyValueRow(label: "Configured", value: projectId)
+                } else {
+                    EmptyStateRow(
+                        icon: "exclamationmark.triangle",
+                        title: "No bundler project configured",
+                        detail: "High-level `bastion eth userOp --op ...` requests will fail until a ZeroDev project ID is stored here."
+                    )
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionLabel("Chain RPC Endpoints")
+
+                    Text("Bastion uses these URLs for `eth_call`, `eth_getCode`, `getNonce`, and fee estimation before signing. If a chain is not configured here, Bastion falls back to the bundler endpoint.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if configuredRPCEndpoints.isEmpty {
+                        EmptyStateRow(
+                            icon: "network",
+                            title: "No custom RPC endpoints",
+                            detail: "Add per-chain RPC URLs if you want Bastion read calls to avoid the bundler endpoint."
+                        )
+                    } else {
+                        VStack(spacing: 10) {
+                            ForEach(configuredRPCEndpoints) { endpoint in
+                                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                    Text(ChainConfig.name(for: endpoint.chainId))
+                                        .font(.subheadline.weight(.semibold))
+                                        .frame(width: 130, alignment: .leading)
+
+                                    Text("#\(endpoint.chainId)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 60, alignment: .leading)
+
+                                    Text(endpoint.rpcURL)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    removeButton {
+                                        removeRPCPreference(endpoint)
+                                    }
+                                }
+                                .padding(12)
+                                .background(cardRowBackground)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        TextField("Chain ID", text: $newRPCChainId)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 120)
+
+                        TextField("https://rpc.example.org", text: $newRPCURL)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+
+                        Button("Add RPC") {
+                            addRPCPreference()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!canAddRPCPreference)
+                    }
+                }
+            }
+        }
+    }
+
     private var heroCard: some View {
         SettingsCard(
             icon: "shield.lefthalf.filled.badge.checkmark",
             accent: Color(red: 0.82, green: 0.46, blue: 0.16),
-            title: "Bastion Rules",
-            subtitle: "Control when Bastion can sign autonomously, which clients and targets are trusted, and when manual review becomes mandatory."
+            title: selectedClientProfile?.displayDescription ?? "Default Policy",
+            subtitle: selectedClientProfile == nil
+                ? "Template copied into new client profiles."
+                : "\(selectedClientProfile?.bundleId ?? "") · Client-specific auth mode, account, and rule overrides."
         ) {
-            HStack(spacing: 12) {
-                SummaryPill(
-                    title: "Status",
-                    value: draftConfig.rules.enabled ? "Active" : "Paused",
-                    tint: draftConfig.rules.enabled ? .green : .gray
-                )
-                SummaryPill(
-                    title: "Auth",
-                    value: draftConfig.authPolicy.displayName,
-                    tint: Color(red: 0.11, green: 0.39, blue: 0.63)
-                )
-                SummaryPill(
-                    title: "Clients",
-                    value: "\(draftConfig.rules.allowedClients?.count ?? 0)",
-                    tint: Color(red: 0.14, green: 0.47, blue: 0.34)
-                )
-                SummaryPill(
-                    title: "Limits",
-                    value: "\(draftConfig.rules.rateLimits.count + draftConfig.rules.spendingLimits.count)",
-                    tint: Color(red: 0.52, green: 0.33, blue: 0.18)
-                )
+            VStack(alignment: .leading, spacing: 10) {
+                if let selectedClientProfile {
+                    scopeDescriptorRow(
+                        label: "Bundle ID",
+                        value: selectedClientProfile.bundleId,
+                        monospaced: true
+                    )
+                } else {
+                    Text("New clients clone this page on first contact, then continue with their own independent key, account, and rule snapshot.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                LazyVGrid(columns: summaryPillColumns, alignment: .leading, spacing: 8) {
+                    SummaryPill(
+                        title: "Status",
+                        value: activeRules.enabled ? "Active" : "Paused",
+                        tint: activeRules.enabled ? .green : .gray
+                    )
+                    SummaryPill(
+                        title: "Editing",
+                        value: activeScopeTitle,
+                        tint: Color(red: 0.11, green: 0.39, blue: 0.63)
+                    )
+                    SummaryPill(
+                        title: "Clients",
+                        value: "\(clientProfiles.count)",
+                        tint: Color(red: 0.14, green: 0.47, blue: 0.34)
+                    )
+                    SummaryPill(
+                        title: "Limits",
+                        value: "\(activeRules.rateLimits.count + activeRules.spendingLimits.count)",
+                        tint: Color(red: 0.52, green: 0.33, blue: 0.18)
+                    )
+                    if let accountAddress = activeAccountAddress {
+                        SummaryPill(
+                            title: "Account",
+                            value: shortAddress(accountAddress),
+                            tint: Color(red: 0.59, green: 0.27, blue: 0.19)
+                        )
+                    }
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var scopeSummaryCard: some View {
+        if selectedClientProfile != nil {
+            clientIdentityCard
+        } else {
+            defaultScopeCard
+        }
+    }
+
+    private func scopeDescriptorRow(label: String, value: String, monospaced: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label.uppercased())
+                .font(.caption2.weight(.black))
+                .kerning(0.8)
+                .foregroundStyle(.secondary)
+                .frame(width: 72, alignment: .leading)
+
+            Text(value)
+                .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
         }
     }
 
@@ -98,9 +349,9 @@ struct RulesSettingsView: View {
             icon: "lock.shield",
             accent: Color(red: 0.13, green: 0.38, blue: 0.60),
             title: "Authentication",
-            subtitle: "Allowed requests use this auth policy. Rule overrides still require approval plus owner authentication."
+            subtitle: "Allowed requests use this auth policy."
         ) {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 10) {
                 Picker("Auth Policy", selection: authPolicyBinding) {
                     ForEach(AuthPolicy.allCases, id: \.self) { policy in
                         Text(policy.displayName).tag(policy)
@@ -112,8 +363,186 @@ struct RulesSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Toggle("Require explicit approval even when the request is within policy", isOn: requireExplicitApprovalBinding)
+                Toggle("Require explicit approval for matching UserOperation requests", isOn: requireExplicitApprovalBinding)
                     .toggleStyle(.switch)
+            }
+        }
+    }
+
+    private var rawMessageCard: some View {
+        SettingsCard(
+            icon: "signature",
+            accent: Color(red: 0.15, green: 0.36, blue: 0.59),
+            title: "Raw / Message Signing",
+            subtitle: "Simple binary policy for personal-sign style requests."
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Allow raw or personal message signing", isOn: rawMessageEnabledBinding)
+                    .toggleStyle(.switch)
+
+                Text("This mode stays intentionally binary: either the client may request raw or personal-sign payloads, or Bastion blocks them outright.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var typedDataCard: some View {
+        SettingsCard(
+            icon: "doc.text.magnifyingglass",
+            accent: Color(red: 0.44, green: 0.31, blue: 0.55),
+            title: "EIP-712 Signing",
+            subtitle: "Allowlist typed-data by domain fields and primary-type JSON matchers."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle("Allow EIP-712 signing", isOn: typedDataEnabledBinding)
+                    .toggleStyle(.switch)
+
+                Toggle("Require explicit approval for matching EIP-712 requests", isOn: typedDataApprovalBinding)
+                    .toggleStyle(.switch)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionLabel("Allowed Domains")
+
+                    if activeRules.typedDataPolicy.domainRules.isEmpty {
+                        EmptyStateRow(
+                            icon: "network.badge.shield.half.filled",
+                            title: "No domain rules",
+                            detail: "If this stays empty, any domain is allowed while EIP-712 signing is enabled."
+                        )
+                    } else {
+                        VStack(spacing: 10) {
+                            ForEach(activeRules.typedDataPolicy.domainRules) { rule in
+                                HStack(alignment: .top, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(rule.displayDescription)
+                                            .font(.subheadline.weight(.semibold))
+                                        Text(domainRuleDescription(rule))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+
+                                    Spacer()
+
+                                    removeButton {
+                                        removeTypedDataDomainRule(rule)
+                                    }
+                                }
+                                .padding(12)
+                                .background(cardRowBackground)
+                            }
+                        }
+                    }
+
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            TextField("Label (optional)", text: $newTypedDomainLabel)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                            TextField("Primary Type", text: $newTypedDomainPrimaryType)
+                                .textFieldStyle(.roundedBorder)
+                            TextField("Domain Name", text: $newTypedDomainName)
+                                .textFieldStyle(.roundedBorder)
+                            TextField("Version", text: $newTypedDomainVersion)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                        }
+
+                        HStack(spacing: 10) {
+                            TextField("Chain ID", text: $newTypedDomainChainId)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 120)
+                            TextField("Verifying Contract", text: $newTypedDomainVerifyingContract)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                            Button("Add Domain Rule") {
+                                addTypedDataDomainRule()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!canAddTypedDataDomainRule)
+                        }
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionLabel("Struct Matchers")
+
+                    Text("`matcherJSON` is matched as an exact subset against the EIP-712 `message` object. Leave fields out if you do not want to pin them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if activeRules.typedDataPolicy.structRules.isEmpty {
+                        EmptyStateRow(
+                            icon: "curlybraces.square",
+                            title: "No struct matchers",
+                            detail: "If this stays empty, any struct payload is allowed once the domain rule matches."
+                        )
+                    } else {
+                        VStack(spacing: 10) {
+                            ForEach(activeRules.typedDataPolicy.structRules) { rule in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .top) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(rule.displayDescription)
+                                                .font(.subheadline.weight(.semibold))
+                                            Text("Primary type: \(rule.primaryType)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        Spacer()
+
+                                        removeButton {
+                                            removeTypedDataStructRule(rule)
+                                        }
+                                    }
+
+                                    Text(rule.matcherJSON)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .padding(10)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(Color.white.opacity(0.55))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                }
+                                .padding(12)
+                                .background(cardRowBackground)
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            TextField("Label (optional)", text: $newTypedStructLabel)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                            TextField("Primary Type", text: $newTypedStructPrimaryType)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        TextEditor(text: $newTypedStructMatcherJSON)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(minHeight: 120)
+                            .padding(8)
+                            .background(Color.white.opacity(0.7))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        HStack {
+                            Button("Add Struct Rule") {
+                                addTypedDataStructRule()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!canAddTypedDataStructRule)
+
+                            Spacer()
+                        }
+                    }
+                }
             }
         }
     }
@@ -122,10 +551,10 @@ struct RulesSettingsView: View {
         SettingsCard(
             icon: "slider.horizontal.3",
             accent: Color(red: 0.18, green: 0.45, blue: 0.34),
-            title: "Access Controls",
-            subtitle: "Scope autonomous signing by local time, chain, decoded destination targets, and smart-account activity."
+            title: "UserOperation Policy",
+            subtitle: "\(activeScopeTitle) controls autonomous UserOperation signing."
         ) {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 14) {
                 Toggle("Enable rule enforcement", isOn: rulesEnabledBinding)
                     .toggleStyle(.switch)
 
@@ -135,7 +564,7 @@ struct RulesSettingsView: View {
                     Toggle("Restrict signing to a time window", isOn: allowedHoursEnabledBinding)
                         .toggleStyle(.switch)
 
-                    if draftConfig.rules.allowedHours != nil {
+                    if activeRules.allowedHours != nil {
                         HStack(spacing: 14) {
                             Picker("Start", selection: allowedHoursStartBinding) {
                                 ForEach(0..<24, id: \.self) { hour in
@@ -266,59 +695,113 @@ struct RulesSettingsView: View {
         }
     }
 
-    private var clientCard: some View {
+    private var defaultScopeCard: some View {
         SettingsCard(
-            icon: "desktopcomputer.trianglebadge.exclamationmark",
+            icon: "person.crop.rectangle.stack",
             accent: Color(red: 0.48, green: 0.34, blue: 0.16),
-            title: "Allowed XPC Clients",
-            subtitle: "Same-team code signing is always required. Add bundle IDs here if you want Bastion to trust only specific clients."
+            title: "Default Client Template",
+            subtitle: "New clients inherit a copy of this auth policy and rule set the first time they connect."
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                if allowedClients.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                LazyVGrid(columns: summaryPillColumns, alignment: .leading, spacing: 8) {
+                    SummaryPill(
+                        title: "Profiles",
+                        value: "\(clientProfiles.count)",
+                        tint: Color(red: 0.11, green: 0.39, blue: 0.63)
+                    )
+                    SummaryPill(
+                        title: "Raw",
+                        value: draftConfig.rules.rawMessagePolicy.enabled ? "Allowed" : "Blocked",
+                        tint: Color(red: 0.15, green: 0.36, blue: 0.59)
+                    )
+                    SummaryPill(
+                        title: "Typed",
+                        value: draftConfig.rules.typedDataPolicy.enabled ? "Allowed" : "Blocked",
+                        tint: Color(red: 0.44, green: 0.31, blue: 0.55)
+                    )
+                    SummaryPill(
+                        title: "UserOp",
+                        value: draftConfig.rules.enabled ? "Enabled" : "Paused",
+                        tint: Color(red: 0.18, green: 0.45, blue: 0.34)
+                    )
+                    SummaryPill(
+                        title: "Bundler",
+                        value: draftConfig.bundlerPreferences.zeroDevProjectId == nil ? "Unset" : "Configured",
+                        tint: draftConfig.bundlerPreferences.zeroDevProjectId == nil
+                            ? Color.gray
+                            : Color(red: 0.17, green: 0.40, blue: 0.58)
+                    )
+                    SummaryPill(
+                        title: "RPCs",
+                        value: "\(draftConfig.bundlerPreferences.chainRPCs.count)",
+                        tint: Color(red: 0.14, green: 0.47, blue: 0.34)
+                    )
+                }
+
+                if clientProfiles.isEmpty {
                     EmptyStateRow(
-                        icon: "person.2.slash",
-                        title: "No client allowlist",
-                        detail: "Team ID verification is still enforced, but no per-client restriction is configured."
+                        icon: "person.badge.plus",
+                        title: "No client profiles yet",
+                        detail: "The first request from a new bundle ID will clone this page into a dedicated client policy."
                     )
                 } else {
-                    VStack(spacing: 10) {
-                        ForEach(allowedClients) { client in
-                            HStack(alignment: .top, spacing: 12) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(client.displayDescription)
-                                        .font(.subheadline.weight(.semibold))
-                                    Text(client.bundleId)
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
-                                }
-
-                                Spacer()
-
-                                removeButton {
-                                    removeClient(client)
-                                }
-                            }
-                            .padding(12)
-                            .background(cardRowBackground)
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionLabel("Existing Overrides")
+                        ForEach(clientProfiles) { profile in
+                            scopeRow(
+                                title: profile.displayDescription,
+                                subtitle: "Own auth policy, rules, key, and account",
+                                bundleId: profile.bundleId,
+                                accountAddress: clientAccountAddresses[profile.id],
+                                isSelected: false,
+                                onSelect: {
+                                    selectedProfileID = profile.id
+                                },
+                                onReset: nil,
+                                onRemove: nil
+                            )
                         }
                     }
                 }
+            }
+        }
+    }
 
-                HStack(spacing: 10) {
-                    TextField("Bundle ID", text: $newClientBundleId)
+    private var clientIdentityCard: some View {
+        SettingsCard(
+            icon: "person.text.rectangle",
+            accent: Color(red: 0.48, green: 0.34, blue: 0.16),
+            title: "Client Identity",
+            subtitle: "This page edits the full policy snapshot for the selected client."
+        ) {
+            if let profile = selectedClientProfile {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("Display Label", text: profileLabelBinding)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
 
-                    TextField("Label (optional)", text: $newClientLabel)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 180)
+                    SettingsKeyValueRow(label: "Bundle ID", value: profile.bundleId)
 
-                    Button("Add Client") {
-                        addClient()
+                    if let account = clientAccountAddresses[profile.id] {
+                        SettingsKeyValueRow(label: "Account", value: account)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(!canAddClient)
+
+                    SettingsKeyValueRow(label: "Key Tag", value: profile.keyTag)
+
+                    HStack(spacing: 10) {
+                        Button("Reset from Default") {
+                            resetProfileRules(profile)
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(role: .destructive) {
+                            removeClientProfile(profile)
+                        } label: {
+                            Text("Remove Client")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Spacer()
+                    }
                 }
             }
         }
@@ -329,10 +812,10 @@ struct RulesSettingsView: View {
             icon: "speedometer",
             accent: Color(red: 0.55, green: 0.29, blue: 0.18),
             title: "Rate Limits",
-            subtitle: "Throttle autonomous signing frequency before Bastion escalates to manual approval."
+            subtitle: "Throttle autonomous signing frequency."
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                if draftConfig.rules.rateLimits.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                if activeRules.rateLimits.isEmpty {
                     EmptyStateRow(
                         icon: "gauge.with.dots.needle.bottom.0percent",
                         title: "No rate limits configured",
@@ -340,7 +823,7 @@ struct RulesSettingsView: View {
                     )
                 } else {
                     VStack(spacing: 10) {
-                        ForEach(draftConfig.rules.rateLimits) { rule in
+                        ForEach(activeRules.rateLimits) { rule in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(rule.displayDescription)
@@ -392,9 +875,9 @@ struct RulesSettingsView: View {
             icon: "banknote",
             accent: Color(red: 0.21, green: 0.47, blue: 0.33),
             title: "Spending Limits",
-            subtitle: "Bastion enforces direct native value plus ERC-20 transfer, approve, and transferFrom amounts decoded from Kernel execute() calldata."
+            subtitle: "Direct native value and direct ERC-20 transfer budgets."
         ) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(Color(red: 0.72, green: 0.43, blue: 0.11))
@@ -408,7 +891,7 @@ struct RulesSettingsView: View {
                         .fill(Color.white.opacity(0.55))
                 )
 
-                if draftConfig.rules.spendingLimits.isEmpty {
+                if activeRules.spendingLimits.isEmpty {
                     EmptyStateRow(
                         icon: "wallet.bifold",
                         title: "No spending limits configured",
@@ -416,7 +899,7 @@ struct RulesSettingsView: View {
                     )
                 } else {
                     VStack(spacing: 10) {
-                        ForEach(draftConfig.rules.spendingLimits) { rule in
+                        ForEach(activeRules.spendingLimits) { rule in
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(rule.displayDescription)
@@ -482,11 +965,49 @@ struct RulesSettingsView: View {
         }
     }
 
+    private var sidebarAddProfileForm: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("NEW CLIENT PROFILE")
+                .font(.caption2.weight(.black))
+                .kerning(1.1)
+                .foregroundStyle(Color(red: 0.45, green: 0.25, blue: 0.14))
+
+            TextField("Bundle ID", text: $newClientBundleId)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+
+            TextField("Label (optional)", text: $newClientLabel)
+                .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                Button("Create") {
+                    addClientProfile()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canAddClientProfile)
+
+                Button("Reload") {
+                    loadCurrentConfig()
+                }
+                .buttonStyle(.bordered)
+                .disabled(isSaving)
+            }
+        }
+        .padding(.top, 12)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.7))
+                .frame(height: 1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
+    }
+
     private var saveBar: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Rule changes require biometric or passcode confirmation.")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.caption.weight(.semibold))
 
                 if !statusMessage.isEmpty {
                     Text(statusMessage)
@@ -513,65 +1034,138 @@ struct RulesSettingsView: View {
             .buttonStyle(.borderedProminent)
             .disabled(isSaving)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
         .background(.ultraThinMaterial)
     }
 
     private var authPolicyBinding: Binding<AuthPolicy> {
         Binding(
-            get: { draftConfig.authPolicy },
-            set: { draftConfig.authPolicy = $0 }
+            get: {
+                if let index = selectedClientProfileIndex {
+                    return draftConfig.clientProfiles[index].authPolicy ?? draftConfig.authPolicy
+                }
+                return draftConfig.authPolicy
+            },
+            set: { newValue in
+                if let index = selectedClientProfileIndex {
+                    draftConfig.clientProfiles[index].authPolicy = newValue
+                } else {
+                    draftConfig.authPolicy = newValue
+                }
+            }
+        )
+    }
+
+    private var zeroDevProjectIdBinding: Binding<String> {
+        Binding(
+            get: { draftConfig.bundlerPreferences.zeroDevProjectId ?? "" },
+            set: { newValue in
+                let trimmedValue = trimmed(newValue)
+                draftConfig.bundlerPreferences.zeroDevProjectId = trimmedValue.isEmpty ? nil : trimmedValue
+            }
+        )
+    }
+
+    private var configuredRPCEndpoints: [ChainRPCPreference] {
+        draftConfig.bundlerPreferences.chainRPCs
+    }
+
+    private var profileLabelBinding: Binding<String> {
+        Binding(
+            get: { selectedClientProfile?.label ?? "" },
+            set: { newValue in
+                guard let index = selectedClientProfileIndex else { return }
+                let value = trimmed(newValue)
+                draftConfig.clientProfiles[index].label = value.isEmpty ? nil : value
+            }
         )
     }
 
     private var rulesEnabledBinding: Binding<Bool> {
         Binding(
-            get: { draftConfig.rules.enabled },
-            set: { draftConfig.rules.enabled = $0 }
+            get: { activeRules.enabled },
+            set: { newValue in
+                updateActiveRules { $0.enabled = newValue }
+            }
         )
     }
 
     private var requireExplicitApprovalBinding: Binding<Bool> {
         Binding(
-            get: { draftConfig.rules.requireExplicitApproval },
-            set: { draftConfig.rules.requireExplicitApproval = $0 }
+            get: { activeRules.requireExplicitApproval },
+            set: { newValue in
+                updateActiveRules { $0.requireExplicitApproval = newValue }
+            }
+        )
+    }
+
+    private var rawMessageEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { activeRules.rawMessagePolicy.enabled },
+            set: { newValue in
+                updateActiveRules { $0.rawMessagePolicy.enabled = newValue }
+            }
+        )
+    }
+
+    private var typedDataEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { activeRules.typedDataPolicy.enabled },
+            set: { newValue in
+                updateActiveRules { $0.typedDataPolicy.enabled = newValue }
+            }
+        )
+    }
+
+    private var typedDataApprovalBinding: Binding<Bool> {
+        Binding(
+            get: { activeRules.typedDataPolicy.requireExplicitApproval },
+            set: { newValue in
+                updateActiveRules { $0.typedDataPolicy.requireExplicitApproval = newValue }
+            }
         )
     }
 
     private var allowedHoursEnabledBinding: Binding<Bool> {
         Binding(
-            get: { draftConfig.rules.allowedHours != nil },
+            get: { activeRules.allowedHours != nil },
             set: { enabled in
-                draftConfig.rules.allowedHours = enabled
-                    ? (draftConfig.rules.allowedHours ?? AllowedHours(start: 9, end: 18))
-                    : nil
+                updateActiveRules {
+                    $0.allowedHours = enabled
+                        ? ($0.allowedHours ?? AllowedHours(start: 9, end: 18))
+                        : nil
+                }
             }
         )
     }
 
     private var allowedHoursStartBinding: Binding<Int> {
         Binding(
-            get: { draftConfig.rules.allowedHours?.start ?? 9 },
+            get: { activeRules.allowedHours?.start ?? 9 },
             set: { start in
-                let currentEnd = draftConfig.rules.allowedHours?.end ?? 18
-                draftConfig.rules.allowedHours = AllowedHours(start: start, end: currentEnd)
+                let currentEnd = activeRules.allowedHours?.end ?? 18
+                updateActiveRules {
+                    $0.allowedHours = AllowedHours(start: start, end: currentEnd)
+                }
             }
         )
     }
 
     private var allowedHoursEndBinding: Binding<Int> {
         Binding(
-            get: { draftConfig.rules.allowedHours?.end ?? 18 },
+            get: { activeRules.allowedHours?.end ?? 18 },
             set: { end in
-                let currentStart = draftConfig.rules.allowedHours?.start ?? 9
-                draftConfig.rules.allowedHours = AllowedHours(start: currentStart, end: end)
+                let currentStart = activeRules.allowedHours?.start ?? 9
+                updateActiveRules {
+                    $0.allowedHours = AllowedHours(start: currentStart, end: end)
+                }
             }
         )
     }
 
     private var authFootnote: String {
-        switch draftConfig.authPolicy {
+        switch authPolicyBinding.wrappedValue {
         case .open:
             return "No local authentication after a request clears policy. Use this only if the surrounding rules are strict."
         case .passcode:
@@ -584,15 +1178,15 @@ struct RulesSettingsView: View {
     }
 
     private var allowedChains: [Int] {
-        (draftConfig.rules.allowedChains ?? []).sorted()
+        (activeRules.allowedChains ?? []).sorted()
     }
 
-    private var allowedClients: [AllowedClient] {
-        draftConfig.rules.allowedClients ?? []
+    private var clientProfiles: [ClientProfile] {
+        draftConfig.clientProfiles
     }
 
     private var allowedAccountEntries: [AllowedAccountEntry] {
-        let entries = (draftConfig.rules.allowedTargets ?? [:]).flatMap { chainKey, addresses in
+        let entries = (activeRules.allowedTargets ?? [:]).flatMap { chainKey, addresses in
             addresses.map { AllowedAccountEntry(chainKey: chainKey, address: $0) }
         }
 
@@ -612,8 +1206,24 @@ struct RulesSettingsView: View {
         isChainKey(trimmed(newAllowedAccountChain)) && isHexAddress(trimmed(newAllowedAccountAddress))
     }
 
-    private var canAddClient: Bool {
+    private var canAddClientProfile: Bool {
         !trimmed(newClientBundleId).isEmpty
+    }
+
+    private var canAddRPCPreference: Bool {
+        Int(trimmed(newRPCChainId)) != nil && isValidRPCURL(newRPCURL)
+    }
+
+    private var canAddTypedDataDomainRule: Bool {
+        !trimmed(newTypedDomainPrimaryType).isEmpty ||
+            !trimmed(newTypedDomainName).isEmpty ||
+            !trimmed(newTypedDomainVersion).isEmpty ||
+            !trimmed(newTypedDomainChainId).isEmpty ||
+            !trimmed(newTypedDomainVerifyingContract).isEmpty
+    }
+
+    private var canAddTypedDataStructRule: Bool {
+        !trimmed(newTypedStructPrimaryType).isEmpty && isValidJSON(newTypedStructMatcherJSON)
     }
 
     private var canAddRateLimit: Bool {
@@ -633,9 +1243,106 @@ struct RulesSettingsView: View {
             .fill(Color.white.opacity(0.7))
     }
 
+    private var activeRules: RuleConfig {
+        get {
+            if let index = selectedClientProfileIndex {
+                return draftConfig.clientProfiles[index].rules
+            }
+            return draftConfig.rules
+        }
+    }
+
+    private var selectedClientProfileIndex: Int? {
+        guard let selectedProfileID else {
+            return nil
+        }
+        return draftConfig.clientProfiles.firstIndex { $0.id == selectedProfileID }
+    }
+
+    private var selectedClientProfile: ClientProfile? {
+        guard let index = selectedClientProfileIndex else {
+            return nil
+        }
+        return draftConfig.clientProfiles[index]
+    }
+
+    private var activeScopeTitle: String {
+        selectedClientProfile?.displayDescription ?? "Global Defaults"
+    }
+
+    private var activeAccountAddress: String? {
+        guard let selectedClientProfile else {
+            return nil
+        }
+        return clientAccountAddresses[selectedClientProfile.id]
+    }
+
     private func sectionLabel(_ title: String) -> some View {
         Text(title)
             .font(.headline)
+    }
+
+    private func sidebarSectionLabel(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+    }
+
+    private func sidebarRow(
+        title: String,
+        subtitle: String,
+        accountAddress: String?,
+        systemImage: String,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(isSelected ? Color(red: 0.45, green: 0.25, blue: 0.14) : .secondary)
+                    .frame(width: 18, height: 18)
+                    .padding(.top, 2)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    if let accountAddress {
+                        Text(shortAddress(accountAddress))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isSelected ? Color.white.opacity(0.92) : Color.white.opacity(0.58))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(
+                        isSelected
+                            ? Color(red: 0.45, green: 0.25, blue: 0.14).opacity(0.28)
+                            : Color.clear,
+                        lineWidth: 1
+                    )
+            )
+            .overlay(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(isSelected ? Color(red: 0.45, green: 0.25, blue: 0.14) : .clear)
+                    .frame(width: 4)
+                    .padding(.vertical, 8)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private func removeButton(action: @escaping () -> Void) -> some View {
@@ -648,6 +1355,11 @@ struct RulesSettingsView: View {
     private func loadCurrentConfig() {
         let config = ruleEngine.config
         draftConfig = config
+        if let selectedProfileID,
+           !config.clientProfiles.contains(where: { $0.id == selectedProfileID }) {
+            self.selectedProfileID = nil
+        }
+        refreshAccountAddresses()
         clearTransientInputs()
         clearStatus()
     }
@@ -673,17 +1385,17 @@ struct RulesSettingsView: View {
             return
         }
 
-        var chains = Set(draftConfig.rules.allowedChains ?? [])
+        var chains = Set(activeRules.allowedChains ?? [])
         chains.insert(chainId)
-        draftConfig.rules.allowedChains = chains.isEmpty ? nil : chains.sorted()
+        updateActiveRules { $0.allowedChains = chains.isEmpty ? nil : chains.sorted() }
         newAllowedChain = ""
         clearStatus()
     }
 
     private func removeAllowedChain(_ chainId: Int) {
-        var chains = draftConfig.rules.allowedChains ?? []
+        var chains = activeRules.allowedChains ?? []
         chains.removeAll { $0 == chainId }
-        draftConfig.rules.allowedChains = chains.isEmpty ? nil : chains.sorted()
+        updateActiveRules { $0.allowedChains = chains.isEmpty ? nil : chains.sorted() }
     }
 
     private func addAllowedAccount() {
@@ -695,7 +1407,7 @@ struct RulesSettingsView: View {
             return
         }
 
-        var targets = draftConfig.rules.allowedTargets ?? [:]
+        var targets = activeRules.allowedTargets ?? [:]
         var accounts = targets[chainKey] ?? []
 
         if !accounts.contains(where: { $0.caseInsensitiveCompare(address) == .orderedSame }) {
@@ -704,14 +1416,14 @@ struct RulesSettingsView: View {
             targets[chainKey] = accounts
         }
 
-        draftConfig.rules.allowedTargets = targets.isEmpty ? nil : targets
+        updateActiveRules { $0.allowedTargets = targets.isEmpty ? nil : targets }
         newAllowedAccountChain = ""
         newAllowedAccountAddress = ""
         clearStatus()
     }
 
     private func removeAllowedAccount(_ entry: AllowedAccountEntry) {
-        guard var targets = draftConfig.rules.allowedTargets else { return }
+        guard var targets = activeRules.allowedTargets else { return }
         var accounts = targets[entry.chainKey] ?? []
         accounts.removeAll { $0.caseInsensitiveCompare(entry.address) == .orderedSame }
         if accounts.isEmpty {
@@ -719,36 +1431,74 @@ struct RulesSettingsView: View {
         } else {
             targets[entry.chainKey] = accounts
         }
-        draftConfig.rules.allowedTargets = targets.isEmpty ? nil : targets
+        updateActiveRules { $0.allowedTargets = targets.isEmpty ? nil : targets }
     }
 
-    private func addClient() {
+    private func addClientProfile() {
         let bundleId = trimmed(newClientBundleId)
         guard !bundleId.isEmpty else {
             setStatus("Bundle ID is required.", isError: true)
             return
         }
 
-        var clients = draftConfig.rules.allowedClients ?? []
-        let exists = clients.contains { $0.bundleId.caseInsensitiveCompare(bundleId) == .orderedSame }
+        let exists = draftConfig.clientProfiles.contains { $0.bundleId.caseInsensitiveCompare(bundleId) == .orderedSame }
         if !exists {
-            clients.append(AllowedClient(
-                id: UUID().uuidString,
+            draftConfig.clientProfiles.append(ClientProfile(
                 bundleId: bundleId,
-                label: trimmed(newClientLabel).isEmpty ? nil : trimmed(newClientLabel)
+                label: trimmed(newClientLabel).isEmpty ? nil : trimmed(newClientLabel),
+                authPolicy: draftConfig.authPolicy,
+                rules: clonedClientRules(from: draftConfig.rules)
             ))
+            draftConfig.clientProfiles.sort {
+                $0.bundleId.localizedCaseInsensitiveCompare($1.bundleId) == .orderedAscending
+            }
+            if let added = draftConfig.clientProfiles.first(where: { $0.bundleId.caseInsensitiveCompare(bundleId) == .orderedSame }) {
+                selectedProfileID = added.id
+            }
+            refreshAccountAddresses()
         }
 
-        draftConfig.rules.allowedClients = clients.isEmpty ? nil : clients
         newClientBundleId = ""
         newClientLabel = ""
         clearStatus()
     }
 
-    private func removeClient(_ client: AllowedClient) {
-        var clients = draftConfig.rules.allowedClients ?? []
-        clients.removeAll { $0.id == client.id }
-        draftConfig.rules.allowedClients = clients.isEmpty ? nil : clients
+    private func addRPCPreference() {
+        guard let chainId = Int(trimmed(newRPCChainId)), isValidRPCURL(newRPCURL) else {
+            setStatus("Enter a valid chain ID and HTTP(S) RPC URL.", isError: true)
+            return
+        }
+
+        let rpcURL = trimmed(newRPCURL)
+        draftConfig.bundlerPreferences.chainRPCs.removeAll { $0.chainId == chainId }
+        draftConfig.bundlerPreferences.chainRPCs.append(
+            ChainRPCPreference(chainId: chainId, rpcURL: rpcURL)
+        )
+        draftConfig.bundlerPreferences.chainRPCs.sort { $0.chainId < $1.chainId }
+        newRPCChainId = ""
+        newRPCURL = ""
+        clearStatus()
+    }
+
+    private func removeRPCPreference(_ endpoint: ChainRPCPreference) {
+        draftConfig.bundlerPreferences.chainRPCs.removeAll { $0.chainId == endpoint.chainId }
+    }
+
+    private func resetProfileRules(_ profile: ClientProfile) {
+        guard let index = draftConfig.clientProfiles.firstIndex(where: { $0.id == profile.id }) else {
+            return
+        }
+        draftConfig.clientProfiles[index].authPolicy = draftConfig.authPolicy
+        draftConfig.clientProfiles[index].rules = clonedClientRules(from: draftConfig.rules)
+        clearStatus()
+    }
+
+    private func removeClientProfile(_ profile: ClientProfile) {
+        draftConfig.clientProfiles.removeAll { $0.id == profile.id }
+        clientAccountAddresses.removeValue(forKey: profile.id)
+        if selectedProfileID == profile.id {
+            selectedProfileID = nil
+        }
     }
 
     private func addRateLimit() {
@@ -758,17 +1508,21 @@ struct RulesSettingsView: View {
             return
         }
 
-        draftConfig.rules.rateLimits.append(RateLimitRule(
-            id: UUID().uuidString,
-            maxRequests: max,
-            windowSeconds: window
-        ))
+        updateActiveRules {
+            $0.rateLimits.append(RateLimitRule(
+                id: UUID().uuidString,
+                maxRequests: max,
+                windowSeconds: window
+            ))
+        }
         newRLMax = ""
         clearStatus()
     }
 
     private func removeRateLimit(_ rule: RateLimitRule) {
-        draftConfig.rules.rateLimits.removeAll { $0.id == rule.id }
+        updateActiveRules {
+            $0.rateLimits.removeAll { $0.id == rule.id }
+        }
     }
 
     private func addSpendingLimit() {
@@ -783,12 +1537,14 @@ struct RulesSettingsView: View {
             return
         }
 
-        draftConfig.rules.spendingLimits.append(SpendingLimitRule(
-            id: UUID().uuidString,
-            token: token,
-            allowance: trimmed(newSLAllowance),
-            windowSeconds: window
-        ))
+        updateActiveRules {
+            $0.spendingLimits.append(SpendingLimitRule(
+                id: UUID().uuidString,
+                token: token,
+                allowance: trimmed(newSLAllowance),
+                windowSeconds: window
+            ))
+        }
 
         newSLAllowance = ""
         newSLWindow = ""
@@ -798,7 +1554,9 @@ struct RulesSettingsView: View {
     }
 
     private func removeSpendingLimit(_ rule: SpendingLimitRule) {
-        draftConfig.rules.spendingLimits.removeAll { $0.id == rule.id }
+        updateActiveRules {
+            $0.spendingLimits.removeAll { $0.id == rule.id }
+        }
     }
 
     private func spendingToken() -> TokenIdentifier? {
@@ -833,6 +1591,17 @@ struct RulesSettingsView: View {
         newAllowedAccountAddress = ""
         newClientBundleId = ""
         newClientLabel = ""
+        newRPCChainId = ""
+        newRPCURL = ""
+        newTypedDomainLabel = ""
+        newTypedDomainPrimaryType = ""
+        newTypedDomainName = ""
+        newTypedDomainVersion = ""
+        newTypedDomainChainId = ""
+        newTypedDomainVerifyingContract = ""
+        newTypedStructLabel = ""
+        newTypedStructPrimaryType = ""
+        newTypedStructMatcherJSON = "{\n  \n}"
         newRLMax = ""
         newRLWindow = "3600"
         newSLToken = "eth"
@@ -844,6 +1613,114 @@ struct RulesSettingsView: View {
 
     private func trimmed(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isValidRPCURL(_ value: String) -> Bool {
+        let trimmedValue = trimmed(value)
+        guard let url = URL(string: trimmedValue),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host != nil else {
+            return false
+        }
+        return true
+    }
+
+    private func updateActiveRules(_ update: (inout RuleConfig) -> Void) {
+        if let index = selectedClientProfileIndex {
+            update(&draftConfig.clientProfiles[index].rules)
+        } else {
+            update(&draftConfig.rules)
+        }
+    }
+
+    private func refreshAccountAddresses() {
+        var addresses: [String: String] = [:]
+        for profile in draftConfig.clientProfiles {
+            if let address = ruleEngine.accountAddress(for: profile) {
+                addresses[profile.id] = address
+            }
+        }
+        clientAccountAddresses = addresses
+    }
+
+    private func clonedClientRules(from template: RuleConfig) -> RuleConfig {
+        var cloned = template
+        cloned.allowedClients = nil
+        cloned.rateLimits = template.rateLimits.map {
+            RateLimitRule(id: UUID().uuidString, maxRequests: $0.maxRequests, windowSeconds: $0.windowSeconds)
+        }
+        cloned.spendingLimits = template.spendingLimits.map {
+            SpendingLimitRule(id: UUID().uuidString, token: $0.token, allowance: $0.allowance, windowSeconds: $0.windowSeconds)
+        }
+        return cloned
+    }
+
+    private func addTypedDataDomainRule() {
+        let chainIdText = trimmed(newTypedDomainChainId)
+        let verifyingContractText = trimmed(newTypedDomainVerifyingContract)
+
+        if !chainIdText.isEmpty && Int(chainIdText) == nil {
+            setStatus("Typed-data chain ID must be numeric.", isError: true)
+            return
+        }
+        if !verifyingContractText.isEmpty && !isHexAddress(verifyingContractText) {
+            setStatus("Typed-data verifying contract must be a valid address.", isError: true)
+            return
+        }
+
+        updateActiveRules {
+            $0.typedDataPolicy.domainRules.append(TypedDataDomainRule(
+                id: UUID().uuidString,
+                label: trimmed(newTypedDomainLabel).isEmpty ? nil : trimmed(newTypedDomainLabel),
+                primaryType: trimmed(newTypedDomainPrimaryType).isEmpty ? nil : trimmed(newTypedDomainPrimaryType),
+                name: trimmed(newTypedDomainName).isEmpty ? nil : trimmed(newTypedDomainName),
+                version: trimmed(newTypedDomainVersion).isEmpty ? nil : trimmed(newTypedDomainVersion),
+                chainId: Int(chainIdText),
+                verifyingContract: verifyingContractText.isEmpty ? nil : normalizedAddress(verifyingContractText)
+            ))
+        }
+
+        newTypedDomainLabel = ""
+        newTypedDomainPrimaryType = ""
+        newTypedDomainName = ""
+        newTypedDomainVersion = ""
+        newTypedDomainChainId = ""
+        newTypedDomainVerifyingContract = ""
+        clearStatus()
+    }
+
+    private func removeTypedDataDomainRule(_ rule: TypedDataDomainRule) {
+        updateActiveRules {
+            $0.typedDataPolicy.domainRules.removeAll { $0.id == rule.id }
+        }
+    }
+
+    private func addTypedDataStructRule() {
+        guard isValidJSON(newTypedStructMatcherJSON) else {
+            setStatus("Struct matcher must be valid JSON.", isError: true)
+            return
+        }
+
+        updateActiveRules {
+            $0.typedDataPolicy.structRules.append(TypedDataStructRule(
+                id: UUID().uuidString,
+                label: trimmed(newTypedStructLabel).isEmpty ? nil : trimmed(newTypedStructLabel),
+                primaryType: trimmed(newTypedStructPrimaryType),
+                matcherJSON: normalizedJSON(newTypedStructMatcherJSON)
+            ))
+        }
+
+        newTypedStructLabel = ""
+        newTypedStructPrimaryType = ""
+        newTypedStructMatcherJSON = "{\n  \n}"
+        clearStatus()
+    }
+
+    private func removeTypedDataStructRule(_ rule: TypedDataStructRule) {
+        updateActiveRules {
+            $0.typedDataPolicy.structRules.removeAll { $0.id == rule.id }
+        }
     }
 
     private func normalizedAddress(_ text: String) -> String {
@@ -864,6 +1741,610 @@ struct RulesSettingsView: View {
         guard value.count == 42, value.hasPrefix("0x") else { return false }
         return value.dropFirst(2).allSatisfy { $0.isHexDigit }
     }
+
+    private func shortAddress(_ address: String) -> String {
+        guard address.count > 14 else {
+            return address
+        }
+        return "\(address.prefix(10))...\(address.suffix(4))"
+    }
+
+    private func domainRuleDescription(_ rule: TypedDataDomainRule) -> String {
+        var parts: [String] = []
+        if let primaryType = trimmedOrNil(rule.primaryType) {
+            parts.append("type=\(primaryType)")
+        }
+        if let name = trimmedOrNil(rule.name) {
+            parts.append("name=\(name)")
+        }
+        if let version = trimmedOrNil(rule.version) {
+            parts.append("version=\(version)")
+        }
+        if let chainId = rule.chainId {
+            parts.append("chain=\(chainId)")
+        }
+        if let verifyingContract = trimmedOrNil(rule.verifyingContract) {
+            parts.append("verifying=\(verifyingContract)")
+        }
+        return parts.isEmpty ? "Matches any domain" : parts.joined(separator: " · ")
+    }
+
+    private func trimmedOrNil(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let trimmed = trimmed(text)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func isValidJSON(_ text: String) -> Bool {
+        guard let data = text.data(using: .utf8) else {
+            return false
+        }
+        return (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil
+    }
+
+    private func normalizedJSON(_ text: String) -> String {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let normalized = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let string = String(data: normalized, encoding: .utf8) else {
+            return text
+        }
+        return string
+    }
+
+    private func scopeRow(
+        title: String,
+        subtitle: String,
+        bundleId: String?,
+        accountAddress: String?,
+        isSelected: Bool,
+        onSelect: @escaping () -> Void,
+        onReset: (() -> Void)?,
+        onRemove: (() -> Void)?
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let bundleId {
+                    Text(bundleId)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let accountAddress {
+                    Text("Account: \(accountAddress)")
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 8) {
+                Button(isSelected ? "Editing" : "Edit") {
+                    onSelect()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                if let onReset {
+                    Button("Reset from Global") {
+                        onReset()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                if let onRemove {
+                    Button(role: .destructive) {
+                        onRemove()
+                    } label: {
+                        Text("Remove")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(isSelected ? Color(red: 0.82, green: 0.46, blue: 0.16).opacity(0.12) : Color.white.opacity(0.7))
+        )
+    }
+}
+
+struct AuditHistoryView: View {
+    @State private var historyRequests: [AuditRequestRecord] = []
+    @State private var selectedHistoryRequestID: String?
+    private let refreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.965, green: 0.962, blue: 0.952),
+                    Color(red: 0.952, green: 0.958, blue: 0.964),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                historyHeroCard
+
+                HSplitView {
+                    historyListCard
+                        .frame(minWidth: 330, idealWidth: 360, maxWidth: 420)
+                    historyDetailCard
+                        .frame(minWidth: 440)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: 1180, alignment: .leading)
+        }
+        .frame(minWidth: 980, minHeight: 720)
+        .onAppear {
+            refreshHistory()
+        }
+        .onReceive(refreshTimer) { _ in
+            refreshHistory()
+        }
+    }
+
+    private var selectedHistoryRequest: AuditRequestRecord? {
+        guard let selectedHistoryRequestID else {
+            return historyRequests.first
+        }
+        return historyRequests.first { $0.id == selectedHistoryRequestID } ?? historyRequests.first
+    }
+
+    private var requestCountToday: Int {
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        return historyRequests.filter { record in
+            guard let date = record.latestTimestamp else { return false }
+            return date >= startOfDay
+        }.count
+    }
+
+    private var confirmedRequestCount: Int {
+        historyRequests.filter { record in
+            record.events.contains(where: { $0.type == .userOpReceiptSuccess })
+        }.count
+    }
+
+    private var blockedRequestCount: Int {
+        historyRequests.filter { record in
+            guard let latestType = record.latestEvent?.type else { return false }
+            switch latestType {
+            case .signDenied, .ruleViolation, .authFailed, .userOpSendFailed, .userOpReceiptFailed, .userOpReceiptTimeout:
+                return true
+            case .signSuccess, .userOpSubmitted, .userOpReceiptSuccess:
+                return false
+            }
+        }.count
+    }
+
+    private var historyHeroCard: some View {
+        SettingsCard(
+            icon: "clock.badge.checkmark",
+            accent: Color(red: 0.11, green: 0.39, blue: 0.63),
+            title: "Audit History",
+            subtitle: "Client activity, payload details, and Bastion decisions."
+        ) {
+            HStack(spacing: 10) {
+                SummaryPill(
+                    title: "Requests",
+                    value: "\(historyRequests.count)",
+                    tint: Color(red: 0.11, green: 0.39, blue: 0.63)
+                )
+                SummaryPill(
+                    title: "Today",
+                    value: "\(requestCountToday)",
+                    tint: Color(red: 0.18, green: 0.45, blue: 0.34)
+                )
+                SummaryPill(
+                    title: "Confirmed",
+                    value: "\(confirmedRequestCount)",
+                    tint: Color(red: 0.12, green: 0.39, blue: 0.63)
+                )
+                SummaryPill(
+                    title: "Blocked",
+                    value: "\(blockedRequestCount)",
+                    tint: Color(red: 0.72, green: 0.43, blue: 0.11)
+                )
+
+                Spacer()
+
+                Button("Reload History") {
+                    refreshHistory()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private var historyListCard: some View {
+        SettingsCard(
+            icon: "list.bullet.rectangle.portrait",
+            accent: Color(red: 0.18, green: 0.45, blue: 0.34),
+            title: "Requests",
+            subtitle: "One row per request, newest first"
+        ) {
+            if historyRequests.isEmpty {
+                EmptyStateRow(
+                    icon: "clock.arrow.trianglehead.counterclockwise.rotate.90",
+                    title: "No requests yet",
+                    detail: "Requests that reach Bastion will appear here after they are approved, denied, or escalated."
+                )
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(historyRequests, id: \.id) { record in
+                            historyRow(record)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var historyDetailCard: some View {
+        SettingsCard(
+            icon: "doc.text.magnifyingglass",
+            accent: Color(red: 0.55, green: 0.29, blue: 0.18),
+            title: selectedHistoryRequest?.operationTitle ?? "Request Detail",
+            subtitle: selectedHistoryRequest?.latestReason ?? "Decoded request metadata, client identity, digest, payloads, and request lifecycle."
+        ) {
+            if let record = selectedHistoryRequest {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        SettingsKeyValueRow(label: "Latest Status", value: record.latestResultLabel)
+                        SettingsKeyValueRow(label: "Last Updated", value: formattedTimestamp(record.latestEvent))
+                        SettingsKeyValueRow(label: "Client", value: record.clientDisplayName)
+
+                        if let bundleId = record.client?.bundleId {
+                            SettingsKeyValueRow(label: "Bundle ID", value: bundleId)
+                        }
+                        if let accountAddress = record.client?.accountAddress {
+                            SettingsKeyValueRow(label: "Account", value: accountAddress)
+                        }
+                        if let request = record.request {
+                            SettingsKeyValueRow(label: "Request ID", value: record.requestID)
+                            SettingsKeyValueRow(label: "Kind", value: request.operationKind)
+                            SettingsKeyValueRow(label: "Summary", value: request.summary)
+                            SettingsCodeBlock(title: "Digest", value: request.digestHex)
+
+                            if !request.details.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Decoded Details")
+                                        .font(.headline)
+                                    ForEach(Array(request.details.enumerated()), id: \.offset) { _, detail in
+                                        SettingsCodeBlock(title: nil, value: detail)
+                                    }
+                                }
+                            }
+
+                            if let payloads = request.payloads, !payloads.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Raw Payloads")
+                                        .font(.headline)
+                                    ForEach(payloads) { payload in
+                                        SettingsCodeBlock(title: payload.title, value: payload.value)
+                                    }
+                                }
+                            }
+                        }
+
+                        if let submission = record.latestSubmission {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Latest Bundler Status")
+                                    .font(.headline)
+                                SettingsKeyValueRow(label: "Provider", value: submission.provider)
+                                SettingsKeyValueRow(label: "Status", value: submission.status)
+                                if let userOpHash = submission.userOpHash {
+                                    SettingsCodeBlock(title: "UserOp Hash", value: userOpHash)
+                                }
+                                if let transactionHash = submission.transactionHash {
+                                    SettingsCodeBlock(title: "Transaction Hash", value: transactionHash)
+                                }
+                                if let detail = submission.detail, !detail.isEmpty {
+                                    SettingsCodeBlock(title: "Bundler Detail", value: detail)
+                                }
+                            }
+                        }
+
+                        if let progress = requestProgress(for: record) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Request Progress")
+                                    .font(.headline)
+
+                                ProgressView(value: progress.fraction)
+                                    .tint(progress.color)
+
+                                HStack(spacing: 8) {
+                                    ForEach(progress.steps, id: \.title) { step in
+                                        historyProgressChip(step)
+                                    }
+                                }
+
+                                Text(progress.message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Request Timeline")
+                                .font(.headline)
+                            ForEach(record.events, id: \.id) { event in
+                                historyTimelineRow(event)
+                            }
+                        }
+                    }
+                }
+            } else {
+                EmptyStateRow(
+                    icon: "doc.text.magnifyingglass",
+                    title: "Select an event",
+                    detail: "Pick a request from the left to inspect the full audit detail."
+                )
+            }
+        }
+    }
+
+    private func historyRow(_ record: AuditRequestRecord) -> some View {
+        Button {
+            selectedHistoryRequestID = record.id
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: iconForEvent(record.latestEvent?.type))
+                        .foregroundStyle(colorForEvent(record.latestEvent?.type))
+                        .frame(width: 18, height: 18)
+                        .padding(.top, 2)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(record.operationTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(record.clientDisplayName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Text(formattedTimestamp(record.latestEvent))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(record.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+
+                Text(statusSummary(for: record))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(colorForEvent(record.latestEvent?.type))
+            }
+            .padding(11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(selectedHistoryRequestID == record.id ? Color(red: 0.82, green: 0.46, blue: 0.16).opacity(0.16) : Color.white.opacity(0.68))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func refreshHistory() {
+        historyRequests = AuditLog.shared.recentRequestRecords(limit: 300)
+        if let selectedHistoryRequestID,
+           historyRequests.contains(where: { $0.id == selectedHistoryRequestID }) {
+            return
+        }
+        if selectedHistoryRequestID == nil || !historyRequests.isEmpty {
+            selectedHistoryRequestID = historyRequests.first?.id
+        }
+    }
+
+    private func formattedTimestamp(_ event: AuditEvent?) -> String {
+        if let date = event?.timestampDate {
+            return date.formatted(date: .abbreviated, time: .shortened)
+        }
+        return event?.timestamp ?? "Unknown"
+    }
+
+    private func statusSummary(for record: AuditRequestRecord) -> String {
+        let labels = record.events.map(\.resultLabel)
+        return labels.joined(separator: " -> ")
+    }
+
+    private func historyTimelineRow(_ event: AuditEvent) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: iconForEvent(event.type))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(colorForEvent(event.type))
+                    .frame(width: 16, height: 16)
+
+                Text(event.resultLabel)
+                    .font(.subheadline.weight(.semibold))
+
+                Spacer(minLength: 0)
+
+                Text(formattedTimestamp(event))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let detail = event.submission?.detail, !detail.isEmpty {
+                SettingsCodeBlock(title: nil, value: detail)
+            }
+
+            if let transactionHash = event.submission?.transactionHash {
+                SettingsCodeBlock(title: "Transaction Hash", value: transactionHash)
+            }
+
+            if let userOpHash = event.submission?.userOpHash, event.type != .userOpReceiptSuccess {
+                SettingsCodeBlock(title: "UserOp Hash", value: userOpHash)
+            }
+
+            if let reason = event.reason, !reason.isEmpty {
+                SettingsCodeBlock(title: "Reason", value: reason)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func requestProgress(for record: AuditRequestRecord) -> AuditRequestProgress? {
+        guard record.request?.operationKind == "user_operation" else {
+            return nil
+        }
+
+        let types = Set(record.events.map(\.type))
+        let signed = types.contains(.signSuccess)
+        let submitted = types.contains(.userOpSubmitted)
+        let confirmed = types.contains(.userOpReceiptSuccess)
+        let failed = types.contains(.userOpSendFailed) || types.contains(.userOpReceiptFailed) || types.contains(.userOpReceiptTimeout)
+        let blocked = types.contains(.signDenied) || types.contains(.ruleViolation) || types.contains(.authFailed)
+
+        let steps = [
+            AuditRequestProgress.Step(title: "Signed", state: signed ? .done : (blocked ? .failed : .pending)),
+            AuditRequestProgress.Step(title: "Submitted", state: confirmed || submitted ? .done : (failed ? .failed : .pending)),
+            AuditRequestProgress.Step(title: "Confirmed", state: confirmed ? .done : (failed ? .failed : .pending)),
+        ]
+
+        let fraction: Double
+        let message: String
+        let color: Color
+
+        if confirmed {
+            fraction = 1.0
+            message = "The UserOperation has been included on-chain."
+            color = Color(red: 0.18, green: 0.45, blue: 0.34)
+        } else if failed {
+            fraction = submitted ? (2.0 / 3.0) : (1.0 / 3.0)
+            message = record.latestReason ?? "The request stopped before confirmation."
+            color = Color(red: 0.68, green: 0.24, blue: 0.20)
+        } else if submitted {
+            fraction = 2.0 / 3.0
+            message = "Submitted to the bundler and waiting for a receipt."
+            color = Color(red: 0.12, green: 0.39, blue: 0.63)
+        } else if signed {
+            fraction = 1.0 / 3.0
+            message = "Signed locally and preparing submission."
+            color = Color(red: 0.72, green: 0.43, blue: 0.11)
+        } else {
+            fraction = 0
+            message = record.latestReason ?? "Waiting for approval."
+            color = Color.secondary
+        }
+
+        return AuditRequestProgress(
+            fraction: fraction,
+            message: message,
+            color: color,
+            steps: steps
+        )
+    }
+
+    private func historyProgressChip(_ step: AuditRequestProgress.Step) -> some View {
+        let tint: Color
+        switch step.state {
+        case .done:
+            tint = Color(red: 0.18, green: 0.45, blue: 0.34)
+        case .failed:
+            tint = Color(red: 0.68, green: 0.24, blue: 0.20)
+        case .pending:
+            tint = Color.black.opacity(0.45)
+        }
+
+        return Text(step.title)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(tint.opacity(step.state == .pending ? 0.07 : 0.13))
+            )
+            .foregroundStyle(tint)
+    }
+
+    private func colorForEvent(_ type: AuditEvent.EventType?) -> Color {
+        switch type {
+        case .signSuccess?:
+            return Color(red: 0.18, green: 0.45, blue: 0.34)
+        case .signDenied?:
+            return Color(red: 0.68, green: 0.24, blue: 0.20)
+        case .ruleViolation?:
+            return Color(red: 0.72, green: 0.43, blue: 0.11)
+        case .authFailed?:
+            return Color(red: 0.55, green: 0.29, blue: 0.18)
+        case .userOpSubmitted?:
+            return Color(red: 0.12, green: 0.39, blue: 0.63)
+        case .userOpSendFailed?:
+            return Color(red: 0.72, green: 0.20, blue: 0.18)
+        case .userOpReceiptSuccess?:
+            return Color(red: 0.18, green: 0.45, blue: 0.34)
+        case .userOpReceiptFailed?:
+            return Color(red: 0.62, green: 0.23, blue: 0.18)
+        case .userOpReceiptTimeout?:
+            return Color(red: 0.56, green: 0.39, blue: 0.11)
+        case nil:
+            return .secondary
+        }
+    }
+
+    private func iconForEvent(_ type: AuditEvent.EventType?) -> String {
+        switch type {
+        case .signSuccess?:
+            return "checkmark.circle.fill"
+        case .signDenied?:
+            return "xmark.circle.fill"
+        case .ruleViolation?:
+            return "exclamationmark.triangle.fill"
+        case .authFailed?:
+            return "hand.raised.slash.fill"
+        case .userOpSubmitted?:
+            return "paperplane.circle.fill"
+        case .userOpSendFailed?:
+            return "paperplane.fill"
+        case .userOpReceiptSuccess?:
+            return "checkmark.seal.fill"
+        case .userOpReceiptFailed?:
+            return "xmark.seal.fill"
+        case .userOpReceiptTimeout?:
+            return "clock.badge.exclamationmark"
+        case nil:
+            return "clock"
+        }
+    }
+}
+
+private struct AuditRequestProgress {
+    enum StepState {
+        case pending
+        case done
+        case failed
+    }
+
+    struct Step {
+        let title: String
+        let state: StepState
+    }
+
+    let fraction: Double
+    let message: String
+    let color: Color
+    let steps: [Step]
 }
 
 private struct AllowedAccountEntry: Identifiable {
@@ -908,42 +2389,38 @@ private struct SettingsCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(accent.opacity(0.15))
-                        .frame(width: 48, height: 48)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(accent)
+                    .frame(width: 14)
 
-                    Image(systemName: icon)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(accent)
-                }
+                Text(title.uppercased())
+                    .font(.caption2.weight(.black))
+                    .kerning(1.1)
+                    .foregroundStyle(accent)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.title3.weight(.bold))
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, 4)
 
-                Spacer()
+            if !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 10)
             }
 
             content
+                .padding(.bottom, 14)
+
+            Rectangle()
+                .fill(accent.opacity(0.16))
+                .frame(height: 1)
         }
-        .padding(22)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color.white.opacity(0.74))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Color.white.opacity(0.55), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.06), radius: 16, x: 0, y: 10)
+        .padding(.horizontal, 2)
     }
 }
 
@@ -962,11 +2439,15 @@ private struct SummaryPill: View {
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(tint.opacity(0.12))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(tint.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(tint.opacity(0.10), lineWidth: 1)
         )
     }
 }
@@ -977,11 +2458,11 @@ private struct EmptyStateRow: View {
     let detail: String
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .frame(width: 32)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color(red: 0.45, green: 0.25, blue: 0.14))
+                .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -994,11 +2475,7 @@ private struct EmptyStateRow: View {
 
             Spacer()
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.55))
-        )
+        .padding(.vertical, 6)
     }
 }
 
@@ -1024,11 +2501,60 @@ private struct RemovableChip: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .background(
             Capsule(style: .continuous)
-                .fill(tint.opacity(0.12))
+                .fill(tint.opacity(0.07))
         )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(tint.opacity(0.10), lineWidth: 1)
+        )
+    }
+}
+
+private struct SettingsKeyValueRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 92, alignment: .leading)
+
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct SettingsCodeBlock: View {
+    let title: String?
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let title {
+                Text(title.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.white.opacity(0.55))
+                )
+        }
     }
 }
