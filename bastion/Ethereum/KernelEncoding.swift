@@ -11,8 +11,20 @@ nonisolated enum KernelEncoding {
     /// A single execution call.
     struct Execution {
         let to: String      // address (hex)
-        let value: UInt64   // wei value
+        let value: String   // uint256, hex or decimal string
         let data: Data      // calldata
+
+        init(to: String, value: String, data: Data) {
+            self.to = to
+            self.value = value
+            self.data = data
+        }
+
+        init(to: String, value: UInt64, data: Data) {
+            self.to = to
+            self.value = "0x" + String(value, radix: 16)
+            self.data = data
+        }
     }
 
     // MARK: - CallType Constants
@@ -49,7 +61,7 @@ nonisolated enum KernelEncoding {
     static func encodeSingle(_ exec: Execution) -> Data {
         var encoded = Data()
         // target: 20 bytes (packed, no padding)
-        encoded += hexToBytes(exec.to)
+        encoded += addressBytes(exec.to)
         // value: 32 bytes big-endian uint256
         encoded += uint256(exec.value)
         // callData: variable length, appended directly
@@ -144,7 +156,7 @@ nonisolated enum KernelEncoding {
 
     /// Encode an Execution tuple for ABI encoding.
     private static func encodeTuple(_ exec: Execution) -> Data {
-        let target = hexToBytes(exec.to)
+        let target = addressBytes(exec.to)
         var encoded = Data()
         // address (left-padded to 32)
         encoded += Data(repeating: 0, count: 32 - target.count) + target
@@ -164,8 +176,23 @@ nonisolated enum KernelEncoding {
         return encoded
     }
 
-    private static func hexToBytes(_ hex: String) -> Data {
-        Data(hexString: hex) ?? Data()
+    static func isValidAddress(_ hex: String) -> Bool {
+        addressBytes(hex).count == 20
+    }
+
+    static func isValidUInt256(_ value: String) -> Bool {
+        uint256Data(value) != nil
+    }
+
+    private static func addressBytes(_ hex: String) -> Data {
+        guard let data = Data(hexString: hex), data.count == 20 else {
+            return Data()
+        }
+        return data
+    }
+
+    private static func uint256(_ value: String) -> Data {
+        uint256Data(value) ?? Data(repeating: 0, count: 32)
     }
 
     private static func uint256(_ value: UInt64) -> Data {
@@ -176,5 +203,38 @@ nonisolated enum KernelEncoding {
             v >>= 8
         }
         return result
+    }
+
+    private static func uint256Data(_ value: String) -> Data? {
+        if value.hasPrefix("0x") || value.hasPrefix("0X") {
+            guard let bytes = Data(hexString: value), bytes.count <= 32 else {
+                return nil
+            }
+            return Data(repeating: 0, count: 32 - bytes.count) + bytes
+        }
+
+        guard !value.isEmpty else {
+            return nil
+        }
+
+        var bytes = [UInt8](repeating: 0, count: 32)
+        for character in value {
+            guard let digit = character.wholeNumberValue else {
+                return nil
+            }
+
+            var carry = digit
+            for index in stride(from: bytes.count - 1, through: 0, by: -1) {
+                let next = Int(bytes[index]) * 10 + carry
+                bytes[index] = UInt8(next & 0xff)
+                carry = next >> 8
+            }
+
+            if carry != 0 {
+                return nil
+            }
+        }
+
+        return Data(bytes)
     }
 }

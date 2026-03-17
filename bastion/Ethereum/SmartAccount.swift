@@ -208,6 +208,70 @@ nonisolated final class SmartAccount: Sendable {
         return op
     }
 
+    /// Build a sponsored no-op UserOperation that executes a 0 ETH self-call.
+    /// Used to generate a valid current-account request for approval/send flows.
+    func buildSponsoredUserOperation(
+        callData: Data,
+        using rpc: EthRPC,
+        bundler: ZeroDevAPI,
+        chainId: Int
+    ) async throws -> UserOperation {
+        let sender = try await resolveAddress(using: rpc)
+        let deployed = try await isDeployed(using: rpc)
+        let gasPrice = try await bundler.userOperationGasPrice(chainId: chainId)
+
+        var op = UserOperation(
+            sender: sender,
+            nonce: try await rpc.getNonce(
+                sender: sender,
+                key: nonceKeyUInt192,
+                entryPoint: EntryPointAddress.address(for: entryPointVersion)
+            ),
+            callData: callData,
+            factory: deployed ? nil : KernelAddress.metaFactory,
+            factoryData: deployed ? nil : factoryData,
+            verificationGasLimit: "0x0",
+            callGasLimit: "0x0",
+            preVerificationGas: "0x0",
+            maxPriorityFeePerGas: gasPrice.standard.maxPriorityFeePerGas,
+            maxFeePerGas: gasPrice.standard.maxFeePerGas,
+            paymaster: nil,
+            paymasterVerificationGasLimit: nil,
+            paymasterPostOpGasLimit: nil,
+            paymasterData: nil,
+            chainId: chainId,
+            entryPoint: EntryPointAddress.address(for: entryPointVersion),
+            entryPointVersion: entryPointVersion
+        )
+
+        let sponsor = try await bundler.sponsorUserOperation(
+            UserOperationRPC.from(op, signature: validator.dummySignature),
+            entryPoint: op.entryPoint,
+            chainId: chainId
+        )
+        op = Self.applying(sponsor, to: op)
+        return op
+    }
+
+    /// Build a sponsored no-op UserOperation that executes a 0 ETH self-call.
+    /// Used to generate a valid current-account request for approval/send flows.
+    func buildSponsoredSelfUserOperation(
+        using rpc: EthRPC,
+        bundler: ZeroDevAPI,
+        chainId: Int
+    ) async throws -> UserOperation {
+        let sender = try await resolveAddress(using: rpc)
+        let callData = KernelEncoding.executeCalldata(
+            single: KernelEncoding.Execution(to: sender, value: 0, data: Data())
+        )
+        return try await buildSponsoredUserOperation(
+            callData: callData,
+            using: rpc,
+            bundler: bundler,
+            chainId: chainId
+        )
+    }
+
     /// Sign a UserOperation hash with this account's validator.
     func signUserOperation(_ op: UserOperation) throws -> Data {
         let hash = EthHashing.userOperationHash(op)
@@ -233,6 +297,28 @@ nonisolated final class SmartAccount: Sendable {
 
     private func ceilDiv(_ a: Int, _ b: Int) -> Int {
         (a + b - 1) / b
+    }
+
+    private static func applying(_ sponsor: SponsorResult, to op: UserOperation) -> UserOperation {
+        UserOperation(
+            sender: op.sender,
+            nonce: op.nonce,
+            callData: op.callData,
+            factory: op.factory,
+            factoryData: op.factoryData,
+            verificationGasLimit: sponsor.verificationGasLimit ?? op.verificationGasLimit,
+            callGasLimit: sponsor.callGasLimit ?? op.callGasLimit,
+            preVerificationGas: sponsor.preVerificationGas ?? op.preVerificationGas,
+            maxPriorityFeePerGas: sponsor.maxPriorityFeePerGas ?? op.maxPriorityFeePerGas,
+            maxFeePerGas: sponsor.maxFeePerGas ?? op.maxFeePerGas,
+            paymaster: sponsor.paymaster,
+            paymasterVerificationGasLimit: sponsor.paymasterVerificationGasLimit,
+            paymasterPostOpGasLimit: sponsor.paymasterPostOpGasLimit,
+            paymasterData: sponsor.paymasterData.flatMap { Data(hexString: $0) },
+            chainId: op.chainId,
+            entryPoint: op.entryPoint,
+            entryPointVersion: op.entryPointVersion
+        )
     }
 }
 
