@@ -1,3 +1,6 @@
+#if !BASTION_HELPER
+import AppKit
+import Foundation
 import SwiftUI
 
 @main
@@ -21,42 +24,49 @@ struct BastionApp: App {
 }
 
 @Observable
+@MainActor
 final class AppState {
     let menuBarManager = MenuBarManager()
+    let launchMode: BastionLaunchMode
 
-    private let xpcServer = XPCServer.shared
-    private let ruleEngine = RuleEngine.shared
+    private let serviceRuntime = BastionServiceRuntime()
+    private let relayRuntime = BastionRelayRuntime()
 
     init() {
-        ruleEngine.loadConfigOnStartup()
-
-        do { _ = try SecureEnclaveManager.shared.loadOrCreateSigningKey() } catch {}
-
-        menuBarManager.startObserving()
-        xpcServer.start()
         CLIInstaller.installIfNeeded()
+        ServiceRegistration.registerAndExitIfRequested()
+        launchMode = BastionLaunchController.resolveLaunchMode()
+
+        if launchMode == .service {
+            serviceRuntime.start(menuBarManager: menuBarManager)
+        } else {
+            relayRuntime.start()
+        }
     }
 }
 
 struct MenuBarContentView: View {
     var body: some View {
-        let recentEvents = AuditLog.shared.recentEvents(limit: 5)
+        let recentRequests = AuditLog.shared.recentRequestRecords(limit: 5)
 
-        if recentEvents.isEmpty {
+        if recentRequests.isEmpty {
             Text("No recent activity")
                 .foregroundStyle(.secondary)
         } else {
-            ForEach(Array(recentEvents.reversed().enumerated()), id: \.offset) { _, event in
-                let time = String(event.timestamp.prefix(19))
+            ForEach(recentRequests, id: \.id) { record in
+                let time = String(record.latestEvent?.timestamp.prefix(19) ?? "")
                     .replacingOccurrences(of: "T", with: " ")
                 Label(
-                    "\(time) \(event.type.rawValue)",
-                    systemImage: iconForEvent(event.type)
+                    "\(time) \(record.operationTitle) · \(record.latestResultLabel)",
+                    systemImage: iconForEvent(record.latestEvent?.type ?? .signSuccess)
                 )
             }
         }
 
         Divider()
+
+        Label("Service: \(ServiceRegistration.statusDescription())", systemImage: "circle.fill")
+            .foregroundStyle(.secondary)
 
         if let pubkey = try? SecureEnclaveManager.shared.getPublicKey() {
             let full = "0x04\(pubkey.x)\(pubkey.y)"
@@ -90,6 +100,12 @@ struct MenuBarContentView: View {
 
         Divider()
 
+        Button("Audit History...") {
+            AuditHistoryWindowManager.shared.showWindow()
+        }
+
+        Divider()
+
         SettingsLink {
             Text("Rules Settings...")
         }
@@ -108,6 +124,12 @@ struct MenuBarContentView: View {
         case .signDenied:    return "xmark.circle"
         case .ruleViolation: return "exclamationmark.triangle"
         case .authFailed:    return "xmark.shield"
+        case .userOpSubmitted: return "paperplane.circle"
+        case .userOpSendFailed: return "paperplane.circle.fill"
+        case .userOpReceiptSuccess: return "checkmark.seal"
+        case .userOpReceiptFailed: return "xmark.seal"
+        case .userOpReceiptTimeout: return "clock.badge.exclamationmark"
         }
     }
 }
+#endif

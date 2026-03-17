@@ -1,88 +1,78 @@
 import Foundation
 
 final class CLIInstaller {
-    static func installIfNeeded() {
-        installCLISymlink()
-        installLaunchAgent()
+    nonisolated static let launchAgentLabel = "com.bastion.xpc"
+    private nonisolated static let userApplicationsPrefix = "\(NSHomeDirectory())/Applications/"
+
+    nonisolated static var isRunningAsLaunchAgentService: Bool {
+        ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == launchAgentLabel
     }
 
-    // MARK: - CLI Symlink
+    nonisolated static var isStableInstalledBundleLocation: Bool {
+        let bundlePath = Bundle.main.bundleURL.path
+        return bundlePath.hasPrefix("/Applications/") || bundlePath.hasPrefix(userApplicationsPrefix)
+    }
+
+    static func installIfNeeded() {
+        guard isRunningAsLaunchAgentService || isStableInstalledBundleLocation else {
+            return
+        }
+
+        installCLISymlink()
+    }
 
     private static func installCLISymlink() {
         let symlinkPath = "/usr/local/bin/bastion"
         let fileManager = FileManager.default
 
-        // Find bastion-cli in the app bundle
-        guard let bundlePath = Bundle.main.executableURL?.deletingLastPathComponent()
-            .appendingPathComponent("bastion-cli").path else {
+        guard let bundlePath = bundledCLIExecutableURL(for: Bundle.main.bundleURL)?.path else {
             return
         }
 
-        // Check if bastion-cli binary exists in bundle
         guard fileManager.fileExists(atPath: bundlePath) else {
-            // CLI build sidecar missing from app bundle
             return
         }
 
-        // Check if symlink already exists and points to correct location
         if let existingTarget = try? fileManager.destinationOfSymbolicLink(atPath: symlinkPath),
            existingTarget == bundlePath {
             return
         }
 
-        // Create /usr/local/bin if needed
         if !fileManager.fileExists(atPath: "/usr/local/bin") {
             try? fileManager.createDirectory(atPath: "/usr/local/bin", withIntermediateDirectories: true)
         }
 
-        // Remove existing symlink
         try? fileManager.removeItem(atPath: symlinkPath)
 
         do {
             try fileManager.createSymbolicLink(atPath: symlinkPath, withDestinationPath: bundlePath)
         } catch {
-            // Symlink creation requires write permission to /usr/local/bin
-            // User may need to run: ln -sf <bundlePath> /usr/local/bin/bastion
+            // User can install the symlink manually if /usr/local/bin is not writable.
         }
     }
 
-    // MARK: - LaunchAgent
-
-    private static func installLaunchAgent() {
-        let launchAgentsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents")
-        let plistPath = launchAgentsDir.appendingPathComponent("com.bastion.xpc.plist")
-
-        guard let appPath = Bundle.main.executableURL?.path else { return }
-
-        // Check if already installed with correct path
-        if FileManager.default.fileExists(atPath: plistPath.path) {
-            if let data = try? Data(contentsOf: plistPath),
-               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-               let args = plist["ProgramArguments"] as? [String],
-               args.first == appPath {
-                return
-            }
+    static func bundledCLIExecutableURL(for bundleURL: URL) -> URL? {
+        if isHelperBundle(bundleURL) {
+            return hostAppBundleURL(forHelperBundle: bundleURL)?
+                .appendingPathComponent("Contents/MacOS/bastion-cli")
         }
 
-        let plistContent: [String: Any] = [
-            "Label": "com.bastion.xpc",
-            "ProgramArguments": [appPath],
-            "MachServices": ["com.bastion.xpc": true],
-            "KeepAlive": true,
-            "RunAtLoad": true,
-        ]
+        return bundleURL.appendingPathComponent("Contents/MacOS/bastion-cli")
+    }
 
-        if !FileManager.default.fileExists(atPath: launchAgentsDir.path) {
-            try? FileManager.default.createDirectory(at: launchAgentsDir, withIntermediateDirectories: true)
+    static func hostAppBundleURL(forHelperBundle bundleURL: URL) -> URL? {
+        guard isHelperBundle(bundleURL) else {
+            return nil
         }
 
-        if let data = try? PropertyListSerialization.data(
-            fromPropertyList: plistContent,
-            format: .xml,
-            options: 0
-        ) {
-            try? data.write(to: plistPath, options: .atomic)
-        }
+        return bundleURL
+            .deletingLastPathComponent() // Helpers
+            .deletingLastPathComponent() // Contents
+            .deletingLastPathComponent() // Bastion Dev.app
+    }
+
+    private static func isHelperBundle(_ bundleURL: URL) -> Bool {
+        let path = bundleURL.path
+        return path.hasSuffix("/Contents/Helpers/bastion-helper.app")
     }
 }
