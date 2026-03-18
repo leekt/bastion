@@ -232,7 +232,7 @@ These should already be set:
 3. On first launch the app:
    - Creates Secure Enclave signing key
    - Registers the bundled `SMAppService` agent for XPC
-   - Starts the dedicated background helper at `bastion.app/Contents/Helpers/bastion-helper.app`
+   - Registers the main binary as the `SMAppService` launch agent (`BundleProgram = Contents/MacOS/bastion`)
    - Attempts to symlink `bastion-cli` to `/usr/local/bin/bastion` when running from `/Applications` or `~/Applications`
    - Bundles the CLI at `bastion.app/Contents/MacOS/bastion-cli`
 
@@ -262,10 +262,10 @@ The app now uses `ServiceManagement` (`SMAppService`) rather than a manually boo
 launchctl print gui/$(id -u)/com.bastion.xpc
 ```
 
-You should see a running job managed by `com.apple.xpc.ServiceManagement`. The program identifier should point at the embedded helper:
+You should see a running job managed by `com.apple.xpc.ServiceManagement`. The program identifier should point at the main binary:
 
 ```text
-Contents/Helpers/bastion-helper.app/Contents/MacOS/bastion-helper
+Contents/MacOS/bastion
 ```
 
 ### 5. Install the CLI manually (if auto-install failed)

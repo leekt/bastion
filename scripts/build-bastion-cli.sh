@@ -58,7 +58,7 @@ cat > "${AGENT_PLIST_FILE}" <<EOF
   <key>Label</key>
   <string>com.bastion.xpc</string>
   <key>BundleProgram</key>
-  <string>Contents/Helpers/bastion-helper.app/Contents/MacOS/bastion-helper</string>
+  <string>Contents/MacOS/bastion</string>
   <key>AssociatedBundleIdentifiers</key>
   <array>
     <string>${PRODUCT_BUNDLE_IDENTIFIER}</string>

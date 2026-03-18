@@ -25,7 +25,7 @@ This plan assumes the current codebase is **internal alpha** quality: useful for
 
 - Packaging, signing, notarization, auto-update, logging, and crash reporting are in place.
 - Clear user-facing recovery paths exist for service issues, config issues, and provider failures.
-- Provider integration is resilient enough that one vendor outage does not break the product.
+- ZeroDev integration is resilient enough that common provider-side failures are diagnosable and recoverable.
 
 ### Production Ready
 
@@ -48,8 +48,8 @@ This plan assumes the current codebase is **internal alpha** quality: useful for
    - Raw payloads are stored for operator visibility, but there is no tamper evidence, retention policy, or redaction strategy.
 
 4. Provider integration is still operationally thin.
-   - Bastion can submit UserOperations, but the provider model is still too close to a single-vendor path.
-   - Retry, fallback, degraded mode, and provider diagnostics need to be formalized.
+   - Bastion is intentionally ZeroDev-first for ERC-4337 operations.
+   - Retry, degraded mode, simulation, and ZeroDev-specific diagnostics still need to be formalized.
 
 5. Simulation and preflight are not yet first-class.
    - UserOperation flows need a clear pre-submit simulation layer, not just best-effort submission.
@@ -71,7 +71,7 @@ Objective: move from internal alpha to a trustworthy private beta baseline.
 
 ### P0.1 Service and App Lifecycle
 
-- Keep the `SMAppService` registration path and finish hardening the dedicated helper/agent architecture that now owns the Mach service.
+- Keep the `SMAppService` registration path. The current registered launch target is the main binary (`Contents/MacOS/bastion`). An attempt to move service ownership to the nested helper failed with `EX_CONFIG (78)`. Finish diagnosing and resolving that before the helper-owned architecture can be used.
 - Ensure only one active Bastion service instance can own the XPC interface at a time.
 - Make notification click, CLI invocation, app launch, and settings/history window routing deterministic.
 - Verify behavior across:
@@ -154,22 +154,26 @@ Objective: make the app supportable outside the core development machine.
 
 ### P1.1 Provider and Network Resilience
 
-- Separate chain RPC reads from bundler/provider submission logic cleanly.
-- Formalize provider abstraction for UserOperation sponsorship, submission, and receipt tracking.
-- Introduce provider-independent simulation interfaces where possible, so Bastion can preflight requests even when one vendor-specific endpoint is unavailable.
+- Separate chain RPC reads from ZeroDev submission logic cleanly.
+- Formalize the ZeroDev integration surface for:
+  - sponsorship
+  - submission
+  - receipt tracking
+  - fee estimation
+  - simulation / preflight
 - Add retry/backoff and clear error taxonomy for:
   - sponsorship failure
   - submission failure
   - receipt timeout
   - simulation failure
-  - provider mismatch
+  - ZeroDev API failure
   - minimum fee mismatch
-- Support graceful fallback when a preferred provider is unavailable.
+- Define degraded-mode behavior when ZeroDev is unavailable, slow, or returns partial results.
 
 Exit criteria:
 
-- User-facing errors clearly explain whether the failure is policy, signing, RPC, bundler, or on-chain execution.
-- Bastion can recover from transient provider failures without manual surgery.
+- User-facing errors clearly explain whether the failure is policy, signing, RPC, ZeroDev, paymaster, bundler validation, or on-chain execution.
+- Bastion can recover from common transient ZeroDev failures without manual surgery.
 
 ### P1.2 Key Lifecycle and Recovery
 

@@ -46,9 +46,9 @@ In practical terms, that means:
 
 ## Target Architecture
 
-### 1. Dedicated Background Owner
+### 1. Dedicated Background Owner (Planned, Not Yet in Production)
 
-Bastion now uses a dedicated per-user background helper that owns:
+The intended long-term model is a dedicated per-user background helper that owns:
 
 - the Mach service
 - signing orchestration
@@ -56,12 +56,14 @@ Bastion now uses a dedicated per-user background helper that owns:
 - receipt polling
 - durable request state
 
-The main app owns:
+The main app would own:
 
 - settings
 - audit history
 - approval UI
 - diagnostics UI
+
+**Current state**: The main app binary (`Contents/MacOS/bastion`) is still the registered launch target and owns both the Mach service and the menu bar UI. The helper-owned path was attempted but failed to reach production. See the migration notes below.
 
 ### 2. Explicit UI Routing Through XPC
 
@@ -114,15 +116,11 @@ This phase improved reliability before the helper split landed.
 
 Introduce a dedicated background helper/agent and move service ownership there.
 
-This is now implemented. The helper owns:
+**Status: Not yet complete.** An attempt was made to move service ownership to the nested helper at `Contents/Helpers/bastion-helper.app/Contents/MacOS/bastion-helper`. This caused launchd to fail spawning the service entirely — `EX_CONFIG (78)` / `spawn failed` — with the error "Could not find and/or execute program specified by service". The helper process never started. The direct failure was launchd/xpcproxy being unable to resolve and execute the nested helper path in the current registration layout. It was not proven whether this is a path resolution issue, a bundle structure requirement, an entitlement mismatch, or a registration layout constraint.
 
-- XPC listener
-- signing flows
-- UserOperation orchestration
-- notification scheduling
-- receipt polling
+The `BundleProgram` was reverted to `Contents/MacOS/bastion` as an immediate fix. The main binary currently acts as both the menu bar owner and the background service owner.
 
-The UI app is now a client/relay of that helper.
+The `bastion-helper` target exists and contains AppKit-based status item code (`BastionAgentMain.swift`), but this code is not currently executed. Do not treat Phase B as complete until the `EX_CONFIG` spawn failure is diagnosed and resolved with direct evidence, not assumptions.
 
 ### Phase C: Replace Manual Service Registration
 
@@ -148,9 +146,9 @@ The current codebase has been moved to a cleaner short-term lifecycle model:
 3. Service-unavailable failures are surfaced explicitly.
    - Relay launches now show a visible error instead of silently disappearing when the service cannot be reached.
 
-4. The development rebuild flow pins a single signed build path and boots the helper from there.
+4. The development rebuild flow pins a single signed build path.
    - The signed build is copied into `~/Applications/Bastion Dev.app` before registration so `SMAppService` runs from a stable bundle location.
-   - The registered job now points at `Contents/Helpers/bastion-helper.app/Contents/MacOS/bastion-helper`.
+   - The registered job points at `Contents/MacOS/bastion` (the main binary).
    - This remains a development hardening step, not the long-term release/update architecture.
 
 5. Service bootstrap is split out of the SwiftUI app lifecycle.
@@ -158,10 +156,11 @@ The current codebase has been moved to a cleaner short-term lifecycle model:
    - `BastionRelayRuntime` owns relay handoff and service-unavailable behavior.
    - The dedicated helper target reuses the same runtime without duplicating app bootstrap code.
 
-6. The dedicated helper target now exists and is the background service owner.
+6. The dedicated helper target exists but is not the background service owner in the current build.
    - `bastion-helper` is embedded at `Contents/Helpers/bastion-helper.app`.
-   - `launchd` owns the helper lifecycle through the bundled `SMAppService` agent plist.
-   - The menu bar app no longer owns the Mach service in the normal path.
+   - `launchd` owns the main binary's lifecycle through the bundled `SMAppService` agent plist (`BundleProgram = Contents/MacOS/bastion`).
+   - The menu bar UI and the Mach service are both owned by the main `bastion` binary in the current configuration.
+   - The helper-owned path was attempted and failed. See Phase B notes above.
 
 ## Remaining Work to Reach Production Quality
 

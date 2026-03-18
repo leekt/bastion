@@ -1,55 +1,143 @@
 # Bastion CLI Request Examples
 
-These examples are for opening Bastion's approval UI from the CLI.
+## Setup
 
-## Before you run them
-
-1. Rebuild the signed development app and restart the XPC service:
+Rebuild the signed development app and restart the XPC service:
 
 ```bash
 cd /Users/taek/workspace/bastion-app/bastion
 ./scripts/dev-rebuild-signed.sh
 ```
 
-2. If `bastion` is not on your `PATH`, symlink the bundled sidecar executable from the fixed signed build path:
+If `bastion` is not on your `PATH`, symlink the bundled sidecar:
 
 ```bash
 BASTION_APP="$HOME/Applications/Bastion Dev.app"
 sudo ln -sf "$BASTION_APP/Contents/MacOS/bastion-cli" /usr/local/bin/bastion
 ```
 
-3. In `Default -> App Preferences`, set:
-- `ZeroDev Project ID` if you plan to use `--submit`
-- `Chain RPC Endpoints` for any chain you want Bastion to query directly
-
-4. Start `Bastion.app` if it is not already running.
-
-## Personal message
+Or use the DerivedData path directly during development:
 
 ```bash
-bastion eth message "Review this Bastion approval request"
+CLI="/Users/taek/Library/Developer/Xcode/DerivedData/bastion-gjbkchfvkjeiahfdhhrwhyoqrmyt/Build/Products/Debug/bastion.app/Contents/MacOS/bastion-cli"
+alias bastion="$CLI"
 ```
 
-## EIP-712 typed data
+---
 
-Save the request first:
+## Status & Info
+
+```bash
+# Check if Bastion app is running
+bastion status
+
+# Get the P-256 public key and smart account address
+bastion pubkey
+
+# Get current rules for the calling client
+bastion rules
+
+# Get signing state (rate limit counters, spending limit totals)
+bastion state
+```
+
+---
+
+## Signing
+
+### Raw Bytes
+
+Signs 32 bytes directly — **no Ethereum prefix is applied**.
+
+`--data` must be exactly 64 hex characters (32 bytes) with **no `0x` prefix**.
+
+```bash
+bastion sign --data deadbeefcafebabe1234567890abcdef1122334455667788aabbccddeeff0011
+```
+
+Requires `rawMessagePolicy.enabled = true` **and** `allowRawSigning = true` in Settings → Default Rules → Raw/Message.
+When `enabled = false`, the request still goes through but always triggers the approval window.
+
+---
+
+### EIP-191 Personal Message
+
+Prepends `\x19Ethereum Signed Message:\n{len}` before signing.
+
+```bash
+# Plain UTF-8 text
+bastion eth message "Review this Bastion approval request"
+
+# Multiple words
+bastion eth message "Hello from Bastion test"
+
+# Hex payload — 0x prefix causes it to be treated as raw bytes before EIP-191 wrapping
+bastion eth message "0xdeadbeef"
+```
+
+Requires `rawMessagePolicy.enabled = true` for silent rule-based signing.
+When `enabled = false`, always triggers the approval window.
+
+---
+
+### EIP-712 Typed Data
+
+Signs a structured typed-data payload per EIP-712.
+
+**Inline JSON:**
+
+```bash
+bastion eth typedData --json '{
+  "types": {
+    "EIP712Domain": [
+      {"name":"name","type":"string"},
+      {"name":"version","type":"string"},
+      {"name":"chainId","type":"uint256"},
+      {"name":"verifyingContract","type":"address"}
+    ],
+    "Permit": [
+      {"name":"owner","type":"address"},
+      {"name":"spender","type":"address"},
+      {"name":"value","type":"uint256"},
+      {"name":"nonce","type":"uint256"},
+      {"name":"deadline","type":"uint256"}
+    ]
+  },
+  "primaryType": "Permit",
+  "domain": {
+    "name": "Permit2",
+    "version": "1",
+    "chainId": 11155111,
+    "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+  },
+  "message": {
+    "owner": "0x1234567890abcdef1234567890abcdef12345678",
+    "spender": "0x7777777777777777777777777777777777777777",
+    "value": "50000000",
+    "nonce": "7",
+    "deadline": "1710000000"
+  }
+}'
+```
+
+**From file:**
 
 ```bash
 cat > /tmp/bastion-typedData-example.json <<'JSON'
 {
   "types": {
     "EIP712Domain": [
-      { "name": "name", "type": "string" },
-      { "name": "version", "type": "string" },
-      { "name": "chainId", "type": "uint256" },
-      { "name": "verifyingContract", "type": "address" }
+      {"name":"name","type":"string"},
+      {"name":"version","type":"string"},
+      {"name":"chainId","type":"uint256"},
+      {"name":"verifyingContract","type":"address"}
     ],
     "Permit": [
-      { "name": "owner", "type": "address" },
-      { "name": "spender", "type": "address" },
-      { "name": "value", "type": "uint256" },
-      { "name": "nonce", "type": "uint256" },
-      { "name": "deadline", "type": "uint256" }
+      {"name":"owner","type":"address"},
+      {"name":"spender","type":"address"},
+      {"name":"value","type":"uint256"},
+      {"name":"nonce","type":"uint256"},
+      {"name":"deadline","type":"uint256"}
     ]
   },
   "primaryType": "Permit",
@@ -68,50 +156,64 @@ cat > /tmp/bastion-typedData-example.json <<'JSON'
   }
 }
 JSON
-```
 
-Then send it:
-
-```bash
 bastion eth typedData --json-file /tmp/bastion-typedData-example.json
 ```
 
-## ERC-4337 UserOperation from `--op`
+Requires `typedDataPolicy.enabled = true` for silent rule-based signing.
+When `enabled = false`, always triggers the approval window.
 
-This is the preferred path. The CLI only describes the action, and Bastion builds the Kernel `execute()` calldata plus the final ERC-4337 UserOperation inside the app.
+---
 
-Single action:
+### UserOperation (ERC-4337)
 
-```bash
-bastion eth userOp \
-  --op 0x0000000000000000000000000000000000000001,0,0x
-```
+#### High-level `--op` (preferred)
 
-Batch action:
+Describe the action — Bastion builds the Kernel `execute()` calldata and full UserOperation.
 
 ```bash
+# Single action: target, value (decimal or 0x hex), calldata (0x-prefixed hex)
+bastion eth userOp --op 0x0000000000000000000000000000000000000001,0,0x
+
+# Single action with ETH value
+bastion eth userOp --op 0x0000000000000000000000000000000000000001,1000000000000000,0x
+
+# Batch: two actions
 bastion eth userOp \
   --op 0x0000000000000000000000000000000000000001,0,0x \
   --op 0x0000000000000000000000000000000000000002,1000000000000000,0x
+
+# Sign and submit via ZeroDev (uses project ID from Settings → App Preferences)
+bastion eth userOp --submit --op 0x0000000000000000000000000000000000000001,0,0x
+
+# Sign, submit, and override the project ID
+bastion eth userOp --submit --project-id <your-project-id> --op 0x0000000000000000000000000000000000000001,0,0x
+
+# Target a specific chain (default: Sepolia 11155111)
+bastion eth userOp --chain-id 8453 --op 0x0000000000000000000000000000000000000001,0,0x
 ```
 
-`value` accepts decimal or `0x` hex. `data` must be `0x`-prefixed hex.
+#### Advanced: explicit UserOperation JSON
 
-## ERC-4337 UserOperation with bundler submission
-
-If you want Bastion to submit the signed UserOperation immediately after approval:
+For replaying a fully formed UserOperation or debugging gas values.
 
 ```bash
-bastion eth userOp \
-  --submit \
-  --op 0x0000000000000000000000000000000000000001,0,0x
+bastion eth userOp --json '{
+  "sender": "0x2dda58a793fe8b895f2b5d452f05fd9a0d4357af",
+  "nonce": "0x01",
+  "callData": "0xe9ae5c530000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000de0b6b3a7640000",
+  "verificationGasLimit": "0x57749",
+  "callGasLimit": "0x4623",
+  "preVerificationGas": "0xd5d9",
+  "maxPriorityFeePerGas": "0x233f76",
+  "maxFeePerGas": "0x233f83",
+  "chainId": 11155111,
+  "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+  "entryPointVersion": "v0.7"
+}'
 ```
 
-`--submit` uses the ZeroDev project ID configured in `Default -> App Preferences`. `--project-id` is still accepted as a temporary override for debugging.
-
-## Advanced: explicit UserOperation JSON
-
-This path is mainly for debugging or replaying a fully formed UserOperation.
+From file:
 
 ```bash
 cat > /tmp/bastion-userop-example.json <<'JSON'
@@ -135,35 +237,40 @@ cat > /tmp/bastion-userop-example.json <<'JSON'
   "entryPointVersion": "v0.7"
 }
 JSON
-```
 
-Then send it:
-
-```bash
 bastion eth userOp --json-file /tmp/bastion-userop-example.json
+
+# Sign and submit
+bastion eth userOp --submit --json-file /tmp/bastion-userop-example.json
 ```
 
-The response JSON includes a `submission` object. Bastion's `Audit History` window groups the entire request into one row and shows the request timeline there, including:
+Requires `rules.enabled = true` for silent rule-based signing.
+When `enabled = false` or `requireExplicitApproval = true`, always triggers the approval window.
 
-- `Signed`
-- `Submitted`
-- `Confirmed`
-- `Receipt Failed`
-- `Receipt Pending`
-- `Send Failed`
+---
 
-When the bundler confirms or fails the request, Bastion also posts a native macOS notification. Clicking that notification opens `Audit History`.
+## Rule Behavior Quick Reference
 
-## Converting bytes to hex for UserOperation fields
+| Sign type | `enabled = false` | `enabled = true`, sub-rule off | `enabled = true`, sub-rule on |
+|---|---|---|---|
+| Raw bytes | Approval window | **Denied** (`allowRawSigning = false`) | Allowed |
+| EIP-191 message | Approval window | Allowed | Allowed |
+| EIP-712 typed data | Approval window | Silent if domain/struct rules pass | — |
+| UserOperation | Approval window | Silent if all rules pass | — |
 
-If you want to replace the sample `callData` with your own bytes:
+Settings location:
+- **Raw bytes / Message**: Settings → Default Rules → Raw/Message tab
+- **EIP-712**: Settings → Default Rules → EIP-712 tab
+- **UserOperation**: Settings → Default Rules → UserOperation tab
+
+---
+
+## Utility
 
 ```bash
-printf '%s' '<hex-without-0x>' | sed 's/^/0x/'
-```
-
-If you already have raw bytes:
-
-```bash
+# Convert raw bytes file to 0x-prefixed hex
 xxd -p -c 1000 your-bytes.bin | tr -d '\n' | sed 's/^/0x/'
+
+# Generate a random 32-byte hash for raw bytes testing (no 0x prefix)
+openssl rand -hex 32
 ```

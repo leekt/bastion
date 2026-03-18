@@ -40,7 +40,7 @@ echo "==> Registering app bundle"
 /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister \
   -f -R -trusted "${INSTALL_APP_PATH}" >/dev/null 2>&1 || true
 
-echo "==> Registering helper service"
+echo "==> Registering background service"
 "${APP_BIN}" --register-service
 /bin/launchctl kickstart -k "gui/$(id -u)/${LAUNCH_AGENT_LABEL}" >/dev/null 2>&1 || true
 

@@ -76,7 +76,7 @@ if [ -x "${CLI_BIN}" ]; then
     /bin/sleep 1
   done
   if [ "${STATUS_OK}" -ne 1 ]; then
-    echo "Bastion helper did not become reachable over XPC." >&2
+    echo "Bastion service did not become reachable over XPC." >&2
     exit 1
   fi
 fi

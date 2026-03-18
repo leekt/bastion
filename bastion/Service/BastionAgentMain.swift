@@ -2,6 +2,13 @@
 import AppKit
 import Foundation
 
+// NOTE: bastion-helper is not currently the registered SMAppService launch target.
+// BundleProgram = Contents/MacOS/bastion (main binary) is the registered job.
+// An attempt to move service ownership here failed with EX_CONFIG (78) / spawn failed.
+// The menu bar UI lives in the main binary under #if !BASTION_HELPER.
+// This entry point is the intended form for when helper ownership is eventually proven
+// and re-enabled: background-only service runner, no menu bar or status item.
+
 @main
 enum BastionAgentMain {
     static func main() {
@@ -16,10 +23,9 @@ enum BastionAgentMain {
 @MainActor
 private final class BastionAgentAppDelegate: NSObject, NSApplicationDelegate {
     private let serviceRuntime = BastionServiceRuntime()
-    private let approvalPresenter = MenuBarManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        serviceRuntime.start(menuBarManager: approvalPresenter)
+        serviceRuntime.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
