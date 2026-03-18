@@ -136,6 +136,7 @@ struct MenuBarContentView: View {
         case .userOpReceiptSuccess: return "checkmark.seal"
         case .userOpReceiptFailed: return "xmark.seal"
         case .userOpReceiptTimeout: return "clock.badge.exclamationmark"
+        case .preflightCompleted: return "shield.lefthalf.filled"
         }
     }
 }

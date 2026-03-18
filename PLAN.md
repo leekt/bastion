@@ -140,20 +140,24 @@ Exit criteria:
 
 ### P0.5 Simulation and Preflight
 
-- Add an explicit preflight stage for UserOperation flows before approval-and-send.
-- Run deterministic simulation checks before submission, including:
-  - account validation
-  - paymaster validation
-  - expected calldata target/action decoding
-  - fee sanity checks
-- Preserve enough simulation output to explain failures in the UI and audit history.
-- Add a debug path that can export trace-ready artifacts for reproduction.
+**Status: In progress.** *(2026-03-19)*
+
+- ✅ `PreflightSimulator` runs before the approval window for every UserOperation request.
+- ✅ Calls `eth_estimateUserOperationGas` on the configured bundler — success means account, paymaster, and calldata validation all pass.
+- ✅ Local static checks: gas limit sanity, fee ordering.
+- ✅ AA error code extraction and structured diagnosis for AA10–AA51 range.
+- ✅ `preflightResult` attached to `ApprovalRequest` — visible in the approval UI.
+- ✅ `preflightCompleted` audit event recorded before the approval window opens.
+- ✅ Preflight banner shown in the signing approval UI (pass/warning/error with recommendations).
+- ⬜ Calldata simulation (direct `eth_call` to the target to distinguish validation vs execution failures).
+- ⬜ Debug export path (export preflight artifact + request JSON for reproduction).
+- ⬜ Fee sanity check using live bundler gas price (`pimlico_getUserOperationGasPrice`).
 
 Exit criteria:
 
-- Bastion can show whether a request is expected to pass validation before submission.
-- Common AA errors can be diagnosed from Bastion without manual reverse-engineering.
-- Operators can reproduce failures from stored request + simulation context.
+- Bastion can show whether a request is expected to pass validation before submission. ✅
+- Common AA errors can be diagnosed from Bastion without manual reverse-engineering. ✅
+- Operators can reproduce failures from stored request + simulation context. (pending debug export)
 
 ## Phase 1: Make Beta Operations Viable
 

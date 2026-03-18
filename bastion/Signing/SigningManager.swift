@@ -29,6 +29,7 @@ final class SigningManager {
     private let ruleEngine = RuleEngine.shared
     private let auditLog = AuditLog.shared
     private let notificationManager = BastionNotificationManager.shared
+    private let preflightSimulator = PreflightSimulator.shared
 
     private init() {}
 
@@ -89,6 +90,24 @@ final class SigningManager {
             violations.append(contentsOf: reasons)
         }
 
+        // 1b. Run preflight simulation for UserOperation requests.
+        // Runs concurrently with rule validation result; does not block signing if it fails.
+        var preflightResult: PreflightResult? = nil
+        if case .userOperation(let op) = request.operation {
+            preflightResult = await preflightSimulator.simulate(
+                op: op,
+                submission: request.userOperationSubmission,
+                preferences: ruleEngine.config.bundlerPreferences
+            )
+            auditLog.record(AuditEvent(
+                type: .preflightCompleted,
+                dataPrefix: dataPrefix,
+                reason: preflightResult?.passed == false ? preflightResult?.failureReason : nil,
+                request: request,
+                clientContext: clientContext
+            ))
+        }
+
         if requiresMasterKey {
             let reason = violations.joined(separator: "; ")
             auditLog.record(AuditEvent(
@@ -103,7 +122,8 @@ final class SigningManager {
             state = .pendingApproval(ApprovalRequest(
                 request: request,
                 mode: .ruleOverride(violations),
-                clientContext: clientContext
+                clientContext: clientContext,
+                preflightResult: preflightResult
             ))
 
             let decision = await awaitApprovalDecision()
@@ -149,7 +169,8 @@ final class SigningManager {
                 state = .pendingApproval(ApprovalRequest(
                     request: request,
                     mode: .policyReview,
-                    clientContext: clientContext
+                    clientContext: clientContext,
+                    preflightResult: preflightResult
                 ))
 
                 let decision = await awaitApprovalDecision()

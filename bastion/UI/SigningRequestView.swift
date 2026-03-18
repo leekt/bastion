@@ -29,6 +29,7 @@ struct SigningRequestView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     headerSection
                     approvalBanner
+                    preflightBanner
                     operationSection
                     requestContextSection
                 }
@@ -154,6 +155,109 @@ struct SigningRequestView: View {
                     .frame(height: 1)
             }
         }
+    }
+
+    @ViewBuilder
+    private var preflightBanner: some View {
+        if let preflight = approval.preflightResult {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: preflightIcon(preflight))
+                        .foregroundStyle(preflightColor(preflight))
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Preflight Simulation")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(preflightColor(preflight))
+                    Spacer()
+                    if preflight.passed, let estimate = preflight.gasEstimate {
+                        Text("~\(formattedGas(estimate.callGasLimit)) gas")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    if let aaError = preflight.aaError {
+                        Text(aaError)
+                            .font(.caption.weight(.semibold).monospaced())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                            .foregroundStyle(Color.red)
+                    }
+                }
+
+                Text(preflight.diagnosis)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !preflight.staticWarnings.isEmpty {
+                    ForEach(preflight.staticWarnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(Color.orange)
+                    }
+                }
+
+                if !preflight.passed, !preflight.recommendations.isEmpty {
+                    DisclosureGroup("Recommendations") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(preflight.recommendations.enumerated()), id: \.offset) { i, rec in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text("\(i + 1).")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 18, alignment: .leading)
+                                    Text(rec)
+                                        .font(.caption)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                    .font(.caption.weight(.medium))
+                }
+            }
+            .padding(12)
+            .background(preflightBackground(preflight), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(preflightColor(preflight).opacity(0.25), lineWidth: 1)
+            )
+        }
+    }
+
+    private func preflightIcon(_ result: PreflightResult) -> String {
+        switch result.severity {
+        case .success: return "checkmark.shield.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error:   return "xmark.shield.fill"
+        }
+    }
+
+    private func preflightColor(_ result: PreflightResult) -> Color {
+        switch result.severity {
+        case .success: return Color(red: 0.18, green: 0.55, blue: 0.34)
+        case .warning: return Color.orange
+        case .error:   return Color.red
+        }
+    }
+
+    private func preflightBackground(_ result: PreflightResult) -> Color {
+        switch result.severity {
+        case .success: return Color(red: 0.18, green: 0.55, blue: 0.34).opacity(0.06)
+        case .warning: return Color.orange.opacity(0.06)
+        case .error:   return Color.red.opacity(0.06)
+        }
+    }
+
+    private func formattedGas(_ hexGas: String) -> String {
+        let s = hexGas.hasPrefix("0x") ? String(hexGas.dropFirst(2)) : hexGas
+        if let value = UInt64(s, radix: 16) {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            return formatter.string(from: NSNumber(value: value)) ?? hexGas
+        }
+        return hexGas
     }
 
     private var operationSection: some View {
