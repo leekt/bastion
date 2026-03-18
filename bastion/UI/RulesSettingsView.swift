@@ -1,9 +1,44 @@
 import Combine
 import SwiftUI
 
+private enum SidebarSelection: Equatable {
+    case configuration
+    case profile(id: String?) // nil = global default rules
+}
+
+private enum ConfigTab: String, CaseIterable {
+    case appPreferences  = "App Preferences"
+    case clientAllowlist = "Client Allowlist"
+
+    var systemImage: String {
+        switch self {
+        case .appPreferences:  return "gear.circle"
+        case .clientAllowlist: return "person.badge.key"
+        }
+    }
+}
+
+private enum RuleTab: String, CaseIterable {
+    case overview      = "Overview"
+    case rawMessage    = "Raw / Message"
+    case eip712        = "EIP-712"
+    case userOperation = "UserOperation"
+
+    var systemImage: String {
+        switch self {
+        case .overview:      return "list.bullet.rectangle.portrait"
+        case .rawMessage:    return "signature"
+        case .eip712:        return "doc.text.magnifyingglass"
+        case .userOperation: return "cpu"
+        }
+    }
+}
+
 struct RulesSettingsView: View {
     @State private var draftConfig: BastionConfig = .default
-    @State private var selectedProfileID: String?
+    @State private var sidebarSelection: SidebarSelection = .profile(id: nil)
+    @State private var selectedConfigTab: ConfigTab = .appPreferences
+    @State private var selectedRuleTab: RuleTab = .overview
     @State private var clientAccountAddresses: [String: String] = [:]
 
     @State private var newAllowedChain = ""
@@ -47,7 +82,7 @@ struct RulesSettingsView: View {
                 backgroundGradient
                     .ignoresSafeArea()
 
-                policyPage
+                detailPage
             }
         }
         .navigationSplitViewStyle(.balanced)
@@ -94,7 +129,7 @@ struct RulesSettingsView: View {
                         .foregroundStyle(Color(red: 0.45, green: 0.25, blue: 0.14))
                     Text("Bastion")
                         .font(.title2.weight(.bold))
-                    Text("Default first. Client overrides second.")
+                    Text("Select a profile to edit its rules.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -103,19 +138,36 @@ struct RulesSettingsView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+
+                        // Configuration
                         VStack(alignment: .leading, spacing: 8) {
                             sidebarSectionLabel("Configuration")
                             sidebarRow(
-                                title: "Default",
-                                subtitle: "Template for new clients",
+                                title: "App Settings",
+                                subtitle: "Bundler project ID, RPC endpoints",
                                 accountAddress: nil,
-                                systemImage: "square.stack.3d.up.fill",
-                                isSelected: selectedProfileID == nil
+                                systemImage: "gear.circle.fill",
+                                isSelected: sidebarSelection == .configuration
                             ) {
-                                selectedProfileID = nil
+                                sidebarSelection = .configuration
                             }
                         }
 
+                        // Global default rules
+                        VStack(alignment: .leading, spacing: 8) {
+                            sidebarSectionLabel("Default Rules")
+                            sidebarRow(
+                                title: "Global Defaults",
+                                subtitle: "Template copied into new clients",
+                                accountAddress: nil,
+                                systemImage: "square.stack.3d.up.fill",
+                                isSelected: sidebarSelection == .profile(id: nil)
+                            ) {
+                                sidebarSelection = .profile(id: nil)
+                            }
+                        }
+
+                        // Per-client profiles
                         VStack(alignment: .leading, spacing: 8) {
                             sidebarSectionLabel("Clients")
 
@@ -123,7 +175,7 @@ struct RulesSettingsView: View {
                                 EmptyStateRow(
                                     icon: "person.badge.plus",
                                     title: "No clients yet",
-                                    detail: "Profiles appear on first request, or you can pre-create them below."
+                                    detail: "Profiles appear on first request, or create them below."
                                 )
                             } else {
                                 ForEach(clientProfiles) { profile in
@@ -132,9 +184,9 @@ struct RulesSettingsView: View {
                                         subtitle: profile.bundleId,
                                         accountAddress: clientAccountAddresses[profile.id],
                                         systemImage: "person.crop.rectangle.stack.fill",
-                                        isSelected: selectedProfileID == profile.id
+                                        isSelected: sidebarSelection == .profile(id: profile.id)
                                     ) {
-                                        selectedProfileID = profile.id
+                                        sidebarSelection = .profile(id: profile.id)
                                     }
                                 }
                             }
@@ -154,27 +206,267 @@ struct RulesSettingsView: View {
         }
     }
 
-    private var policyPage: some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                heroCard
-                if selectedClientProfile == nil {
-                    appPreferencesCard
+    private func ruleStatusSubtitle(_ enabled: Bool) -> String {
+        enabled ? "Rule-based" : "Require approval"
+    }
+
+    @ViewBuilder
+    private var detailPage: some View {
+        switch sidebarSelection {
+        case .configuration:
+            configurationPage
+        case .profile:
+            profileDetailPage
+        }
+    }
+
+    private var configurationPage: some View {
+        VStack(spacing: 0) {
+            tabBar(tabs: ConfigTab.allCases, selected: $selectedConfigTab)
+            ZStack {
+                backgroundGradient.ignoresSafeArea()
+                ScrollView {
+                    VStack(spacing: 14) {
+                        switch selectedConfigTab {
+                        case .appPreferences:
+                            appPreferencesCard
+                        case .clientAllowlist:
+                            clientAllowlistCard
+                        }
+                    }
+                    .padding(16)
+                    .padding(.bottom, 96)
+                    .frame(maxWidth: 940, alignment: .leading)
                 }
-                scopeSummaryCard
-                authenticationCard
-                rawMessageCard
-                typedDataCard
+                .safeAreaInset(edge: .bottom) { saveBar }
+            }
+        }
+    }
+
+    // MARK: - Profile detail (tab bar at top + tab content)
+
+    private var profileDetailPage: some View {
+        VStack(spacing: 0) {
+            tabBar(tabs: RuleTab.allCases, selected: $selectedRuleTab)
+            ZStack {
+                backgroundGradient.ignoresSafeArea()
+                ScrollView {
+                    VStack(spacing: 14) {
+                        profileTabContent
+                    }
+                    .padding(16)
+                    .padding(.bottom, 96)
+                    .frame(maxWidth: 940, alignment: .leading)
+                }
+                .safeAreaInset(edge: .bottom) { saveBar }
+            }
+        }
+    }
+
+    private func tabBar<T: RawRepresentable & Hashable & CaseIterable>(
+        tabs: [T],
+        selected: Binding<T>
+    ) -> some View where T.RawValue == String {
+        HStack(spacing: 0) {
+            ForEach(Array(tabs), id: \.self) { tab in
+                tabBarButton(label: tab.rawValue, systemImage: tabSystemImage(tab), isSelected: selected.wrappedValue == tab) {
+                    selected.wrappedValue = tab
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.5))
+                .frame(height: 1)
+        }
+    }
+
+    private func tabSystemImage<T>(_ tab: T) -> String {
+        if let t = tab as? ConfigTab { return t.systemImage }
+        if let t = tab as? RuleTab   { return t.systemImage }
+        return "circle"
+    }
+
+    private func tabBarButton(label: String, systemImage: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                    .font(.caption.weight(.semibold))
+                Text(label)
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+            }
+            .foregroundStyle(isSelected
+                ? Color(red: 0.45, green: 0.25, blue: 0.14)
+                : Color.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? Color(red: 0.45, green: 0.25, blue: 0.14).opacity(0.10) : Color.clear)
+            )
+            .overlay(alignment: .bottom) {
+                if isSelected {
+                    Capsule()
+                        .fill(Color(red: 0.45, green: 0.25, blue: 0.14))
+                        .frame(height: 2.5)
+                        .padding(.horizontal, 4)
+                        .offset(y: 6)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var profileTabContent: some View {
+        switch selectedRuleTab {
+        case .overview:
+            overviewTabContent
+        case .rawMessage:
+            rawMessageTabContent
+        case .eip712:
+            eip712TabContent
+        case .userOperation:
+            userOpTabContent
+        }
+    }
+
+    private var overviewTabContent: some View {
+        VStack(spacing: 14) {
+            if selectedClientProfile != nil {
+                heroCard
+                clientIdentityCard
+            }
+            authenticationCard
+            SettingsCard(
+                icon: "list.bullet.rectangle.portrait.fill",
+                accent: Color(red: 0.45, green: 0.25, blue: 0.14),
+                title: "Rules Summary",
+                subtitle: "Read-only snapshot of all signing rules for this profile."
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    LazyVGrid(columns: summaryPillColumns, alignment: .leading, spacing: 8) {
+                        SummaryPill(
+                            title: "Raw / Message",
+                            value: activeRules.rawMessagePolicy.enabled ? "Rule-based" : "Require Approval",
+                            tint: Color(red: 0.15, green: 0.36, blue: 0.59)
+                        )
+                        SummaryPill(
+                            title: "EIP-712",
+                            value: activeRules.typedDataPolicy.enabled ? "Rule-based" : "Require Approval",
+                            tint: Color(red: 0.44, green: 0.31, blue: 0.55)
+                        )
+                        SummaryPill(
+                            title: "UserOperation",
+                            value: activeRules.enabled ? "Rule-based" : "Require Approval",
+                            tint: Color(red: 0.18, green: 0.45, blue: 0.34)
+                        )
+                        SummaryPill(
+                            title: "Rate Limits",
+                            value: "\(activeRules.rateLimits.count)",
+                            tint: Color(red: 0.52, green: 0.33, blue: 0.18)
+                        )
+                        SummaryPill(
+                            title: "Spend Limits",
+                            value: "\(activeRules.spendingLimits.count)",
+                            tint: Color(red: 0.21, green: 0.47, blue: 0.33)
+                        )
+                        if selectedClientProfile == nil {
+                            SummaryPill(
+                                title: "Clients",
+                                value: "\(clientProfiles.count)",
+                                tint: Color(red: 0.11, green: 0.39, blue: 0.63)
+                            )
+                        }
+                    }
+                }
+            }
+            if selectedClientProfile == nil {
+                defaultScopeCard
+            }
+        }
+    }
+
+    private var rawMessageTabContent: some View {
+        SettingsCard(
+            icon: "signature",
+            accent: Color(red: 0.15, green: 0.36, blue: 0.59),
+            title: "Raw / Message Signing",
+            subtitle: "Controls whether the CLI can request raw personal-sign payloads."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Enable rule-based signing for raw messages", isOn: rawMessageEnabledBinding)
+                    .toggleStyle(.switch)
+                    .font(.headline)
+
+                Text(rawMessageEnabledBinding.wrappedValue
+                    ? "Rule-based signing is active. Raw message requests proceed directly to the authentication gate."
+                    : "Require-signing mode. Every raw message request triggers explicit biometric or passcode authentication.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var eip712TabContent: some View {
+        let ruleEnabled = activeRules.typedDataPolicy.enabled
+        return VStack(spacing: 14) {
+            SettingsCard(
+                icon: "doc.text.magnifyingglass",
+                accent: Color(red: 0.44, green: 0.31, blue: 0.55),
+                title: "EIP-712 Signing",
+                subtitle: "Controls whether the CLI can request typed-data signatures."
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Enable rule-based EIP-712 signing", isOn: typedDataEnabledBinding)
+                        .toggleStyle(.switch)
+                        .font(.headline)
+
+                    Text(ruleEnabled
+                        ? "Rule-based signing is active. EIP-712 requests that pass domain and struct rules proceed to the authentication gate."
+                        : "Require-signing mode. Every EIP-712 request triggers explicit authentication — domain and struct rules are not evaluated.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            typedDataCard
+                .disabled(!ruleEnabled)
+                .opacity(ruleEnabled ? 1 : 0.45)
+        }
+    }
+
+    private var userOpTabContent: some View {
+        let ruleEnabled = activeRules.enabled
+        return VStack(spacing: 14) {
+            SettingsCard(
+                icon: "cpu.fill",
+                accent: Color(red: 0.18, green: 0.45, blue: 0.34),
+                title: "UserOperation Signing",
+                subtitle: "Controls whether the CLI can autonomously submit UserOperations."
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Enable rule-based UserOperation signing", isOn: rulesEnabledBinding)
+                        .toggleStyle(.switch)
+                        .font(.headline)
+
+                    Text(ruleEnabled
+                        ? "Rule-based signing is active. All checks below must pass before the UserOperation reaches the authentication gate."
+                        : "Require-signing mode. Every UserOperation request triggers explicit authentication — no rule checks are applied.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Group {
                 accessControlsCard
                 rateLimitCard
                 spendingLimitCard
             }
-            .padding(16)
-            .padding(.bottom, 96)
-            .frame(maxWidth: 940, alignment: .leading)
-        }
-        .safeAreaInset(edge: .bottom) {
-            saveBar
+            .disabled(!ruleEnabled)
+            .opacity(ruleEnabled ? 1 : 0.45)
         }
     }
 
@@ -271,10 +563,8 @@ struct RulesSettingsView: View {
         SettingsCard(
             icon: "shield.lefthalf.filled.badge.checkmark",
             accent: Color(red: 0.82, green: 0.46, blue: 0.16),
-            title: selectedClientProfile?.displayDescription ?? "Default Policy",
-            subtitle: selectedClientProfile == nil
-                ? "Template copied into new client profiles."
-                : "\(selectedClientProfile?.bundleId ?? "") · Client-specific auth mode, account, and rule overrides."
+            title: selectedClientProfile?.displayDescription ?? "Client Policy",
+            subtitle: "\(selectedClientProfile?.bundleId ?? "") · Client-specific auth mode, account, and rule overrides."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 if let selectedClientProfile {
@@ -283,27 +573,13 @@ struct RulesSettingsView: View {
                         value: selectedClientProfile.bundleId,
                         monospaced: true
                     )
-                } else {
-                    Text("New clients clone this page on first contact, then continue with their own independent key, account, and rule snapshot.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 LazyVGrid(columns: summaryPillColumns, alignment: .leading, spacing: 8) {
                     SummaryPill(
-                        title: "Status",
-                        value: activeRules.enabled ? "Active" : "Paused",
-                        tint: activeRules.enabled ? .green : .gray
-                    )
-                    SummaryPill(
-                        title: "Editing",
-                        value: activeScopeTitle,
-                        tint: Color(red: 0.11, green: 0.39, blue: 0.63)
-                    )
-                    SummaryPill(
-                        title: "Clients",
-                        value: "\(clientProfiles.count)",
-                        tint: Color(red: 0.14, green: 0.47, blue: 0.34)
+                        title: "UserOp Rules",
+                        value: activeRules.enabled ? "Rule-based" : "Require Approval",
+                        tint: activeRules.enabled ? .green : .orange
                     )
                     SummaryPill(
                         title: "Limits",
@@ -324,11 +600,7 @@ struct RulesSettingsView: View {
 
     @ViewBuilder
     private var scopeSummaryCard: some View {
-        if selectedClientProfile != nil {
-            clientIdentityCard
-        } else {
-            defaultScopeCard
-        }
+        EmptyView()
     }
 
     private func scopeDescriptorRow(label: String, value: String, monospaced: Bool = false) -> some View {
@@ -397,15 +669,12 @@ struct RulesSettingsView: View {
 
     private var typedDataCard: some View {
         SettingsCard(
-            icon: "doc.text.magnifyingglass",
+            icon: "network.badge.shield.half.filled",
             accent: Color(red: 0.44, green: 0.31, blue: 0.55),
-            title: "EIP-712 Signing",
+            title: "EIP-712 Domain & Struct Rules",
             subtitle: "Allowlist typed-data by domain fields and primary-type JSON matchers."
         ) {
             VStack(alignment: .leading, spacing: 14) {
-                Toggle("Allow EIP-712 signing", isOn: typedDataEnabledBinding)
-                    .toggleStyle(.switch)
-
                 Toggle("Require explicit approval for matching EIP-712 requests", isOn: typedDataApprovalBinding)
                     .toggleStyle(.switch)
 
@@ -555,83 +824,69 @@ struct RulesSettingsView: View {
         }
     }
 
+    private var clientAllowlistCard: some View {
+        SettingsCard(
+            icon: "person.badge.key.fill",
+            accent: Color(red: 0.30, green: 0.20, blue: 0.50),
+            title: "Client Allowlist",
+            subtitle: "Restrict which apps may request signatures, matched by code-signed bundle ID."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("If the list is empty, any process verified by Bastion's team ID (926A27BQ7W) can request a signature.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if allowedClientEntries.isEmpty {
+                    EmptyStateRow(
+                        icon: "person.badge.key",
+                        title: "No allowlist — all verified apps can sign",
+                        detail: "Add bundle IDs below to restrict signing to specific apps."
+                    )
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(allowedClientEntries) { client in
+                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    if let label = client.label {
+                                        Text(label)
+                                            .font(.subheadline.weight(.semibold))
+                                    }
+                                    Text(client.bundleId)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundStyle(client.label == nil ? .primary : .secondary)
+                                }
+                                Spacer()
+                                removeButton { removeAllowedClient(client) }
+                            }
+                            .padding(12)
+                            .background(cardRowBackground)
+                        }
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    TextField("com.example.agent", text: $newAllowedClientBundleId)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                    TextField("Label (optional)", text: $newAllowedClientLabel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                    Button("Add") { addAllowedClient() }
+                        .buttonStyle(.bordered)
+                        .disabled(!canAddAllowedClient)
+                }
+            }
+        }
+    }
+
     private var accessControlsCard: some View {
         SettingsCard(
             icon: "slider.horizontal.3",
             accent: Color(red: 0.18, green: 0.45, blue: 0.34),
-            title: "UserOperation Policy",
-            subtitle: "\(activeScopeTitle) controls autonomous UserOperation signing."
+            title: "Access Controls",
+            subtitle: "Restrict when and to which targets UserOperations may be signed."
         ) {
             VStack(alignment: .leading, spacing: 14) {
-                Toggle("Enable rule enforcement", isOn: rulesEnabledBinding)
-                    .toggleStyle(.switch)
-
-                Text(rulesEnabledBinding.wrappedValue
-                    ? "All checks below are active. Requests must pass every enabled rule before reaching the authentication gate."
-                    : "All rule checks are bypassed. Every UserOperation is passed straight to the authentication gate regardless of content.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 10) {
-                    sectionLabel("Client Allowlist")
-
-                    Text("Restricts which apps may request signing, matched by code-signed bundle ID. If the list is empty, any process verified by Bastion's team ID can request a signature.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if allowedClientEntries.isEmpty {
-                        EmptyStateRow(
-                            icon: "person.badge.key",
-                            title: "No client allowlist — all verified apps can sign",
-                            detail: "Any process signed by team ID 926A27BQ7W can request a signature. Add bundle IDs to restrict signing to specific apps."
-                        )
-                    } else {
-                        VStack(spacing: 10) {
-                            ForEach(allowedClientEntries) { client in
-                                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        if let label = client.label {
-                                            Text(label)
-                                                .font(.subheadline.weight(.semibold))
-                                        }
-                                        Text(client.bundleId)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundStyle(client.label == nil ? .primary : .secondary)
-                                    }
-
-                                    Spacer()
-
-                                    removeButton {
-                                        removeAllowedClient(client)
-                                    }
-                                }
-                                .padding(12)
-                                .background(cardRowBackground)
-                            }
-                        }
-                    }
-
-                    HStack(spacing: 10) {
-                        TextField("com.example.agent", text: $newAllowedClientBundleId)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(.body, design: .monospaced))
-
-                        TextField("Label (optional)", text: $newAllowedClientLabel)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 180)
-
-                        Button("Add Client") {
-                            addAllowedClient()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!canAddAllowedClient)
-                    }
-                }
-
-                Divider()
-
                 VStack(alignment: .leading, spacing: 10) {
                     sectionLabel("Allowed Hours")
 
@@ -829,7 +1084,7 @@ struct RulesSettingsView: View {
                                 accountAddress: clientAccountAddresses[profile.id],
                                 isSelected: false,
                                 onSelect: {
-                                    selectedProfileID = profile.id
+                                    sidebarSelection = .profile(id: profile.id)
                                 },
                                 onReset: nil,
                                 onRemove: nil
@@ -1326,25 +1581,19 @@ struct RulesSettingsView: View {
     }
 
     private var activeRules: RuleConfig {
-        get {
-            if let index = selectedClientProfileIndex {
-                return draftConfig.clientProfiles[index].rules
-            }
-            return draftConfig.rules
+        if let index = selectedClientProfileIndex {
+            return draftConfig.clientProfiles[index].rules
         }
+        return draftConfig.rules
     }
 
     private var selectedClientProfileIndex: Int? {
-        guard let selectedProfileID else {
-            return nil
-        }
-        return draftConfig.clientProfiles.firstIndex { $0.id == selectedProfileID }
+        guard case .profile(let id) = sidebarSelection, let id else { return nil }
+        return draftConfig.clientProfiles.firstIndex { $0.id == id }
     }
 
     private var selectedClientProfile: ClientProfile? {
-        guard let index = selectedClientProfileIndex else {
-            return nil
-        }
+        guard let index = selectedClientProfileIndex else { return nil }
         return draftConfig.clientProfiles[index]
     }
 
@@ -1353,9 +1602,7 @@ struct RulesSettingsView: View {
     }
 
     private var activeAccountAddress: String? {
-        guard let selectedClientProfile else {
-            return nil
-        }
+        guard let selectedClientProfile else { return nil }
         return clientAccountAddresses[selectedClientProfile.id]
     }
 
@@ -1437,9 +1684,9 @@ struct RulesSettingsView: View {
     private func loadCurrentConfig() {
         let config = ruleEngine.config
         draftConfig = config
-        if let selectedProfileID,
-           !config.clientProfiles.contains(where: { $0.id == selectedProfileID }) {
-            self.selectedProfileID = nil
+        if case .profile(let id) = sidebarSelection, let id,
+           !config.clientProfiles.contains(where: { $0.id == id }) {
+            sidebarSelection = .profile(id: nil)
         }
         refreshAccountAddresses()
         clearTransientInputs()
@@ -1567,7 +1814,7 @@ struct RulesSettingsView: View {
                 $0.bundleId.localizedCaseInsensitiveCompare($1.bundleId) == .orderedAscending
             }
             if let added = draftConfig.clientProfiles.first(where: { $0.bundleId.caseInsensitiveCompare(bundleId) == .orderedSame }) {
-                selectedProfileID = added.id
+                sidebarSelection = .profile(id: added.id)
             }
             refreshAccountAddresses()
         }
@@ -1610,8 +1857,8 @@ struct RulesSettingsView: View {
     private func removeClientProfile(_ profile: ClientProfile) {
         draftConfig.clientProfiles.removeAll { $0.id == profile.id }
         clientAccountAddresses.removeValue(forKey: profile.id)
-        if selectedProfileID == profile.id {
-            selectedProfileID = nil
+        if sidebarSelection == .profile(id: profile.id) {
+            sidebarSelection = .profile(id: nil)
         }
     }
 
@@ -1762,6 +2009,8 @@ struct RulesSettingsView: View {
         } else {
             update(&draftConfig.rules)
         }
+        // Keep sidebar status subtitles in sync
+        _ = draftConfig
     }
 
     private func refreshAccountAddresses() {
