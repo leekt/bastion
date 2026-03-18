@@ -40,12 +40,13 @@ This plan assumes the current codebase is **internal alpha** quality: useful for
    - Manual LaunchAgent rewriting has been removed, but the service still shares a binary with the menu bar app and development still relies on a `~/Applications/Bastion Dev.app` install path.
    - Notification click behavior and duplicate app instances have already shown that lifecycle control is not yet robust enough for release.
 
-2. Configuration storage is not hardened.
-   - Config decode failures can fall back too easily.
-   - There is no formal migration/recovery strategy for corrupted or partially written config data.
+2. Configuration storage is partially hardened. *(Updated 2026-03-19)*
+   - ✅ Corrupt config is now detected and surfaced rather than silently falling back to defaults.
+   - Formal backup/recovery behavior before destructive migrations is still missing.
 
-3. Audit history is useful, but not yet strong enough for production claims.
-   - Raw payloads are stored for operator visibility, but there is no tamper evidence, retention policy, or redaction strategy.
+3. Audit history is partially hardened. *(Updated 2026-03-19)*
+   - ✅ Request-level records with a clear timeline, `sign_pending` durable state, and 90-day age rotation are in place.
+   - Tamper evidence and explicit redaction strategy are still missing.
 
 4. Provider integration is still operationally thin.
    - Bastion is intentionally ZeroDev-first for ERC-4337 operations.
@@ -71,15 +72,14 @@ Objective: move from internal alpha to a trustworthy private beta baseline.
 
 ### P0.1 Service and App Lifecycle
 
-- Keep the `SMAppService` registration path. The current registered launch target is the main binary (`Contents/MacOS/bastion`). An attempt to move service ownership to the nested helper failed with `EX_CONFIG (78)`. Finish diagnosing and resolving that before the helper-owned architecture can be used.
-- Ensure only one active Bastion service instance can own the XPC interface at a time.
-- Make notification click, CLI invocation, app launch, and settings/history window routing deterministic.
-- Verify behavior across:
-  - fresh install
-  - rebuild/reinstall
-  - reboot
-  - logout/login
-  - notification click while app is foreground/background/not running
+**Status: In progress.** Docs and stale code corrected; lifecycle root causes identified.
+
+- ✅ `SMAppService` registration path preserved. `BundleProgram = Contents/MacOS/bastion` (main binary) is the correct registered target. The helper-owned path was investigated and failed with `EX_CONFIG (78)` / `spawn failed` — see `docs/CLAUDE_MENU_BAR_HANDOFF.md` for postmortem.
+- ✅ Stale helper-owned architecture claims removed from docs, scripts, and `BastionAgentMain.swift`.
+- ⬜ Diagnose `EX_CONFIG (78)` root cause before attempting the helper split again.
+- ⬜ Ensure only one active Bastion service instance can own the XPC interface at a time.
+- ⬜ Make notification click, CLI invocation, app launch, and settings/history window routing deterministic.
+- ⬜ Verify behavior across: fresh install, rebuild/reinstall, reboot, logout/login, notification click.
 
 Exit criteria:
 
@@ -89,47 +89,54 @@ Exit criteria:
 
 ### P0.2 Config Safety and Migration
 
-- Introduce a versioned config schema.
-- Add explicit migration logic for stored policy/config data.
-- Fail closed, or at minimum surface a visible recovery mode, on config decode/migration failure.
-- Add backup/recovery behavior for policy data before destructive migrations.
+**Status: Partially complete.** *(2026-03-19)*
+
+- ✅ Versioned config schema (version field, migration for pre-v6 configs).
+- ✅ `loadConfigRaw()` distinguishes "no config" (new install) from "data exists but decode failed" (corruption).
+- ✅ `configCorrupted: Bool` property on `RuleEngine` — set on startup, cleared on successful save.
+- ✅ Menu bar shows red warning label when config is corrupt. 3 tests added.
+- ⬜ Backup/recovery behavior before destructive schema migrations.
+- ⬜ Formal migration path for partially written or schema-incompatible configs.
 
 Exit criteria:
 
-- Old configs migrate forward deterministically.
-- Corrupt configs do not silently reset to permissive defaults.
-- Recovery behavior is visible and testable.
+- Old configs migrate forward deterministically. ✅
+- Corrupt configs do not silently reset to permissive defaults. ✅
+- Recovery behavior is visible and testable. ✅
 
 ### P0.3 Policy Model Hardening
 
-- Finish the request-type split as a first-class model:
-  - raw signing
-  - UserOperation signing
-  - EIP-712 typed data signing
-- Ensure UI, storage, and enforcement all use the same model.
-- Strengthen typed data rules:
-  - domain filters
-  - primary type filters
-  - structured JSON constraints for critical fields
+**Status: Mostly complete.** Core model is implemented; simulation-based enforcement is the remaining gap.
+
+- ✅ Request-type split as first-class model: `message`, `rawBytes`, `typedData`, `userOperation`.
+- ✅ UI, storage, and enforcement all use `SigningOperation` enum consistently.
+- ✅ Typed data rules: domain filters, primary type filters, structured JSON matcher constraints.
+- ✅ `allowedSelectors` (per-target function whitelist) and `denySelectors` (global blocklist) implemented and enforced.
+- ⬜ Simulation-based spending enforcement (calldata simulation to extract actual transfer amounts, not just declared values).
 
 Exit criteria:
 
-- Every visible policy is actually enforced.
-- No policy editor field is misleading or non-functional.
-- Typed data restrictions can express real-world approval patterns such as permit-style allowlists.
+- Every visible policy is actually enforced. ✅ (except simulation-based spending)
+- No policy editor field is misleading or non-functional. ✅
+- Typed data restrictions can express real-world approval patterns such as permit-style allowlists. ✅
 
 ### P0.4 Audit Model Hardening
 
-- Keep the request-level audit record model.
-- Add stable request states and lifecycle transitions.
-- Define which fields are stored verbatim, summarized, or redacted.
-- Add rotation/retention rules for audit data.
+**Status: Partially complete.** *(2026-03-19)*
+
+- ✅ Request-level audit record model: one request → one record with a full event timeline.
+- ✅ `sign_pending` event recorded before the approval window opens — durable state even if the process is killed mid-approval.
+- ✅ 90-day age-based rotation: records older than 90 days are dropped on each write (D-01).
+- ✅ 1000-record count cap (L-05) still enforced after age filter.
+- ✅ `bastion status` now returns `{version, serviceRegistrationStatus, configCorrupted}` via `getServiceInfo`.
+- ⬜ Tamper evidence (audit log integrity check or signature).
+- ⬜ Explicit field-level redaction strategy for sensitive payload data.
 
 Exit criteria:
 
-- One request maps to one audit record with a clear timeline.
-- Operators can inspect enough detail to understand what happened.
-- Stored history does not grow without bounds or leak more than intended.
+- One request maps to one audit record with a clear timeline. ✅
+- Operators can inspect enough detail to understand what happened. ✅
+- Stored history does not grow without bounds or leak more than intended. ✅ (retention and count cap in place; redaction pending)
 
 ### P0.5 Simulation and Preflight
 
