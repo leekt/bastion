@@ -439,6 +439,57 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         return (op, submission)
     }
 
+    // P0.5: For direct UserOps bound for ZeroDev submission without an existing
+    // paymaster, sponsor before the approval prompt. Surfaces bundler rejections
+    // early and ensures the user signs a properly gas-estimated operation.
+    @MainActor
+    private func preflightUserOperation(
+        _ op: UserOperation,
+        submission: UserOperationSubmissionRequest?
+    ) async throws -> UserOperation {
+        guard let submission, op.paymaster == nil else { return op }
+
+        let projectId: String
+        switch submission.provider {
+        case .zeroDev:
+            guard let pid = submission.projectId, !pid.isEmpty else { return op }
+            projectId = pid
+        }
+
+        let bundler = ZeroDevAPI(projectId: projectId)
+        let dummySig = P256Validator(
+            validatorAddress: ValidatorAddress.p256Validator,
+            publicKeyX: Data(repeating: 0, count: 32),
+            publicKeyY: Data(repeating: 0, count: 32),
+            sign: { _ in Data() }
+        ).dummySignature
+        let dummyRpcOp = UserOperationRPC.from(op, signature: dummySig)
+        let sponsored = try await bundler.sponsorUserOperation(
+            dummyRpcOp,
+            entryPoint: op.entryPoint,
+            chainId: op.chainId
+        )
+        return UserOperation(
+            sender: op.sender,
+            nonce: op.nonce,
+            callData: op.callData,
+            factory: op.factory,
+            factoryData: op.factoryData,
+            verificationGasLimit: sponsored.verificationGasLimit ?? op.verificationGasLimit,
+            callGasLimit: sponsored.callGasLimit ?? op.callGasLimit,
+            preVerificationGas: sponsored.preVerificationGas ?? op.preVerificationGas,
+            maxPriorityFeePerGas: sponsored.maxPriorityFeePerGas ?? op.maxPriorityFeePerGas,
+            maxFeePerGas: sponsored.maxFeePerGas ?? op.maxFeePerGas,
+            paymaster: sponsored.paymaster,
+            paymasterVerificationGasLimit: sponsored.paymasterVerificationGasLimit,
+            paymasterPostOpGasLimit: sponsored.paymasterPostOpGasLimit,
+            paymasterData: sponsored.paymasterData.flatMap { Data(hexString: $0) },
+            chainId: op.chainId,
+            entryPoint: op.entryPoint,
+            entryPointVersion: op.entryPointVersion
+        )
+    }
+
     nonisolated func signStructured(
         operationType: String,
         operationData: Data,
@@ -495,8 +546,10 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     }
                     switch resolvedUserOperationRequest {
                     case .direct(let userOperation, let submission):
-                        operation = .userOperation(userOperation)
-                        userOperationSubmission = try self.resolvedSubmissionRequest(submission)
+                        let resolvedSub = try self.resolvedSubmissionRequest(submission)
+                        let preflightedOp = try await self.preflightUserOperation(userOperation, submission: resolvedSub)
+                        operation = .userOperation(preflightedOp)
+                        userOperationSubmission = resolvedSub
                     case .intent(let intent):
                         let built = try await self.buildUserOperation(from: intent)
                         operation = .userOperation(built.0)
