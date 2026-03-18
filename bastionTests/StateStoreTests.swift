@@ -462,6 +462,62 @@ struct RuleEngineConfigTests {
         #expect(engine.config.clientProfiles.count == 1)
     }
 
+    @Test("P0.2: Pre-v6 config with open auth policy is migrated to biometricOrPasscode")
+    func migratesLegacyOpenAuthPolicy() throws {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+
+        // Directly write a raw version-5 JSON config to bypass normalizedConfig.
+        // This simulates a config saved by an old app version that defaulted to .open.
+        let json = """
+        {
+            "version": 5,
+            "authPolicy": "open",
+            "rules": {
+                "enabled": true, "requireExplicitApproval": false,
+                "rateLimits": [], "spendingLimits": [],
+                "rawMessagePolicy": {"enabled": true},
+                "typedDataPolicy": {"enabled": true, "requireExplicitApproval": false, "domainRules": [], "structRules": []}
+            },
+            "bundlerPreferences": {"chainRPCs": []},
+            "clientProfiles": [
+                {
+                    "id": "profile-1",
+                    "bundleId": "com.example.agent",
+                    "authPolicy": "open",
+                    "keyTag": "com.bastion.signingkey.client.test",
+                    "rules": {
+                        "enabled": true, "requireExplicitApproval": false,
+                        "rateLimits": [], "spendingLimits": [],
+                        "rawMessagePolicy": {"enabled": true},
+                        "typedDataPolicy": {"enabled": true, "requireExplicitApproval": false, "domainRules": [], "structRules": []}
+                    }
+                }
+            ]
+        }
+        """
+        keychain.write(account: "config", data: json.data(using: .utf8)!)
+
+        let loaded = engine.loadConfig()
+        #expect(loaded.authPolicy == .biometricOrPasscode)
+        #expect(loaded.clientProfiles.first?.authPolicy == .biometricOrPasscode)
+        #expect(loaded.version == 6)
+    }
+
+    @Test("P0.2: Version 6+ config with explicit open policy is not migrated")
+    func doesNotMigrateExplicitOpenPolicy() throws {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+
+        var config = BastionConfig.default
+        config.authPolicy = .open
+        try engine.saveConfig(config)
+
+        let loaded = engine.loadConfig()
+        #expect(loaded.authPolicy == .open)
+        #expect(loaded.version == 6)
+    }
+
     @Test("Existing client profile overrides global defaults")
     func existingClientProfileOverridesGlobalDefaults() throws {
         let keychain = MockKeychainBackend()
@@ -569,17 +625,19 @@ struct RuleEngineValidationTests {
         }
     }
 
-    @Test("Raw message signing can be disabled")
+    @Test("Raw message signing disabled means require-approval, not denied")
     func rawMessageDisabled() {
         let engine = RuleEngine(keychain: MockKeychainBackend())
         var config = BastionConfig.default
         config.rules.rawMessagePolicy.enabled = false
-        let result = engine.validate(makeMessageRequest(), config: config)
-        if case .denied(let reasons) = result {
-            #expect(reasons.first?.contains("disabled") == true)
-        } else {
-            Issue.record("Expected .denied when raw signing is disabled")
+        let request = makeMessageRequest()
+        // Validation should pass (not denied) — signing is still allowed but requires explicit approval
+        let result = engine.validate(request, config: config)
+        if case .denied = result {
+            Issue.record("Expected .allowed when raw signing is disabled — should require approval, not block")
         }
+        // requiresExplicitApproval must be true when rule-based signing is disabled
+        #expect(engine.requiresExplicitApproval(for: request, config: config) == true)
     }
 
     @Test("Typed-data domain rule allows matching payload")
@@ -865,14 +923,28 @@ struct RuleEngineValidationTests {
         }
     }
 
-    @Test("All signing operation types require approval review")
+    @Test("requiresExplicitApproval reflects per-type rule-based toggle")
     func allOperationsRequireApprovalReview() {
         let engine = RuleEngine(keychain: MockKeychainBackend())
-        let config = BastionConfig.default
 
-        #expect(engine.requiresExplicitApproval(for: makeMessageRequest(), config: config))
-        #expect(engine.requiresExplicitApproval(for: makeTypedDataRequest(), config: config))
-        #expect(engine.requiresExplicitApproval(for: makeUserOpRequest(), config: config))
+        // When rule-based signing is enabled (default), no explicit approval required
+        var enabledConfig = BastionConfig.default
+        enabledConfig.rules.rawMessagePolicy.enabled = true
+        enabledConfig.rules.typedDataPolicy.enabled = true
+        enabledConfig.rules.requireExplicitApproval = false
+        enabledConfig.rules.typedDataPolicy.requireExplicitApproval = false
+        #expect(engine.requiresExplicitApproval(for: makeMessageRequest(), config: enabledConfig) == false)
+        #expect(engine.requiresExplicitApproval(for: makeTypedDataRequest(), config: enabledConfig) == false)
+        #expect(engine.requiresExplicitApproval(for: makeUserOpRequest(), config: enabledConfig) == false)
+
+        // When rule-based signing is disabled for each type, explicit approval is required
+        var disabledConfig = BastionConfig.default
+        disabledConfig.rules.rawMessagePolicy.enabled = false
+        disabledConfig.rules.typedDataPolicy.enabled = false
+        disabledConfig.rules.requireExplicitApproval = true
+        #expect(engine.requiresExplicitApproval(for: makeMessageRequest(), config: disabledConfig) == true)
+        #expect(engine.requiresExplicitApproval(for: makeTypedDataRequest(), config: disabledConfig) == true)
+        #expect(engine.requiresExplicitApproval(for: makeUserOpRequest(), config: disabledConfig) == true)
     }
 
     @Test("Spending limit state tracking works")
