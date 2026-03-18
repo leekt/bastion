@@ -173,6 +173,17 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         super.init()
     }
 
+    private nonisolated static func bridgedError(_ error: Error) -> NSError {
+        if let bastionError = error as? BastionError {
+            return bastionError.nsError
+        }
+        return NSError(
+            domain: "com.bastion.error",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: String(describing: error)]
+        )
+    }
+
     nonisolated func sign(
         data: Data,
         requestID: String,
@@ -198,7 +209,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             } catch let error as BastionError {
                 reply(nil, error.nsError)
             } catch {
-                reply(nil, error)
+                reply(nil, Self.bridgedError(error))
             }
         }
     }
@@ -215,6 +226,29 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                 )
                 let jsonData = try JSONEncoder().encode(result)
                 reply(jsonData, nil)
+            } catch {
+                reply(nil, error)
+            }
+        }
+    }
+
+    nonisolated func resetSigningKeys(withReply reply: @escaping (Data?, Error?) -> Void) {
+        Task { @MainActor in
+            let storedConfig = ruleEngine.loadConfig()
+            let keyTags = [
+                SecureEnclaveManager.defaultSigningKeyIdentifier,
+                SecureEnclaveManager.legacySigningKeyIdentifier
+            ] + storedConfig.clientProfiles.map(\.keyTag)
+
+            let deleted = SecureEnclaveManager.shared.deleteSigningKeys(keyTags: keyTags)
+            let result = ResetSigningKeysResponse(
+                deletedKeyTags: deleted.sorted(),
+                requestedKeyTags: Array(Set(keyTags)).sorted()
+            )
+
+            do {
+                let data = try JSONEncoder().encode(result)
+                reply(data, nil)
             } catch {
                 reply(nil, error)
             }
@@ -553,7 +587,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             } catch let error as BastionError {
                 reply(nil, error.nsError)
             } catch {
-                reply(nil, error)
+                reply(nil, Self.bridgedError(error))
             }
         }
     }

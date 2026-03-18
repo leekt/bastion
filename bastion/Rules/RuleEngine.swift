@@ -43,23 +43,57 @@ final class RuleEngine {
         loadConfigRaw().config
     }
 
-    // P0.2: Upgrade configs saved before schema version 6 that inherited the old
-    // insecure default of authPolicy: .open. Applies to both the global policy and
-    // any per-client profiles.
+    // P0.2 / P0.3: Upgrade configs saved before schema version 7.
+    // - v6: inherited the old insecure default of authPolicy: .open
+    // - v7: repair legacy per-client placeholder rules that were stored as
+    //       disabled/empty instead of cloning the global template
     private nonisolated func migrateConfig(_ config: BastionConfig) -> BastionConfig {
-        guard config.version < 6 else { return config }
+        guard config.version < 7 else { return config }
         var migrated = config
-        if migrated.authPolicy == .open {
+
+        if migrated.version < 6, migrated.authPolicy == .open {
             migrated.authPolicy = .biometricOrPasscode
         }
-        migrated.clientProfiles = migrated.clientProfiles.map { profile in
-            var profile = profile
-            if profile.authPolicy == .open {
+
+        migrated.clientProfiles = migrated.clientProfiles.map { originalProfile in
+            var profile = originalProfile
+
+            if migrated.version < 6, profile.authPolicy == .open {
                 profile.authPolicy = .biometricOrPasscode
             }
+
+            if migrated.version < 7,
+               looksLikeLegacyDisabledProfileRules(profile.rules),
+               migrated.rules.enabled {
+                profile.rules = clonedRulesForClient(from: migrated.rules)
+            }
+
             return profile
         }
         return migrated
+    }
+
+    private nonisolated func looksLikeLegacyDisabledProfileRules(_ rules: RuleConfig) -> Bool {
+        guard rules.enabled == false,
+              rules.requireExplicitApproval == false,
+              rules.allowedHours == nil,
+              (rules.allowedChains?.isEmpty ?? true),
+              (rules.allowedTargets?.isEmpty ?? true),
+              (rules.allowedSelectors?.isEmpty ?? true),
+              (rules.denySelectors?.isEmpty ?? true),
+              (rules.allowedClients?.isEmpty ?? true),
+              rules.rateLimits.isEmpty,
+              rules.spendingLimits.isEmpty,
+              rules.rawMessagePolicy.enabled == false,
+              rules.rawMessagePolicy.allowRawSigning == false,
+              rules.typedDataPolicy.enabled == false,
+              rules.typedDataPolicy.requireExplicitApproval == false,
+              rules.typedDataPolicy.domainRules.isEmpty,
+              rules.typedDataPolicy.structRules.isEmpty else {
+            return false
+        }
+
+        return true
     }
 
     nonisolated func saveConfig(_ newConfig: BastionConfig) throws {
@@ -794,7 +828,7 @@ final class RuleEngine {
 
     private func normalizedConfig(_ config: BastionConfig) -> BastionConfig {
         var normalized = config
-        normalized.version = 6
+        normalized.version = 7
         if let projectId = normalized.bundlerPreferences.zeroDevProjectId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !projectId.isEmpty {

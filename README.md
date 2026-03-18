@@ -9,10 +9,10 @@ AI agents that interact with blockchains need to sign transactions. Giving an ag
 - The private key **never leaves the Secure Enclave**. It cannot be exported, copied, or read — even by Bastion itself.
 - Every signing request goes through a **rule engine** (rate limits, allowed hours, whitelist).
 - Every request is checked against a **per-client rule set** before signing.
-- Matching requests can follow the configured approval/auth policy for that client.
+- Matching requests can be signed **silently** by the client's own Secure Enclave key when policy allows it.
 - Breaking rules requires **explicit approval plus owner authentication** (biometric or passcode).
 - Config and state are in **macOS Keychain** — agents cannot read, modify, or delete them.
-- A tamper-proof **audit log** records every request, approval, and denial.
+- A request-level **audit history** records what each client asked Bastion to sign, how it was approved, and whether a submitted UserOperation was confirmed.
 
 ## Architecture
 
@@ -59,7 +59,7 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 | XPC code signing | IPC channel | Rejects connections from binaries not signed by the same team |
 | Rule engine | Operational limits | Rate limits, time windows, address whitelist |
 | Owner auth | Rule changes + overrides | `LAContext` with `.biometricOrPasscode` for config saves and rule violations |
-| Audit log | Accountability | Request-level JSON log with per-request timeline (`Signed -> Submitted -> Confirmed`) |
+| Audit history | Accountability | Request-level JSON history with a per-request timeline (`Signed -> Submitted -> Confirmed`) |
 
 ### What agents can do
 
@@ -88,10 +88,23 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 
 | Scope | Key tag | Notes |
 |---|---|---|
-| Default profile | `com.bastion.signingkey` | Used before a dedicated client profile exists |
+| Default profile | `com.bastion.signingkey.default` | Used before a dedicated client profile exists |
 | Client profile | `com.bastion.signingkey.client.<uuid>` | Each client gets its own Secure Enclave key and derived account address |
+| Legacy fallback | `com.bastion.signingkey` | Older builds may have created this tag; `bastion reset-keys` removes it too |
 
-Every key uses `.privateKeyUsage` in the Secure Enclave so the hardware signing operation itself stays silent. The real gate is Bastion policy plus `LAContext` authentication before the SE call. Auth policy is configurable per client (open, passcode, biometric, biometricOrPasscode).
+### Key feature: silent per-client keys with app-layer owner auth
+
+This is one of Bastion's core design choices.
+
+- Every client profile gets its **own Secure Enclave signing key** and its **own derived account address**.
+- These client keys are created with **`.privateKeyUsage` only**. The Secure Enclave signing operation itself is intended to stay silent.
+- Bastion does **not** use a separate "owner signing key" for overrides or config changes.
+- Owner approval is an **app-layer authentication step** (`LAContext`), not a different hardware key.
+- If a request matches policy and does not require interactive review, Bastion signs directly with the client's key with **no approval window and no biometric/passcode prompt**.
+- If a request requires manual approval, Bastion may ask for owner authentication **after approval**, then still signs with the same client key.
+- If a request breaks policy, Bastion can only proceed through an explicit override flow with owner authentication, and the final signature is still produced by the same client key.
+
+In short: the hardware key stays silent, and Bastion policy decides when user interaction is required.
 
 ### Signing flow
 
@@ -108,20 +121,30 @@ Every key uses `.privateKeyUsage` in the Secure Enclave so the hardware signing 
    - Rate limits (configurable time windows)
    - Spending limits (direct native/ERC-20 amounts from decoded calldata)
 
-   If all rules pass:
-     6a. Show the approval popup for the request
-     6b. Apply the configured client auth policy (.open skips owner auth, `.biometric` prompts, etc.)
-     6c. Sign with Secure Enclave Key B
+   If all rules pass and no interactive review is required:
+     6a. Sign immediately with the client's Secure Enclave key
+     6b. No approval popup
+     6c. No owner auth prompt
+
+   If all rules pass but interactive review is required:
+     6a. Show approval popup
+     6b. If the client auth policy is not `.open`, ask for owner auth after approval
+     6c. Sign with the same client key
 
    If any rule fails:
      6a. Show violation popup (what rule was broken)
      6b. User approves → owner auth (`.biometricOrPasscode`)
-     6c. Sign with Secure Enclave Key B
+     6c. Sign with the same client key
 
-7. For UserOps: normalize s <= N/2 (OZ P256 on-chain requirement)
-8. Increment counters in Keychain (rate limit + spending)
-9. Record audit log entry
-10. Return JSON response via XPC → CLI stdout → Agent
+7. For high-level `eth userOp --op ... --send` requests:
+   - Bastion builds the Kernel `execute()` calldata
+   - Bastion sponsors / estimates the UserOperation first
+   - Bastion only performs the real signature after approval / override is complete
+   - Bastion then submits the signed UserOperation to ZeroDev
+8. For UserOps: normalize s <= N/2 (OZ P256 on-chain requirement)
+9. Increment counters in Keychain (rate limit + spending)
+10. Record request-level audit history
+11. Return JSON response via XPC → CLI stdout → Agent
 
 For live UserOps, the client can seed gas fees from chain-native EIP-1559 data and only fall back to bundler-specific fee floors when `eth_sendUserOperation` rejects the initial estimate.
 ```
@@ -148,7 +171,7 @@ Audit log (display only, not security-critical): `~/Library/Application Support/
 - **Raw / Message Signing** is a simple allow/deny toggle.
 - **EIP-712 Signing** supports domain allowlists plus JSON subset matching for struct values, so fields can be pinned or hardened.
 - **UserOperation Policy** keeps the calldata-aware chain, target, rate-limit, and spending-limit controls.
-- **Audit History** is a separate window that shows one row per request, with full payload detail plus a timeline of `Signed`, `Submitted`, `Confirmed`, `Failed`, or `Pending`.
+- **Audit History** is a separate window that shows one row per request, with full payload detail plus a timeline of `Pending`, `Signed`, `Submitted`, `Confirmed`, or `Failed`.
 - **macOS notifications** are used for UserOperation submission results. Clicking the notification opens `Audit History`.
 - **Approval Popup** is compact by design and surfaces the request mode, client/account, digest, decoded action summary, and rule-override reasons.
 
@@ -232,7 +255,7 @@ These should already be set:
 3. On first launch the app:
    - Creates Secure Enclave signing key
    - Registers the bundled `SMAppService` agent for XPC
-   - Registers the main binary as the `SMAppService` launch agent (`BundleProgram = Contents/MacOS/bastion`)
+   - Registers the main binary as the `SMAppService` launch target (`BundleProgram = Contents/MacOS/bastion`)
    - Attempts to symlink `bastion-cli` to `/usr/local/bin/bastion` when running from `/Applications` or `~/Applications`
    - Bundles the CLI at `bastion.app/Contents/MacOS/bastion-cli`
 
@@ -294,6 +317,9 @@ bastion state
 # View current rules
 bastion rules
 
+# Delete all Bastion Secure Enclave signing keys
+bastion reset-keys
+
 # Raw signature (32 bytes = 64 hex chars)
 bastion sign --data a3f1c2d4e5b67890abcdef1234567890abcdef1234567890abcdef1234567890
 # {"pubkeyX": "...", "pubkeyY": "...", "r": "...", "s": "..."}
@@ -302,9 +328,9 @@ bastion sign --data a3f1c2d4e5b67890abcdef1234567890abcdef1234567890abcdef123456
 bastion eth message "Hello, world!"
 bastion eth typedData --json-file /tmp/typed-data.json
 bastion eth userOp --op 0x0000000000000000000000000000000000000001,0,0x
-bastion eth userOp --submit --op 0x0000000000000000000000000000000000000001,0,0x
+bastion eth userOp --send --op 0x0000000000000000000000000000000000000001,0,0x
 bastion eth userOp --json-file /tmp/userop.json
-bastion eth userOp --submit --json-file /tmp/userop.json
+bastion eth userOp --send --json-file /tmp/userop.json
 ```
 
 All output is JSON on stdout. Errors go to stderr with exit code 1.
@@ -315,7 +341,9 @@ For `bastion eth userOp --op`, each action is `target,value,data`, where `value`
 
 For `bastion eth userOp --json-file`, the byte fields `callData`, `factoryData`, and `paymasterData` must be passed as `0x`-prefixed hex strings. Base64-encoded values are rejected.
 
-If `--submit` is set, Bastion will sign the UserOperation, submit it to the ZeroDev bundler after approval, and return a `submission` object with the immediate send result. The ZeroDev project ID defaults to the value stored in `Default -> App Preferences`. Chain RPC endpoints for `eth_call`/fee lookup are also read from `Default -> App Preferences`. Receipt updates are written to `Audit History` asynchronously and grouped under the same request row.
+`--send` is the preferred flag. `--submit` is still accepted as a legacy alias.
+
+For high-level `eth userOp --op ... --send` requests, Bastion first builds and sponsors the UserOperation, then shows any required approval or rule-override UI, then produces the real signature, and finally submits the signed operation. The ZeroDev project ID defaults to the value stored in `Default -> App Preferences`. Chain RPC endpoints for `eth_call` and fee lookup are also read from `Default -> App Preferences`. Receipt updates are written to `Audit History` asynchronously and grouped under the same request row.
 
 See `docs/CLI_REQUEST_EXAMPLES.md` for validated `message`, `typedData`, and `userOp` examples.
 
@@ -379,13 +407,19 @@ rm -rf ~/Library/Application\ Support/Bastion/
 # (drag /Applications/Bastion.app or ~/Applications/Bastion\ Dev.app to Trash)
 ```
 
-Secure Enclave keys persist in the hardware keychain. To delete them, use Keychain Access.app and search for `com.bastion.signingkey`.
+Secure Enclave keys persist in the hardware keychain. The recommended way to clear all Bastion-managed signing keys is:
+
+```bash
+bastion reset-keys
+```
+
+If you need to inspect them manually, search Keychain Access for `com.bastion.signingkey`.
 
 ---
 
 ## On-chain component
 
-The P256Validator Solidity contract lives in [`contracts/`](contracts/). It's an ERC-7579 validator module for Kernel v3.3 that verifies P-256 signatures on-chain via the RIP-7212 precompile. Deployed at `0x9906AB44fF795883C5a725687A2705BE4118B0f3`.
+The P256Validator Solidity contract lives in [`contracts/`](contracts/). It's an ERC-7579 validator module for Kernel v3.3 that verifies P-256 signatures on-chain via the RIP-7212 precompile. Bastion currently expects the validator at `0x9906AB44fF795883C5a725687A2705BE4118B0f3` on chains where P-256 UserOperation signing is enabled; the validator must actually be deployed at that address on the target chain for sponsorship and account initialization to succeed.
 
 ## Documentation
 

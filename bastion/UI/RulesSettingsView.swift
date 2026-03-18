@@ -1528,13 +1528,13 @@ struct RulesSettingsView: View {
     private var authFootnote: String {
         switch authPolicyBinding.wrappedValue {
         case .open:
-            return "No authentication required — requests that pass rules are signed immediately with no prompt. Only use this when your rules are strict enough on their own."
+            return "Requests that pass rules are signed immediately with no owner-auth prompt. Manual approval also skips extra owner auth. Rule overrides still require master-key authentication."
         case .passcode:
-            return "Your login password is required before each signature. Touch ID will not satisfy this prompt."
+            return "If a request needs manual approval, your login password is required after approval. Requests that pass rules sign silently. Rule overrides still require master-key authentication."
         case .biometric:
-            return "Touch ID is required before each signature. Passcode fallback is disabled — if biometrics are unavailable the request is rejected."
+            return "If a request needs manual approval, Touch ID is required after approval. Requests that pass rules sign silently. Passcode fallback is disabled for manual approvals. Rule overrides still require master-key authentication."
         case .biometricOrPasscode:
-            return "Touch ID or your login password is required before each signature. Recommended for daily use."
+            return "If a request needs manual approval, Touch ID or your login password is required after approval. Requests that pass rules sign silently. Rule overrides still require master-key authentication."
         }
     }
 

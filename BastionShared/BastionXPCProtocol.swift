@@ -10,6 +10,7 @@ import Foundation
     func getRules(withReply reply: @escaping (Data?, Error?) -> Void)
     func getState(withReply reply: @escaping (Data?, Error?) -> Void)
     func getServiceInfo(withReply reply: @escaping (Data?, Error?) -> Void)
+    func resetSigningKeys(withReply reply: @escaping (Data?, Error?) -> Void)
     func signStructured(
         operationType: String,
         operationData: Data,

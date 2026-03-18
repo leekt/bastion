@@ -138,6 +138,11 @@ nonisolated final class SecureEnclaveManager: Sendable {
         )
     }
 
+    nonisolated func deleteSigningKeys(keyTags: [String]) -> [String] {
+        let uniqueTags = Array(Set(keyTags))
+        return uniqueTags.filter { deleteSigningKey(keyTag: $0) }
+    }
+
     // MARK: - DER Parsing
 
     nonisolated func parseDER(_ der: Data) throws -> (r: Data, s: Data) {
@@ -211,6 +216,20 @@ nonisolated final class SecureEnclaveManager: Sendable {
             sign: { _ in Data(repeating: 0, count: 64) }
         )
         return SmartAccount(validator: validator).computeAddress()
+    }
+
+    private nonisolated func deleteSigningKey(keyTag: String) -> Bool {
+        guard let tag = keyTag.data(using: .utf8) else {
+            return false
+        }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess
     }
 
     private nonisolated func loadKey(tag: Data, context: LAContext? = nil) throws -> SecKey {

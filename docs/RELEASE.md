@@ -138,8 +138,8 @@ This script:
 - stops the existing Bastion service
 - installs the app into `/Applications`
 - registers the app bundle with Launch Services
-- registers the bundled `SMAppService` helper
-- kickstarts the helper
+- registers the bundled `SMAppService` launch target
+- kickstarts the registered `com.bastion.xpc` service
 - installs `/usr/local/bin/bastion` when writable
 - verifies XPC reachability with `bastion-cli status`
 
@@ -158,7 +158,7 @@ This release flow gives Bastion:
 - deterministic drag-and-drop DMG artifacts
 - notarization and stapling
 - deterministic `/Applications` install behavior
-- deterministic helper registration
+- deterministic `SMAppService` registration
 - a machine-generated manifest that an updater can consume later
 
 ## What Is Still Not Implemented

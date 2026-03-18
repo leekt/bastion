@@ -156,7 +156,9 @@ final class SigningManager {
                 throw BastionError.authFailed
             }
         } else {
-            if requiresInteractivePolicyReview(for: request, config: effectiveConfig) {
+            let requiresInteractiveReview = requiresInteractivePolicyReview(for: request, config: effectiveConfig)
+
+            if requiresInteractiveReview {
                 approvalMode = .policyReview
                 // Record that this request reached the approval window. This ensures there is
                 // always an audit entry even if the process is killed while the window is open.
@@ -189,7 +191,10 @@ final class SigningManager {
                 }
             }
 
-            if clientContext.authPolicy != .open {
+            if Self.requiresOwnerAuthenticationAfterApproval(
+                requiresInteractiveReview: requiresInteractiveReview,
+                authPolicy: clientContext.authPolicy
+            ) {
                 do {
                     try await authManager.authenticate(
                         policy: clientContext.authPolicy,
@@ -229,7 +234,10 @@ final class SigningManager {
         ruleEngine.recordSuccess(request: request, config: effectiveConfig)
 
         // Notify for silently auto-approved requests (no approval window was shown).
-        if !requiresMasterKey && !requiresInteractivePolicyReview(for: request, config: effectiveConfig) {
+        if !requiresMasterKey && !Self.requiresOwnerAuthenticationAfterApproval(
+            requiresInteractiveReview: requiresInteractivePolicyReview(for: request, config: effectiveConfig),
+            authPolicy: clientContext.authPolicy
+        ) {
             notificationManager.notify(
                 title: "Request Signed",
                 subtitle: clientContext.displayName,
@@ -530,5 +538,12 @@ final class SigningManager {
             lines.append("Actual Gas Used: \(actualGasUsed)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    nonisolated static func requiresOwnerAuthenticationAfterApproval(
+        requiresInteractiveReview: Bool,
+        authPolicy: AuthPolicy
+    ) -> Bool {
+        requiresInteractiveReview && authPolicy != .open
     }
 }

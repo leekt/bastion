@@ -32,6 +32,10 @@ import Foundation
         withReply reply: @escaping (Data?, Error?) -> Void
     )
 
+    func resetSigningKeys(
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
     /// Structured signing: accepts a JSON-encoded signing operation.
     /// operationType: "message" | "typedData" | "userOperation"
     /// operationData: JSON payload specific to the operation type
