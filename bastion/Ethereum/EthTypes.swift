@@ -6,6 +6,9 @@ import Foundation
 /// Each variant knows its semantics and can be validated by the rule engine.
 nonisolated enum SigningOperation: Sendable {
     case message(String)
+    /// Raw bytes signing — no Ethereum prefix is applied. The caller provides exactly 32 bytes
+    /// (a pre-computed hash) to be signed directly by the Secure Enclave.
+    case rawBytes(Data)
     case typedData(EIP712TypedData)
     case userOperation(UserOperation)
 
@@ -14,6 +17,8 @@ nonisolated enum SigningOperation: Sendable {
         case .message(let text):
             let preview = text.count > 80 ? "\(text.prefix(80))..." : text
             return "Sign message: \"\(preview)\""
+        case .rawBytes(let data):
+            return "Sign raw bytes: 0x\(data.prefix(8).hex)..."
         case .typedData(let data):
             return "Sign typed data: \(data.domain.name ?? "unknown")"
         case .userOperation(let op):
@@ -26,6 +31,7 @@ nonisolated enum SigningOperation: Sendable {
     var chainId: Int? {
         switch self {
         case .message: return nil
+        case .rawBytes: return nil
         case .typedData(let data): return data.domain.chainId
         case .userOperation(let op): return op.chainId
         }
@@ -103,16 +109,6 @@ nonisolated struct UserOperationSubmissionRequest: Codable, Sendable {
 nonisolated struct UserOperationRequestEnvelope: Codable, Sendable {
     let userOperation: UserOperation
     let submission: UserOperationSubmissionRequest?
-}
-
-nonisolated struct SelfUserOperationRequest: Codable, Sendable {
-    let projectId: String?
-    let chainId: Int
-
-    init(projectId: String? = nil, chainId: Int = 11155111) {
-        self.projectId = projectId
-        self.chainId = chainId
-    }
 }
 
 nonisolated struct RequestedExecution: Codable, Sendable {

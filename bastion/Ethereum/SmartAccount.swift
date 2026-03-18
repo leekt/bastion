@@ -253,25 +253,6 @@ nonisolated final class SmartAccount: Sendable {
         return op
     }
 
-    /// Build a sponsored no-op UserOperation that executes a 0 ETH self-call.
-    /// Used to generate a valid current-account request for approval/send flows.
-    func buildSponsoredSelfUserOperation(
-        using rpc: EthRPC,
-        bundler: ZeroDevAPI,
-        chainId: Int
-    ) async throws -> UserOperation {
-        let sender = try await resolveAddress(using: rpc)
-        let callData = KernelEncoding.executeCalldata(
-            single: KernelEncoding.Execution(to: sender, value: 0, data: Data())
-        )
-        return try await buildSponsoredUserOperation(
-            callData: callData,
-            using: rpc,
-            bundler: bundler,
-            chainId: chainId
-        )
-    }
-
     /// Sign a UserOperation hash with this account's validator.
     func signUserOperation(_ op: UserOperation) throws -> Data {
         let hash = EthHashing.userOperationHash(op)

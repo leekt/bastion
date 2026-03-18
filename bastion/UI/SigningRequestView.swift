@@ -176,6 +176,12 @@ struct SigningRequestView: View {
                 ApprovalKeyValueRow(label: "Encoding", value: text.hasPrefix("0x") ? "Hex payload" : "UTF-8 text")
                 ApprovalCodeBlock(title: "Message", value: text)
             }
+        case .rawBytes(let data):
+            VStack(alignment: .leading, spacing: 12) {
+                ApprovalKeyValueRow(label: "Type", value: "Raw Bytes")
+                ApprovalKeyValueRow(label: "Prefix", value: "None — signed directly without any Ethereum prefix")
+                ApprovalCodeBlock(title: "Payload", value: "0x" + data.hex)
+            }
         case .typedData(let typed):
             VStack(alignment: .leading, spacing: 12) {
                 ApprovalKeyValueRow(label: "Type", value: "EIP-712 Typed Data")
@@ -317,7 +323,7 @@ struct SigningRequestView: View {
 
     private var headerColor: Color {
         switch request.operation {
-        case .message:
+        case .message, .rawBytes:
             return Color(red: 0.13, green: 0.38, blue: 0.60)
         case .typedData:
             return Color(red: 0.44, green: 0.31, blue: 0.55)
@@ -440,6 +446,8 @@ nonisolated struct SigningRequestPresentation: Sendable {
         switch request.operation {
         case .message:
             return "Raw Message"
+        case .rawBytes:
+            return "Raw Bytes"
         case .typedData:
             return "Typed Data"
         case .userOperation:
@@ -451,6 +459,8 @@ nonisolated struct SigningRequestPresentation: Sendable {
         switch request.operation {
         case .message:
             return "Raw Message Review"
+        case .rawBytes:
+            return "Raw Bytes Review"
         case .typedData:
             return "Typed Data Review"
         case .userOperation:
@@ -462,6 +472,8 @@ nonisolated struct SigningRequestPresentation: Sendable {
         switch request.operation {
         case .message:
             return "The payload below will be wrapped with the Ethereum personal-sign prefix before verification."
+        case .rawBytes:
+            return "The 32-byte payload below will be signed directly — no EIP-191 or EIP-712 prefix is applied."
         case .typedData:
             return "Bastion hashes this payload with the EIP-712 domain separator and structured message fields."
         case .userOperation:
