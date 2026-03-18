@@ -575,6 +575,19 @@ nonisolated struct ApprovalRequest: Sendable {
     let request: SignRequest
     let mode: ApprovalMode
     let clientContext: ClientSigningContext
+    let preflightResult: PreflightResult?
+
+    init(
+        request: SignRequest,
+        mode: ApprovalMode,
+        clientContext: ClientSigningContext,
+        preflightResult: PreflightResult? = nil
+    ) {
+        self.request = request
+        self.mode = mode
+        self.clientContext = clientContext
+        self.preflightResult = preflightResult
+    }
 }
 
 nonisolated struct ClientSigningContext: Sendable {

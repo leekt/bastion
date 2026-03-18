@@ -46,6 +46,8 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         case signDenied = "sign_denied"
         case ruleViolation = "rule_violation"
         case authFailed = "auth_failed"
+        /// Preflight simulation completed before the approval window opened.
+        case preflightCompleted = "preflight_completed"
         case userOpSubmitted = "user_op_submitted"
         case userOpSendFailed = "user_op_send_failed"
         case userOpReceiptSuccess = "user_op_receipt_success"
@@ -148,7 +150,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
             return "UserOp Receipt Failed"
         case .userOpReceiptTimeout:
             return "UserOp Receipt Pending"
-        case .signPending, .signSuccess, .signDenied, .ruleViolation, .authFailed:
+        case .signPending, .signSuccess, .signDenied, .ruleViolation, .authFailed, .preflightCompleted:
             break
         }
         return request?.title ?? type.rawValue
@@ -181,6 +183,8 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
             return "Receipt Failed"
         case .userOpReceiptTimeout:
             return "Receipt Pending"
+        case .preflightCompleted:
+            return "Preflight"
         }
     }
 

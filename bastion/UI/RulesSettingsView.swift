@@ -2335,7 +2335,7 @@ struct AuditHistoryView: View {
             switch latestType {
             case .signDenied, .ruleViolation, .authFailed, .userOpSendFailed, .userOpReceiptFailed, .userOpReceiptTimeout:
                 return true
-            case .signPending, .signSuccess, .userOpSubmitted, .userOpReceiptSuccess:
+            case .signPending, .signSuccess, .userOpSubmitted, .userOpReceiptSuccess, .preflightCompleted:
                 return false
             }
         }.count
@@ -2711,6 +2711,8 @@ struct AuditHistoryView: View {
             return Color(red: 0.62, green: 0.23, blue: 0.18)
         case .userOpReceiptTimeout?:
             return Color(red: 0.56, green: 0.39, blue: 0.11)
+        case .preflightCompleted?:
+            return Color(red: 0.28, green: 0.38, blue: 0.56)
         case nil:
             return .secondary
         }
@@ -2738,6 +2740,8 @@ struct AuditHistoryView: View {
             return "xmark.seal.fill"
         case .userOpReceiptTimeout?:
             return "clock.badge.exclamationmark"
+        case .preflightCompleted?:
+            return "shield.lefthalf.filled"
         case nil:
             return "clock"
         }
