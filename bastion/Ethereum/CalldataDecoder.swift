@@ -18,6 +18,7 @@ nonisolated enum CalldataDecoder {
     struct DecodedExecution: Sendable {
         let to: String
         let value: String       // wei (decimal string)
+        let selector: Data?     // 4-byte function selector, nil if no calldata
         let functionName: String?
         let description: String  // human-readable summary
         let tokenOperation: TokenOperation?
@@ -68,6 +69,7 @@ nonisolated enum CalldataDecoder {
                 DecodedExecution(
                     to: "unknown",
                     value: "0",
+                    selector: nil,
                     functionName: nil,
                     description: reason,
                     tokenOperation: nil,
@@ -211,12 +213,13 @@ nonisolated enum CalldataDecoder {
     ) -> DecodedExecution {
         let shortTarget = "\(target.prefix(8))...\(target.suffix(4))"
 
-        // No calldata = plain ETH transfer
+        // No calldata = plain ETH transfer or no-op call
         if calldata.isEmpty {
             if value.decimalString != "0" {
                 return DecodedExecution(
                     to: target,
                     value: value.decimalString,
+                    selector: nil,
                     functionName: nil,
                     description: "Send \(formatEth(value)) ETH to \(shortTarget)",
                     tokenOperation: nil,
@@ -226,6 +229,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: nil,
                 functionName: nil,
                 description: "Call \(shortTarget) (no data)",
                 tokenOperation: nil,
@@ -237,6 +241,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: nil,
                 functionName: nil,
                 description: "Call \(shortTarget) (\(calldata.count) bytes)",
                 tokenOperation: nil,
@@ -244,10 +249,10 @@ nonisolated enum CalldataDecoder {
             )
         }
 
-        let selector = calldata.prefix(4)
+        let callSelector = calldata.prefix(4)
 
         // ERC-20 transfer(address, uint256)
-        if selector == erc20Transfer, calldata.count >= 68 {
+        if callSelector == erc20Transfer, calldata.count >= 68 {
             let recipient = "0x" + Data(calldata[16..<36]).hex  // skip 12 bytes padding
             let amount = parseUInt256(Data(calldata[36..<68]))
             let shortRecipient = "\(recipient.prefix(8))...\(recipient.suffix(4))"
@@ -255,6 +260,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: erc20Transfer,
                 functionName: "transfer",
                 description: "Transfer \(formatTokenAmount(amount, token: target, chainId: chainId)) \(tokenName) to \(shortRecipient)",
                 tokenOperation: TokenOperation(
@@ -268,7 +274,7 @@ nonisolated enum CalldataDecoder {
         }
 
         // ERC-20 approve(address, uint256)
-        if selector == erc20Approve, calldata.count >= 68 {
+        if callSelector == erc20Approve, calldata.count >= 68 {
             let spender = "0x" + Data(calldata[16..<36]).hex
             let amount = parseUInt256(Data(calldata[36..<68]))
             let shortSpender = "\(spender.prefix(8))...\(spender.suffix(4))"
@@ -278,6 +284,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: erc20Approve,
                 functionName: "approve",
                 description: "Approve \(amountStr) \(tokenName) for \(shortSpender)",
                 tokenOperation: TokenOperation(
@@ -291,7 +298,7 @@ nonisolated enum CalldataDecoder {
         }
 
         // ERC-20 transferFrom(address, address, uint256)
-        if selector == erc20TransferFrom, calldata.count >= 100 {
+        if callSelector == erc20TransferFrom, calldata.count >= 100 {
             let from = "0x" + Data(calldata[16..<36]).hex
             let to = "0x" + Data(calldata[48..<68]).hex
             let amount = parseUInt256(Data(calldata[68..<100]))
@@ -301,6 +308,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: erc20TransferFrom,
                 functionName: "transferFrom",
                 description: "TransferFrom \(formatTokenAmount(amount, token: target, chainId: chainId)) \(tokenName) from \(shortFrom) to \(shortTo)",
                 tokenOperation: TokenOperation(
@@ -314,11 +322,12 @@ nonisolated enum CalldataDecoder {
         }
 
         // Unknown selector — H-03: flag for spending limit enforcement
-        let selectorHex = "0x" + selector.hex
+        let selectorHex = "0x" + callSelector.hex
         let valueStr = value.decimalString != "0" ? " + \(formatEth(value)) ETH" : ""
         return DecodedExecution(
             to: target,
             value: value.decimalString,
+            selector: Data(callSelector),
             functionName: selectorHex,
             description: "Call \(shortTarget) [\(selectorHex)]\(valueStr) (\(calldata.count) bytes)",
             tokenOperation: nil,

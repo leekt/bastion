@@ -105,6 +105,8 @@ nonisolated struct RuleConfig: Codable, Sendable {
     var allowedHours: AllowedHours?
     var allowedChains: [Int]?
     var allowedTargets: [String: [String]]?   // chainId string -> [address]
+    var allowedSelectors: [String: [String]]? // address -> [4-byte hex selectors]
+    var denySelectors: [String]?              // globally blocked selectors
     var allowedClients: [AllowedClient]?
     var rateLimits: [RateLimitRule]
     var spendingLimits: [SpendingLimitRule]
@@ -117,6 +119,8 @@ nonisolated struct RuleConfig: Codable, Sendable {
         allowedHours: nil,
         allowedChains: nil,
         allowedTargets: nil,
+        allowedSelectors: nil,
+        denySelectors: nil,
         allowedClients: nil,
         rateLimits: [],
         spendingLimits: [],
@@ -130,6 +134,8 @@ nonisolated struct RuleConfig: Codable, Sendable {
         case allowedHours
         case allowedChains
         case allowedTargets
+        case allowedSelectors
+        case denySelectors
         case allowedClients
         case rateLimits
         case spendingLimits
@@ -143,6 +149,8 @@ nonisolated struct RuleConfig: Codable, Sendable {
         allowedHours: AllowedHours?,
         allowedChains: [Int]?,
         allowedTargets: [String: [String]]?,
+        allowedSelectors: [String: [String]]? = nil,
+        denySelectors: [String]? = nil,
         allowedClients: [AllowedClient]?,
         rateLimits: [RateLimitRule],
         spendingLimits: [SpendingLimitRule],
@@ -154,6 +162,8 @@ nonisolated struct RuleConfig: Codable, Sendable {
         self.allowedHours = allowedHours
         self.allowedChains = allowedChains
         self.allowedTargets = allowedTargets
+        self.allowedSelectors = allowedSelectors
+        self.denySelectors = denySelectors
         self.allowedClients = allowedClients
         self.rateLimits = rateLimits
         self.spendingLimits = spendingLimits
@@ -168,6 +178,8 @@ nonisolated struct RuleConfig: Codable, Sendable {
         allowedHours = try container.decodeIfPresent(AllowedHours.self, forKey: .allowedHours)
         allowedChains = try container.decodeIfPresent([Int].self, forKey: .allowedChains)
         allowedTargets = try container.decodeIfPresent([String: [String]].self, forKey: .allowedTargets)
+        allowedSelectors = try container.decodeIfPresent([String: [String]].self, forKey: .allowedSelectors)
+        denySelectors = try container.decodeIfPresent([String].self, forKey: .denySelectors)
         allowedClients = try container.decodeIfPresent([AllowedClient].self, forKey: .allowedClients)
         rateLimits = try container.decodeIfPresent([RateLimitRule].self, forKey: .rateLimits) ?? []
         spendingLimits = try container.decodeIfPresent([SpendingLimitRule].self, forKey: .spendingLimits) ?? []
@@ -426,7 +438,7 @@ nonisolated enum AuthPolicy: String, Codable, CaseIterable, Sendable {
 }
 
 nonisolated struct BastionConfig: Codable, Sendable {
-    var version: Int = 5
+    var version: Int = 6
     var authPolicy: AuthPolicy
     var rules: RuleConfig
     var bundlerPreferences: BundlerPreferences
@@ -442,7 +454,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
     )
 
     init(
-        version: Int = 5,
+        version: Int = 6,
         authPolicy: AuthPolicy,
         rules: RuleConfig,
         bundlerPreferences: BundlerPreferences = .default,

@@ -31,7 +31,26 @@ final class RuleEngine {
               let config = try? JSONDecoder().decode(BastionConfig.self, from: data) else {
             return .default
         }
-        return normalizedConfig(config)
+        return normalizedConfig(migrateConfig(config))
+    }
+
+    // P0.2: Upgrade configs saved before schema version 6 that inherited the old
+    // insecure default of authPolicy: .open. Applies to both the global policy and
+    // any per-client profiles.
+    private nonisolated func migrateConfig(_ config: BastionConfig) -> BastionConfig {
+        guard config.version < 6 else { return config }
+        var migrated = config
+        if migrated.authPolicy == .open {
+            migrated.authPolicy = .biometricOrPasscode
+        }
+        migrated.clientProfiles = migrated.clientProfiles.map { profile in
+            var profile = profile
+            if profile.authPolicy == .open {
+                profile.authPolicy = .biometricOrPasscode
+            }
+            return profile
+        }
+        return migrated
     }
 
     nonisolated func saveConfig(_ newConfig: BastionConfig) throws {
@@ -179,8 +198,13 @@ final class RuleEngine {
 
     private enum OperationInspection {
         case notApplicable
-        case known(targets: [String], spending: [SpendObservation], hasUnrecognizedCalldata: Bool)
+        case known(targets: [String], selectors: [SelectorObservation], spending: [SpendObservation], hasUnrecognizedCalldata: Bool)
         case opaque(String)
+    }
+
+    private struct SelectorObservation {
+        let target: String
+        let selector: Data? // 4 bytes, nil for plain ETH transfers
     }
 
     private struct SpendObservation {
@@ -216,11 +240,14 @@ final class RuleEngine {
     nonisolated func requiresExplicitApproval(for request: SignRequest, config: BastionConfig) -> Bool {
         switch request.operation {
         case .message:
-            return true
+            // Require explicit approval when rule-based signing is disabled for raw messages.
+            return !config.rules.rawMessagePolicy.enabled
         case .typedData:
-            return true
+            // Require explicit approval when rule-based signing is disabled for EIP-712.
+            if !config.rules.typedDataPolicy.enabled { return true }
+            return config.rules.typedDataPolicy.requireExplicitApproval
         case .userOperation:
-            return true
+            return config.rules.requireExplicitApproval
         }
     }
 
@@ -234,16 +261,17 @@ final class RuleEngine {
     }
 
     private nonisolated func validateRawMessage(_ rules: RuleConfig) -> ValidationResult {
-        guard rules.rawMessagePolicy.enabled else {
-            return .denied(reasons: ["Raw / personal message signing is disabled"])
-        }
+        // When rule-based signing is disabled, raw messages are still allowed
+        // but will require explicit authentication (handled by requiresExplicitApproval).
         return .allowed
     }
 
     private nonisolated func validateTypedData(_ typedData: EIP712TypedData, config: RuleConfig) -> ValidationResult {
         let policy = config.typedDataPolicy
+        // When rule-based signing is disabled, EIP-712 requests are still allowed
+        // but will require explicit authentication (handled by requiresExplicitApproval).
         guard policy.enabled else {
-            return .denied(reasons: ["EIP-712 signing is disabled"])
+            return .allowed
         }
 
         var reasons: [String] = []
@@ -310,6 +338,16 @@ final class RuleEngine {
             )
         }
 
+        // 3a. Allowed selectors (per-target function whitelist)
+        if let allowedSelectors = config.rules.allowedSelectors, !allowedSelectors.isEmpty {
+            validateAllowedSelectors(inspection: inspection, allowedSelectors: allowedSelectors, reasons: &reasons)
+        }
+
+        // 3b. Deny selectors (global blocklist)
+        if let denySelectors = config.rules.denySelectors, !denySelectors.isEmpty {
+            validateDenySelectors(inspection: inspection, denySelectors: denySelectors, reasons: &reasons)
+        }
+
         // 4. Rate limit checks
         for rule in config.rules.rateLimits {
             let count = stateStore.rateLimitCount(ruleId: rule.id, windowSeconds: rule.windowSeconds)
@@ -337,7 +375,7 @@ final class RuleEngine {
             stateStore.recordRequest(ruleId: rule.id, windowSeconds: rule.windowSeconds)
         }
 
-        guard case .known(_, let observations, _) = inspect(request.operation) else {
+        guard case .known(_, _, let observations, _) = inspect(request.operation) else {
             return
         }
 
@@ -451,15 +489,16 @@ final class RuleEngine {
             return .notApplicable
         case .typedData(let data):
             if let verifyingContract = data.domain.verifyingContract {
-                return .known(targets: [verifyingContract], spending: [], hasUnrecognizedCalldata: false)
+                return .known(targets: [verifyingContract], selectors: [], spending: [], hasUnrecognizedCalldata: false)
             }
-            return .known(targets: [], spending: [], hasUnrecognizedCalldata: false)
+            return .known(targets: [], selectors: [], spending: [], hasUnrecognizedCalldata: false)
         case .userOperation(let op):
             switch CalldataDecoder.inspect(op) {
             case .decoded(let executions):
                 let hasUnrecognized = executions.contains(where: \.hasUnrecognizedCalldata)
                 return .known(
                     targets: executions.map(\.to),
+                    selectors: executions.map { SelectorObservation(target: $0.to, selector: $0.selector) },
                     spending: spendObservations(from: executions, chainId: op.chainId),
                     hasUnrecognizedCalldata: hasUnrecognized
                 )
@@ -517,7 +556,7 @@ final class RuleEngine {
             reasons.append("Unable to inspect targets for chain \(chainId): \(reason)")
         case .notApplicable:
             reasons.append("No inspectable target found for chain \(chainId)")
-        case .known(let targets, _, _):
+        case .known(let targets, _, _, _):
             let normalizedTargets = Set(targets.map(normalizedAddress))
             guard !normalizedTargets.isEmpty else {
                 reasons.append("No inspectable target found for chain \(chainId)")
@@ -526,6 +565,62 @@ final class RuleEngine {
 
             for target in normalizedTargets where !normalizedAllowed.contains(target) {
                 reasons.append("Target \(shortAddress(target)) not in allowlist for chain \(chainId)")
+            }
+        }
+    }
+
+    private nonisolated func validateAllowedSelectors(
+        inspection: OperationInspection,
+        allowedSelectors: [String: [String]],
+        reasons: inout [String]
+    ) {
+        switch inspection {
+        case .opaque(let reason):
+            reasons.append("Unable to inspect call selectors: \(reason)")
+        case .notApplicable:
+            return
+        case .known(_, let selectorObs, _, _):
+            for obs in selectorObs {
+                let normalizedTarget = normalizedAddress(obs.target)
+                guard let allowedForTarget = allowedSelectors.first(where: {
+                    normalizedAddress($0.key) == normalizedTarget
+                })?.value else {
+                    continue // no allowlist configured for this target → pass
+                }
+                let normalizedAllowed = Set(allowedForTarget.map {
+                    $0.lowercased().hasPrefix("0x") ? String($0.dropFirst(2)) : $0.lowercased()
+                })
+                guard let sel = obs.selector else {
+                    continue // plain ETH transfers have no selector → pass
+                }
+                let hexSel = sel.map { String(format: "%02x", $0) }.joined()
+                if !normalizedAllowed.contains(hexSel) {
+                    reasons.append("Function 0x\(hexSel) not in allowlist for \(shortAddress(obs.target))")
+                }
+            }
+        }
+    }
+
+    private nonisolated func validateDenySelectors(
+        inspection: OperationInspection,
+        denySelectors: [String],
+        reasons: inout [String]
+    ) {
+        let denied = Set(denySelectors.map {
+            $0.lowercased().hasPrefix("0x") ? String($0.dropFirst(2)) : $0.lowercased()
+        })
+        switch inspection {
+        case .opaque(let reason):
+            reasons.append("Unable to inspect call selectors: \(reason)")
+        case .notApplicable:
+            return
+        case .known(_, let selectorObs, _, _):
+            for obs in selectorObs {
+                guard let sel = obs.selector else { continue }
+                let hexSel = sel.map { String(format: "%02x", $0) }.joined()
+                if denied.contains(hexSel) {
+                    reasons.append("Function 0x\(hexSel) is globally blocked on \(shortAddress(obs.target))")
+                }
             }
         }
     }
@@ -542,7 +637,7 @@ final class RuleEngine {
             reasons.append("Unable to inspect UserOperation spending: \(reason)")
         case .notApplicable:
             return
-        case .known(_, let observations, let hasUnrecognizedCalldata):
+        case .known(_, _, let observations, let hasUnrecognizedCalldata):
             // H-03: Unrecognized function selectors mean spending cannot be verified.
             if hasUnrecognizedCalldata {
                 reasons.append("UserOperation contains unrecognized function calls — spending cannot be fully verified")
@@ -676,7 +771,7 @@ final class RuleEngine {
 
     private func normalizedConfig(_ config: BastionConfig) -> BastionConfig {
         var normalized = config
-        normalized.version = 5
+        normalized.version = 6
         if let projectId = normalized.bundlerPreferences.zeroDevProjectId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !projectId.isEmpty {
