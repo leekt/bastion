@@ -183,15 +183,27 @@ bastion eth userOp \
   --op 0x0000000000000000000000000000000000000001,0,0x \
   --op 0x0000000000000000000000000000000000000002,1000000000000000,0x
 
-# Sign and submit via ZeroDev (uses project ID from Settings → App Preferences)
-bastion eth userOp --submit --op 0x0000000000000000000000000000000000000001,0,0x
+# Sign and send via ZeroDev (uses project ID from Settings → App Preferences)
+bastion eth userOp --send --op 0x0000000000000000000000000000000000000001,0,0x
 
-# Sign, submit, and override the project ID
-bastion eth userOp --submit --project-id <your-project-id> --op 0x0000000000000000000000000000000000000001,0,0x
+# Sign, send, and override the project ID
+bastion eth userOp --send --project-id <your-project-id> --op 0x0000000000000000000000000000000000000001,0,0x
 
 # Target a specific chain (default: Sepolia 11155111)
 bastion eth userOp --chain-id 8453 --op 0x0000000000000000000000000000000000000001,0,0x
 ```
+
+Notes:
+
+- `--send` is the preferred flag. `--submit` remains as a legacy alias.
+- For high-level `--op` requests, Bastion uses a sponsor-first flow:
+  1. build Kernel `execute()` calldata
+  2. sponsor / estimate the UserOperation
+  3. show approval or rule-override UI if required
+  4. apply the real signature
+  5. send the signed UserOperation
+- A rule override only reaches the approval window if sponsorship succeeded first.
+- If the target chain does not have the configured P-256 validator deployed at the expected address, sponsorship can fail before approval.
 
 #### Advanced: explicit UserOperation JSON
 
@@ -240,12 +252,12 @@ JSON
 
 bastion eth userOp --json-file /tmp/bastion-userop-example.json
 
-# Sign and submit
-bastion eth userOp --submit --json-file /tmp/bastion-userop-example.json
+# Sign and send
+bastion eth userOp --send --json-file /tmp/bastion-userop-example.json
 ```
 
 Requires `rules.enabled = true` for silent rule-based signing.
-When `enabled = false` or `requireExplicitApproval = true`, always triggers the approval window.
+When `enabled = false` or `requireExplicitApproval = true`, Bastion still evaluates or sponsors the request first when possible, then shows the approval window before the real signature is produced.
 
 ---
 
