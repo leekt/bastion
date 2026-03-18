@@ -70,6 +70,11 @@ nonisolated struct ServiceInfoResponse: Codable, Sendable {
     let configCorrupted: Bool
 }
 
+nonisolated struct ResetSigningKeysResponse: Codable, Sendable {
+    let deletedKeyTags: [String]
+    let requestedKeyTags: [String]
+}
+
 nonisolated struct RulesResponse: Codable, Sendable {
     let authPolicy: String
     let globalAuthPolicy: String?
@@ -463,7 +468,7 @@ nonisolated enum AuthPolicy: String, Codable, CaseIterable, Sendable {
 }
 
 nonisolated struct BastionConfig: Codable, Sendable {
-    var version: Int = 6
+    var version: Int = 7
     var authPolicy: AuthPolicy
     var rules: RuleConfig
     var bundlerPreferences: BundlerPreferences
@@ -479,7 +484,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
     )
 
     init(
-        version: Int = 6,
+        version: Int = 7,
         authPolicy: AuthPolicy,
         rules: RuleConfig,
         bundlerPreferences: BundlerPreferences = .default,

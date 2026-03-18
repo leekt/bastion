@@ -10,6 +10,7 @@ import Foundation
     func getRules(withReply reply: @escaping (Data?, Error?) -> Void)
     func getState(withReply reply: @escaping (Data?, Error?) -> Void)
     func getServiceInfo(withReply reply: @escaping (Data?, Error?) -> Void)
+    func resetSigningKeys(withReply reply: @escaping (Data?, Error?) -> Void)
     func signStructured(operationType: String, operationData: Data, requestID: String, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
@@ -31,16 +32,17 @@ Usage:
   bastion eth typedData --json-file <path>      # EIP-712 typed data from file
   bastion eth userOp --op <target,value,data>   # Build/sign Kernel UserOp from one action
   bastion eth userOp --op <...> --op <...>      # Build/sign Kernel batch UserOp
-  bastion eth userOp --submit --op <target,value,data>
+  bastion eth userOp --send --op <target,value,data>
                                                # Build, sign, and submit via configured ZeroDev project
   bastion eth userOp --json '{...}'             # Advanced: sign explicit ERC-4337 UserOperation
   bastion eth userOp --json-file <path>         # Advanced: UserOperation from file
-  bastion eth userOp --submit --json-file <path>
+  bastion eth userOp --send --json-file <path>
                                                # Sign and submit explicit UserOperation via ZeroDev
   bastion pubkey                                # Get public key
   bastion status                                # Check app status
   bastion rules                                 # Get current rules
   bastion state                                 # Get signing state
+  bastion reset-keys                            # Delete Bastion signing keys
 
 UserOp JSON fields (all byte fields hex-encoded with 0x prefix):
   sender, nonce, callData, verificationGasLimit, callGasLimit,
@@ -120,7 +122,8 @@ func structuredJSONUsage(for commandName: String) -> String {
         \(userOpIntentHelp)
 
         Optional submission flags:
-          --submit
+          --send
+          --submit      # legacy alias
           --project-id <zerodev-project-id>
           --chain-id <chain-id>   # default: 11155111 for high-level --op path
 
@@ -440,7 +443,7 @@ func resolveUserOperationOptions(_ args: ArraySlice<String>) -> UserOperationCom
     var index = args.startIndex
     while index < args.endIndex {
         switch args[index] {
-        case "--submit":
+        case "--submit", "--send":
             shouldSubmit = true
             index = args.index(after: index)
         case "--project-id":
@@ -602,6 +605,13 @@ func cmdState() {
     print(decodeJSONString(responseData))
 }
 
+func cmdResetKeys() {
+    let responseData = performDataRequest(timeoutSeconds: 15, timeoutMessage: "Reset keys request timed out") { proxy, reply in
+        proxy.resetSigningKeys(withReply: reply)
+    }
+    printJSON(decodeJSON(ResetSigningKeysResponse.self, from: responseData))
+}
+
 // MARK: - Response Types (duplicated for CLI target)
 
 struct SignResponse: Codable {
@@ -631,6 +641,11 @@ struct ServiceInfoResponse: Codable {
     let version: String
     let serviceRegistrationStatus: String
     let configCorrupted: Bool
+}
+
+struct ResetSigningKeysResponse: Codable {
+    let deletedKeyTags: [String]
+    let requestedKeyTags: [String]
 }
 
 // MARK: - Hex Helpers
@@ -695,6 +710,9 @@ case "rules":
 
 case "state":
     cmdState()
+
+case "reset-keys":
+    cmdResetKeys()
 
 default:
     exitWithError("Unknown command: \(args[1])")
