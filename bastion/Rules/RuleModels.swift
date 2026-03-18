@@ -64,6 +64,12 @@ nonisolated struct PublicKeyResponse: Codable, Sendable {
     let accountAddress: String?
 }
 
+nonisolated struct ServiceInfoResponse: Codable, Sendable {
+    let version: String
+    let serviceRegistrationStatus: String
+    let configCorrupted: Bool
+}
+
 nonisolated struct RulesResponse: Codable, Sendable {
     let authPolicy: String
     let globalAuthPolicy: String?
@@ -281,9 +287,28 @@ nonisolated struct AllowedHours: Codable, Sendable {
 }
 
 nonisolated struct RawMessagePolicy: Codable, Sendable {
+    /// Master toggle — when false, all message/rawBytes requests require explicit approval.
     var enabled: Bool
+    /// Sub-rule — when false (and enabled=true), only EIP-191 personal messages are allowed;
+    /// raw 32-byte signing requests are denied outright.
+    var allowRawSigning: Bool
 
-    static let `default` = RawMessagePolicy(enabled: true)
+    static let `default` = RawMessagePolicy(enabled: true, allowRawSigning: false)
+
+    init(enabled: Bool, allowRawSigning: Bool = false) {
+        self.enabled = enabled
+        self.allowRawSigning = allowRawSigning
+    }
+
+    private enum CodingKeys: CodingKey {
+        case enabled, allowRawSigning
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        allowRawSigning = try container.decodeIfPresent(Bool.self, forKey: .allowRawSigning) ?? false
+    }
 }
 
 nonisolated struct TypedDataPolicy: Codable, Sendable {
@@ -526,6 +551,9 @@ nonisolated struct SignRequest: Sendable {
                 return EthHashing.personalMessageHash(data: rawData)
             }
             return EthHashing.personalMessageHash(text)
+        case .rawBytes(let bytes):
+            // Signed directly — no Ethereum prefix applied.
+            return bytes
         case .typedData(let typed):
             return EthHashing.typedDataHash(typed)
         case .userOperation(let op):

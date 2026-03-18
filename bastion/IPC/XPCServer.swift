@@ -133,9 +133,12 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
 #if DEBUG
     // L-04: Require both identifier match AND path check. The previous
     // fallback accepted any binary at the CLI path regardless of identity.
+    // The code signing identifier for a fat/single-arch CLI tool may be reported
+    // with an architecture suffix (e.g. "bastion-cli-arm64") or without one
+    // ("bastion-cli"), depending on how the binary was built and signed.
     private nonisolated func isAllowedDebugSidecar(pid: Int32, signingInfo: [String: Any]) -> Bool {
         guard let identifier = signingInfo[kSecCodeInfoIdentifier as String] as? String,
-              identifier == "bastion-cli-arm64" else {
+              identifier == "bastion-cli" || identifier.hasPrefix("bastion-cli-") else {
             return false
         }
         return executablePath(for: pid)?.hasSuffix("/bastion.app/Contents/MacOS/bastion-cli") == true
@@ -182,10 +185,9 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
 
         Task { @MainActor in
             do {
-                // Legacy: wrap raw data as a message signing operation
-                // TODO: replace with structured signing when CLI sends typed operations
+                // Legacy: treat raw 32-byte input as rawBytes signing (no EIP-191 prefix).
                 let request = SignRequest(
-                    operation: .message(data.hex),
+                    operation: .rawBytes(data),
                     requestID: requestID,
                     timestamp: Date(),
                     clientBundleId: self.clientBundleId
@@ -259,6 +261,23 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         }
     }
 
+    nonisolated func getServiceInfo(withReply reply: @escaping (Data?, Error?) -> Void) {
+        Task { @MainActor in
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+            let response = ServiceInfoResponse(
+                version: version,
+                serviceRegistrationStatus: ServiceRegistration.statusDescription(),
+                configCorrupted: ruleEngine.configCorrupted
+            )
+            do {
+                let jsonData = try JSONEncoder().encode(response)
+                reply(jsonData, nil)
+            } catch {
+                reply(nil, error)
+            }
+        }
+    }
+
     nonisolated func getState(withReply reply: @escaping (Data?, Error?) -> Void) {
         Task { @MainActor in
             let effectiveRules = ruleEngine.effectiveRules(for: self.clientBundleId)
@@ -276,52 +295,6 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             do {
                 let jsonData = try JSONEncoder().encode(response)
                 reply(jsonData, nil)
-            } catch {
-                reply(nil, error)
-            }
-        }
-    }
-
-    nonisolated func prepareSelfUserOperation(
-        requestData: Data,
-        withReply reply: @escaping (Data?, Error?) -> Void
-    ) {
-        let request: SelfUserOperationRequest
-        do {
-            request = try JSONDecoder().decode(SelfUserOperationRequest.self, from: requestData)
-        } catch {
-            reply(nil, BastionError.invalidInput.nsError)
-            return
-        }
-
-        Task { @MainActor in
-            do {
-                // M-03: Check rate limits before building sponsored operations.
-                // Prevents agents from draining paymaster credits without signing.
-                let context = ruleEngine.signingContext(for: self.clientBundleId)
-                if context.rules.enabled {
-                    for rule in context.rules.rateLimits {
-                        let count = ruleEngine.stateStore.rateLimitCount(ruleId: rule.id, windowSeconds: rule.windowSeconds)
-                        if count >= rule.maxRequests {
-                            reply(nil, BastionError.ruleViolation.nsError)
-                            return
-                        }
-                    }
-                }
-
-                let projectId = try self.resolvedZeroDevProjectId(from: request.projectId)
-                let (account, _) = try self.currentClientSmartAccount()
-                let bundler = ZeroDevAPI(projectId: projectId)
-                let rpc = self.resolvedEthRPC(chainId: request.chainId, bundler: bundler)
-                let op = try await account.buildSponsoredSelfUserOperation(
-                    using: rpc,
-                    bundler: bundler,
-                    chainId: request.chainId
-                )
-                let jsonData = try JSONEncoder().encode(op)
-                reply(jsonData, nil)
-            } catch let error as BastionError {
-                reply(nil, error.nsError)
             } catch {
                 reply(nil, error)
             }
@@ -507,6 +480,16 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     return
                 }
                 immediateOperation = .message(text)
+                resolvedUserOperationRequest = nil
+            case "rawBytes":
+                // Expects a hex-encoded 32-byte hash as UTF-8 text (with or without 0x prefix).
+                guard let hexString = String(data: operationData, encoding: .utf8),
+                      let rawData = Data(hexString: hexString),
+                      rawData.count == 32 else {
+                    reply(nil, BastionError.invalidInput.nsError)
+                    return
+                }
+                immediateOperation = .rawBytes(rawData)
                 resolvedUserOperationRequest = nil
             case "typedData":
                 let typed = try decoder.decode(EIP712TypedData.self, from: operationData)

@@ -28,8 +28,7 @@ import Foundation
         withReply reply: @escaping (Data?, Error?) -> Void
     )
 
-    func prepareSelfUserOperation(
-        requestData: Data,
+    func getServiceInfo(
         withReply reply: @escaping (Data?, Error?) -> Void
     )
 

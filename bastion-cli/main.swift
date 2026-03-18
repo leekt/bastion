@@ -9,7 +9,7 @@ import Foundation
     func openUI(target: String, withReply reply: @escaping (Bool, Error?) -> Void)
     func getRules(withReply reply: @escaping (Data?, Error?) -> Void)
     func getState(withReply reply: @escaping (Data?, Error?) -> Void)
-    func prepareSelfUserOperation(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func getServiceInfo(withReply reply: @escaping (Data?, Error?) -> Void)
     func signStructured(operationType: String, operationData: Data, requestID: String, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
@@ -37,9 +37,6 @@ Usage:
   bastion eth userOp --json-file <path>         # Advanced: UserOperation from file
   bastion eth userOp --submit --json-file <path>
                                                # Sign and submit explicit UserOperation via ZeroDev
-  bastion eth selfUserOp                        # Prepare a valid self-call UserOperation
-  bastion eth selfUserOp --submit
-                                               # Prepare, sign, and submit via ZeroDev
   bastion pubkey                                # Get public key
   bastion status                                # Check app status
   bastion rules                                 # Get current rules
@@ -353,12 +350,6 @@ struct UserOperationCommandOptions {
     let requestPayload: Data
 }
 
-struct SelfUserOperationCommandOptions {
-    let projectId: String?
-    let chainId: Int
-    let shouldSubmit: Bool
-}
-
 struct RequestedExecution: Encodable {
     let target: String
     let value: String
@@ -541,65 +532,6 @@ func wrapUserOperationForSubmission(_ userOpJSON: Data, projectId: String?) -> D
     }
 }
 
-struct SelfUserOperationRequest: Codable {
-    let projectId: String?
-    let chainId: Int
-}
-
-func prepareSelfUserOperation(projectId: String?, chainId: Int) -> Data {
-    let request = SelfUserOperationRequest(projectId: projectId, chainId: chainId)
-    let requestData: Data
-    do {
-        requestData = try JSONEncoder().encode(request)
-    } catch {
-        exitWithError("Failed to encode self UserOperation request: \(error.localizedDescription)")
-    }
-
-    return performDataRequest(timeoutSeconds: 30, timeoutMessage: "Preparing UserOperation timed out") { proxy, reply in
-        proxy.prepareSelfUserOperation(requestData: requestData, withReply: reply)
-    }
-}
-
-func resolveSelfUserOperationOptions(_ args: ArraySlice<String>) -> SelfUserOperationCommandOptions {
-    var shouldSubmit = false
-    var explicitProjectId: String?
-    var chainId = 11155111
-
-    var index = args.startIndex
-    while index < args.endIndex {
-        switch args[index] {
-        case "--submit":
-            shouldSubmit = true
-            index = args.index(after: index)
-        case "--project-id":
-            let next = args.index(after: index)
-            guard next < args.endIndex else {
-                exitWithError("--project-id requires a value")
-            }
-            explicitProjectId = args[next]
-            index = args.index(after: next)
-        case "--chain-id":
-            let next = args.index(after: index)
-            guard next < args.endIndex else {
-                exitWithError("--chain-id requires a value")
-            }
-            guard let parsed = Int(args[next]) else {
-                exitWithError("--chain-id must be an integer")
-            }
-            chainId = parsed
-            index = args.index(after: next)
-        default:
-            index = args.index(after: index)
-        }
-    }
-
-    return SelfUserOperationCommandOptions(
-        projectId: explicitProjectId ?? ProcessInfo.processInfo.environment["BASTION_ZERODEV_PROJECT_ID"],
-        chainId: chainId,
-        shouldSubmit: shouldSubmit
-    )
-}
-
 func callSignStructured(type: String, data: Data) {
     let requestID = UUID().uuidString
     let responseData = performDataRequest(timeoutSeconds: 65, timeoutMessage: "Request timed out (65s)") { proxy, reply in
@@ -641,17 +573,6 @@ func cmdEthUserOp(_ args: ArraySlice<String>) {
     callSignStructured(type: "userOperation", data: options.requestPayload)
 }
 
-func cmdEthSelfUserOp(_ args: ArraySlice<String>) {
-    let options = resolveSelfUserOperationOptions(args)
-    let preparedUserOp = prepareSelfUserOperation(projectId: options.projectId, chainId: options.chainId)
-    if options.shouldSubmit {
-        let requestData = wrapUserOperationForSubmission(preparedUserOp, projectId: options.projectId)
-        callSignStructured(type: "userOperation", data: requestData)
-        return
-    }
-    prettyPrintJSONData(preparedUserOp)
-}
-
 func cmdPubkey() {
     let responseData = performDataRequest(timeoutSeconds: 10) { proxy, reply in
         proxy.getPublicKey(withReply: reply)
@@ -660,13 +581,11 @@ func cmdPubkey() {
 }
 
 func cmdStatus() {
-    let alive = performBoolRequest(timeoutSeconds: 5, timeoutMessage: "Bastion app is not running") { proxy, reply in
-        proxy.ping(withReply: reply)
+    let responseData = performDataRequest(timeoutSeconds: 5, timeoutMessage: "Bastion app is not running") { proxy, reply in
+        proxy.getServiceInfo(withReply: reply)
     }
-    guard alive else {
-        exitWithError("App not responding")
-    }
-    print("{\"status\": \"running\"}")
+    let info = decodeJSON(ServiceInfoResponse.self, from: responseData)
+    printJSON(info)
 }
 
 func cmdRules() {
@@ -706,6 +625,12 @@ struct UserOperationSubmissionResponse: Codable {
 struct PublicKeyResponse: Codable {
     let x: String
     let y: String
+}
+
+struct ServiceInfoResponse: Codable {
+    let version: String
+    let serviceRegistrationStatus: String
+    let configCorrupted: Bool
 }
 
 // MARK: - Hex Helpers
@@ -755,10 +680,8 @@ case "eth":
         cmdEthTypedData(args[3...])
     case "userOp":
         cmdEthUserOp(args[3...])
-    case "selfUserOp":
-        cmdEthSelfUserOp(args[3...])
     default:
-        exitWithError("Unknown eth subcommand: \(args[2]). Use: message, typedData, userOp, selfUserOp")
+        exitWithError("Unknown eth subcommand: \(args[2]). Use: message, typedData, userOp")
     }
 
 case "pubkey":
