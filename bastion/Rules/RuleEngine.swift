@@ -12,6 +12,9 @@ final class RuleEngine {
 
     private(set) var config: BastionConfig = .default
     private(set) var configLoaded = false
+    /// True when keychain data existed but failed to decode — rules were reset to
+    /// defaults. Surface this in the UI so the user knows why their rules disappeared.
+    private(set) var configCorrupted = false
 
     private init() {
         self.keychain = SystemKeychainBackend()
@@ -26,12 +29,18 @@ final class RuleEngine {
 
     // MARK: - Config Management
 
-    nonisolated func loadConfig() -> BastionConfig {
-        guard let data = keychain.read(account: Self.configAccount),
-              let config = try? JSONDecoder().decode(BastionConfig.self, from: data) else {
-            return .default
+    private nonisolated func loadConfigRaw() -> (config: BastionConfig, corrupted: Bool) {
+        guard let data = keychain.read(account: Self.configAccount) else {
+            return (.default, false) // new install — no config yet
         }
-        return normalizedConfig(migrateConfig(config))
+        guard let decoded = try? JSONDecoder().decode(BastionConfig.self, from: data) else {
+            return (.default, true) // data exists but unreadable — corruption
+        }
+        return (normalizedConfig(migrateConfig(decoded)), false)
+    }
+
+    nonisolated func loadConfig() -> BastionConfig {
+        loadConfigRaw().config
     }
 
     // P0.2: Upgrade configs saved before schema version 6 that inherited the old
@@ -62,15 +71,17 @@ final class RuleEngine {
 
     // L-01: Load synchronously to prevent race with ensureConfigLoadedIfNeeded.
     func loadConfigOnStartup() {
-        let loaded = loadConfig()
-        config = loaded
+        let result = loadConfigRaw()
+        config = result.config
+        configCorrupted = result.corrupted
         configLoaded = true
     }
 
     private func ensureConfigLoadedIfNeeded() {
         guard !configLoaded else { return }
-        let loaded = loadConfig()
-        config = loaded
+        let result = loadConfigRaw()
+        config = result.config
+        configCorrupted = result.corrupted
         configLoaded = true
     }
 
@@ -83,6 +94,7 @@ final class RuleEngine {
         try saveConfig(normalized)
         config = normalized
         configLoaded = true
+        configCorrupted = false
     }
 
     func ensureClientProfile(bundleId: String?) -> ClientProfile? {
@@ -228,8 +240,8 @@ final class RuleEngine {
         validateAllowedClients(request, rules: config.rules, reasons: &commonReasons)
 
         switch request.operation {
-        case .message:
-            return mergeValidation(commonReasons, validateRawMessage(config.rules))
+        case .message, .rawBytes:
+            return mergeValidation(commonReasons, validateRawMessage(request, rules: config.rules))
         case .typedData(let typedData):
             return mergeValidation(commonReasons, validateTypedData(typedData, config: config.rules))
         case .userOperation:
@@ -239,8 +251,8 @@ final class RuleEngine {
 
     nonisolated func requiresExplicitApproval(for request: SignRequest, config: BastionConfig) -> Bool {
         switch request.operation {
-        case .message:
-            // Require explicit approval when rule-based signing is disabled for raw messages.
+        case .message, .rawBytes:
+            // Require explicit approval when rule-based signing is disabled for messages.
             return !config.rules.rawMessagePolicy.enabled
         case .typedData:
             // Require explicit approval when rule-based signing is disabled for EIP-712.
@@ -260,9 +272,20 @@ final class RuleEngine {
         recordUserOperationSuccess(request: request, config: config)
     }
 
-    private nonisolated func validateRawMessage(_ rules: RuleConfig) -> ValidationResult {
-        // When rule-based signing is disabled, raw messages are still allowed
-        // but will require explicit authentication (handled by requiresExplicitApproval).
+    private nonisolated func validateRawMessage(_ request: SignRequest, rules: RuleConfig) -> ValidationResult {
+        let policy = rules.rawMessagePolicy
+        // When rule-based signing is disabled, message requests are still allowed
+        // but require explicit authentication (handled by requiresExplicitApproval).
+        guard policy.enabled else {
+            return .allowed
+        }
+
+        // Sub-rule: when allowRawSigning is false, only EIP-191 personal messages are
+        // permitted. Raw 32-byte signing requests are denied outright.
+        if case .rawBytes = request.operation, !policy.allowRawSigning {
+            return .denied(reasons: ["Raw bytes signing is not permitted; only EIP-191 personal message signing is allowed"])
+        }
+
         return .allowed
     }
 
@@ -485,7 +508,7 @@ final class RuleEngine {
 
     private nonisolated func inspect(_ operation: SigningOperation) -> OperationInspection {
         switch operation {
-        case .message:
+        case .message, .rawBytes:
             return .notApplicable
         case .typedData(let data):
             if let verifyingContract = data.domain.verifyingContract {

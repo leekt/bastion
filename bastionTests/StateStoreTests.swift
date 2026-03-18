@@ -125,6 +125,19 @@ private func makeTypedDataRequest(
     )
 }
 
+private func makeRawBytesRequest(
+    bytes: Data = Data(repeating: 0xab, count: 32),
+    requestID: String = UUID().uuidString,
+    clientBundleId: String? = nil
+) -> SignRequest {
+    SignRequest(
+        operation: .rawBytes(bytes),
+        requestID: requestID,
+        timestamp: Date(),
+        clientBundleId: clientBundleId
+    )
+}
+
 private func makeKernelSingleCallData(target: String, value: UInt64 = 0, calldata: Data = Data()) -> Data {
     KernelEncoding.executeCalldata(single: .init(to: target, value: value, data: calldata))
 }
@@ -333,6 +346,37 @@ struct RuleEngineConfigTests {
         #expect(config.rules.enabled == true)
         #expect(config.rules.rateLimits.isEmpty)
         #expect(config.rules.spendingLimits.isEmpty)
+    }
+
+    @Test("Corrupt keychain data falls back to defaults and sets configCorrupted")
+    func corruptConfigSetsFlag() {
+        let keychain = MockKeychainBackend()
+        keychain.write(account: "config", data: Data("not valid json".utf8))
+        let engine = RuleEngine(keychain: keychain)
+        engine.loadConfigOnStartup()
+        #expect(engine.configCorrupted == true)
+        #expect(engine.config.authPolicy == .biometricOrPasscode)
+        #expect(engine.config.rules.enabled == true)
+    }
+
+    @Test("Empty keychain does not set configCorrupted")
+    func emptyKeychainNoCorruptFlag() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        engine.loadConfigOnStartup()
+        #expect(engine.configCorrupted == false)
+    }
+
+    @Test("Saving new config then reloading clears configCorrupted")
+    func saveConfigClearsCorruptFlag() throws {
+        let keychain = MockKeychainBackend()
+        keychain.write(account: "config", data: Data("not valid json".utf8))
+        let engine = RuleEngine(keychain: keychain)
+        engine.loadConfigOnStartup()
+        #expect(engine.configCorrupted == true)
+        // Recover by writing a valid config
+        try engine.saveConfig(.default)
+        engine.loadConfigOnStartup()
+        #expect(engine.configCorrupted == false)
     }
 
     @Test("Save and load config with rate limits")
@@ -960,6 +1004,90 @@ struct RuleEngineValidationTests {
         engine.stateStore.recordSpend(ruleId: "s1", amount: "500000000000000000", windowSeconds: 3600)
         let totalSpent = engine.stateStore.spentAmount(ruleId: "s1", windowSeconds: 3600)
         #expect(totalSpent == UInt128("2000000000000000000"))
+    }
+}
+
+// MARK: - Raw Bytes Signing Policy Tests
+
+@Suite("RawMessagePolicy — raw bytes signing sub-rule")
+struct RawMessagePolicyTests {
+
+    @Test("Message signing disabled: both .message and .rawBytes return allowed + requiresApproval=true")
+    func messagingDisabledRequiresApproval() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.rawMessagePolicy.enabled = false
+
+        // Both types allowed (not denied) — explicit approval gate handles the rest
+        let msgResult = engine.validate(makeMessageRequest(), config: config)
+        let rawResult = engine.validate(makeRawBytesRequest(), config: config)
+        if case .denied = msgResult { Issue.record(".message should not be denied when toggle is off") }
+        if case .denied = rawResult { Issue.record(".rawBytes should not be denied when toggle is off") }
+
+        // requiresExplicitApproval must be true for both
+        #expect(engine.requiresExplicitApproval(for: makeMessageRequest(), config: config) == true)
+        #expect(engine.requiresExplicitApproval(for: makeRawBytesRequest(), config: config) == true)
+    }
+
+    @Test("Message signing enabled, allowRawSigning=false: .rawBytes is denied")
+    func rawSigningDisabledDeniesRawBytes() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.rawMessagePolicy.enabled = true
+        config.rules.rawMessagePolicy.allowRawSigning = false
+
+        let result = engine.validate(makeRawBytesRequest(), config: config)
+        if case .denied(let reasons) = result {
+            #expect(reasons.first?.contains("Raw bytes signing is not permitted") == true)
+        } else {
+            Issue.record("Expected .rawBytes to be denied when allowRawSigning=false")
+        }
+    }
+
+    @Test("Message signing enabled, allowRawSigning=false: EIP-191 .message is still allowed")
+    func rawSigningDisabledPermitsEIP191Message() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.rawMessagePolicy.enabled = true
+        config.rules.rawMessagePolicy.allowRawSigning = false
+
+        let result = engine.validate(makeMessageRequest(), config: config)
+        if case .allowed = result { } else {
+            Issue.record("Expected EIP-191 .message to pass when allowRawSigning=false")
+        }
+        #expect(engine.requiresExplicitApproval(for: makeMessageRequest(), config: config) == false)
+    }
+
+    @Test("Message signing enabled, allowRawSigning=true: both types are allowed")
+    func rawSigningEnabledAllowsBothTypes() {
+        let engine = RuleEngine(keychain: MockKeychainBackend())
+        var config = BastionConfig.default
+        config.rules.rawMessagePolicy.enabled = true
+        config.rules.rawMessagePolicy.allowRawSigning = true
+
+        let msgResult = engine.validate(makeMessageRequest(), config: config)
+        let rawResult = engine.validate(makeRawBytesRequest(), config: config)
+        if case .allowed = msgResult { } else { Issue.record("Expected .message to be allowed") }
+        if case .allowed = rawResult { } else { Issue.record("Expected .rawBytes to be allowed") }
+        #expect(engine.requiresExplicitApproval(for: makeRawBytesRequest(), config: config) == false)
+    }
+
+    @Test("RawMessagePolicy decodes allowRawSigning with backward-compatible default")
+    func decodesAllowRawSigningWithDefault() throws {
+        // Old saved config without allowRawSigning field should default to false
+        let json = """
+        {"enabled": true}
+        """.data(using: .utf8)!
+        let policy = try JSONDecoder().decode(RawMessagePolicy.self, from: json)
+        #expect(policy.enabled == true)
+        #expect(policy.allowRawSigning == false)
+    }
+
+    @Test("rawBytes request carries data directly with no Ethereum prefix")
+    func rawBytesDataPassthrough() {
+        let payload = Data((0..<32).map { UInt8($0) })
+        let request = makeRawBytesRequest(bytes: payload)
+        #expect(request.data == payload)
     }
 }
 
