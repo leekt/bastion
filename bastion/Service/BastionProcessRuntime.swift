@@ -50,6 +50,9 @@ final class BastionServiceRuntime {
 @MainActor
 final class BastionRelayRuntime {
     func start(target: ServiceUITarget = .auditHistory) {
+        // Don't attempt XPC handoff or show alerts when running under XCTest.
+        guard ProcessInfo.processInfo.environment["XCTestBundlePath"] == nil else { return }
+
         ServiceRegistration.registerIfNeeded()
 
         Task { @MainActor in
