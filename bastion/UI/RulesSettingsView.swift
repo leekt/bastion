@@ -9,6 +9,8 @@ struct RulesSettingsView: View {
     @State private var newAllowedChain = ""
     @State private var newAllowedAccountChain = ""
     @State private var newAllowedAccountAddress = ""
+    @State private var newAllowedClientBundleId = ""
+    @State private var newAllowedClientLabel = ""
     @State private var newClientBundleId = ""
     @State private var newClientLabel = ""
     @State private var newRPCChainId = ""
@@ -349,7 +351,7 @@ struct RulesSettingsView: View {
             icon: "lock.shield",
             accent: Color(red: 0.13, green: 0.38, blue: 0.60),
             title: "Authentication",
-            subtitle: "Allowed requests use this auth policy."
+            subtitle: "What you must prove before each signature is produced, after all rules pass."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 Picker("Auth Policy", selection: authPolicyBinding) {
@@ -363,8 +365,14 @@ struct RulesSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Toggle("Require explicit approval for matching UserOperation requests", isOn: requireExplicitApprovalBinding)
+                Divider()
+
+                Toggle("Show approval panel for every UserOperation", isOn: requireExplicitApprovalBinding)
                     .toggleStyle(.switch)
+
+                Text("When on, Bastion shows a confirmation panel for each UserOp even when all rules pass. When off, UserOps that pass rules are signed silently without interrupting the agent.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -558,6 +566,72 @@ struct RulesSettingsView: View {
                 Toggle("Enable rule enforcement", isOn: rulesEnabledBinding)
                     .toggleStyle(.switch)
 
+                Text(rulesEnabledBinding.wrappedValue
+                    ? "All checks below are active. Requests must pass every enabled rule before reaching the authentication gate."
+                    : "All rule checks are bypassed. Every UserOperation is passed straight to the authentication gate regardless of content.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionLabel("Client Allowlist")
+
+                    Text("Restricts which apps may request signing, matched by code-signed bundle ID. If the list is empty, any process verified by Bastion's team ID can request a signature.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if allowedClientEntries.isEmpty {
+                        EmptyStateRow(
+                            icon: "person.badge.key",
+                            title: "No client allowlist — all verified apps can sign",
+                            detail: "Any process signed by team ID 926A27BQ7W can request a signature. Add bundle IDs to restrict signing to specific apps."
+                        )
+                    } else {
+                        VStack(spacing: 10) {
+                            ForEach(allowedClientEntries) { client in
+                                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        if let label = client.label {
+                                            Text(label)
+                                                .font(.subheadline.weight(.semibold))
+                                        }
+                                        Text(client.bundleId)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundStyle(client.label == nil ? .primary : .secondary)
+                                    }
+
+                                    Spacer()
+
+                                    removeButton {
+                                        removeAllowedClient(client)
+                                    }
+                                }
+                                .padding(12)
+                                .background(cardRowBackground)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        TextField("com.example.agent", text: $newAllowedClientBundleId)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+
+                        TextField("Label (optional)", text: $newAllowedClientLabel)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 180)
+
+                        Button("Add Client") {
+                            addAllowedClient()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!canAddAllowedClient)
+                    }
+                }
+
+                Divider()
+
                 VStack(alignment: .leading, spacing: 10) {
                     sectionLabel("Allowed Hours")
 
@@ -587,8 +661,8 @@ struct RulesSettingsView: View {
                     } else {
                         EmptyStateRow(
                             icon: "clock.badge.checkmark",
-                            title: "No time restriction",
-                            detail: "Signing is allowed across the full day."
+                            title: "No time restriction — signing allowed at any hour",
+                            detail: "Enable to restrict signing to a specific time window, e.g. business hours only."
                         )
                     }
                 }
@@ -601,8 +675,8 @@ struct RulesSettingsView: View {
                     if allowedChains.isEmpty {
                         EmptyStateRow(
                             icon: "point.3.connected.trianglepath.dotted",
-                            title: "All chains allowed",
-                            detail: "Add chain IDs if you want Bastion to reject requests outside a specific set."
+                            title: "No chain filter — requests for any network are allowed",
+                            detail: "Add chain IDs to restrict signing to specific networks."
                         )
                     } else {
                         LazyVGrid(
@@ -649,8 +723,8 @@ struct RulesSettingsView: View {
                     if allowedAccountEntries.isEmpty {
                         EmptyStateRow(
                             icon: "person.crop.rectangle.stack",
-                            title: "All targets allowed",
-                            detail: "Add chain/target pairs if you want autonomous signing limited to specific destination contracts or EOAs."
+                            title: "No target filter — requests may call any contract or address",
+                            detail: "Add chain/address pairs to restrict signing to specific destination contracts."
                         )
                     } else {
                         VStack(spacing: 10) {
@@ -818,8 +892,8 @@ struct RulesSettingsView: View {
                 if activeRules.rateLimits.isEmpty {
                     EmptyStateRow(
                         icon: "gauge.with.dots.needle.bottom.0percent",
-                        title: "No rate limits configured",
-                        detail: "Add one or more windows to slow down autonomous signing."
+                        title: "No rate limits — unlimited signing requests are allowed",
+                        detail: "Add a window to cap how many UserOperations can be signed in a given period."
                     )
                 } else {
                     VStack(spacing: 10) {
@@ -828,7 +902,7 @@ struct RulesSettingsView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(rule.displayDescription)
                                         .font(.subheadline.weight(.semibold))
-                                    Text("Window: \(rule.windowSeconds)s")
+                                    Text("Rejects the \(rule.maxRequests + 1)th request within any \(formatWindow(rule.windowSeconds)) window")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -894,8 +968,8 @@ struct RulesSettingsView: View {
                 if activeRules.spendingLimits.isEmpty {
                     EmptyStateRow(
                         icon: "wallet.bifold",
-                        title: "No spending limits configured",
-                        detail: "Add caps if you want a stored budget model in the config."
+                        title: "No spending limits — direct transfers of any amount are allowed",
+                        detail: "Add token budgets to cap how much can be transferred in direct calls per time window."
                     )
                 } else {
                     VStack(spacing: 10) {
@@ -947,12 +1021,12 @@ struct RulesSettingsView: View {
                     }
 
                     HStack(spacing: 10) {
-                        TextField("Allowance (smallest unit)", text: $newSLAllowance)
+                        TextField(newSLToken == "eth" ? "Amount in wei (e.g. 1000000000000000000 = 1 ETH)" : "Amount in token base units (e.g. 1000000 = 1 USDC)", text: $newSLAllowance)
                             .textFieldStyle(.roundedBorder)
 
-                        TextField("Reset window in seconds (optional)", text: $newSLWindow)
+                        TextField("Reset window in seconds (blank = lifetime)", text: $newSLWindow)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 220)
+                            .frame(width: 260)
 
                         Button("Add Budget") {
                             addSpendingLimit()
@@ -1167,13 +1241,13 @@ struct RulesSettingsView: View {
     private var authFootnote: String {
         switch authPolicyBinding.wrappedValue {
         case .open:
-            return "No local authentication after a request clears policy. Use this only if the surrounding rules are strict."
+            return "No authentication required — requests that pass rules are signed immediately with no prompt. Only use this when your rules are strict enough on their own."
         case .passcode:
-            return "macOS uses owner authentication here, so biometrics may still satisfy the prompt depending on system state."
+            return "Your login password is required before each signature. Touch ID will not satisfy this prompt."
         case .biometric:
-            return "Touch ID or other enrolled biometrics are required for each allowed request."
+            return "Touch ID is required before each signature. Passcode fallback is disabled — if biometrics are unavailable the request is rejected."
         case .biometricOrPasscode:
-            return "Any owner authentication works. This is the most flexible setting for daily use."
+            return "Touch ID or your login password is required before each signature. Recommended for daily use."
         }
     }
 
@@ -1183,6 +1257,10 @@ struct RulesSettingsView: View {
 
     private var clientProfiles: [ClientProfile] {
         draftConfig.clientProfiles
+    }
+
+    private var allowedClientEntries: [AllowedClient] {
+        (activeRules.allowedClients ?? []).sorted { $0.bundleId < $1.bundleId }
     }
 
     private var allowedAccountEntries: [AllowedAccountEntry] {
@@ -1196,6 +1274,10 @@ struct RulesSettingsView: View {
             }
             return $0.sortKey < $1.sortKey
         }
+    }
+
+    private var canAddAllowedClient: Bool {
+        !trimmed(newAllowedClientBundleId).isEmpty
     }
 
     private var canAddAllowedChain: Bool {
@@ -1376,6 +1458,38 @@ struct RulesSettingsView: View {
                 setStatus("Error: \(error.localizedDescription)", isError: true)
             }
             isSaving = false
+        }
+    }
+
+    private func addAllowedClient() {
+        let bundleId = trimmed(newAllowedClientBundleId)
+        guard !bundleId.isEmpty else { return }
+
+        let exists = (activeRules.allowedClients ?? []).contains {
+            $0.bundleId.caseInsensitiveCompare(bundleId) == .orderedSame
+        }
+        if !exists {
+            let label = trimmed(newAllowedClientLabel)
+            updateActiveRules {
+                var clients = $0.allowedClients ?? []
+                clients.append(AllowedClient(
+                    id: UUID().uuidString,
+                    bundleId: bundleId,
+                    label: label.isEmpty ? nil : label
+                ))
+                $0.allowedClients = clients.sorted { $0.bundleId < $1.bundleId }
+            }
+        }
+        newAllowedClientBundleId = ""
+        newAllowedClientLabel = ""
+        clearStatus()
+    }
+
+    private func removeAllowedClient(_ client: AllowedClient) {
+        updateActiveRules {
+            var clients = $0.allowedClients ?? []
+            clients.removeAll { $0.id == client.id }
+            $0.allowedClients = clients.isEmpty ? nil : clients
         }
     }
 
@@ -1585,10 +1699,26 @@ struct RulesSettingsView: View {
         statusIsError = false
     }
 
+    private func formatWindow(_ seconds: Int) -> String {
+        switch seconds {
+        case 60: return "1 minute"
+        case 3600: return "1 hour"
+        case 86400: return "1 day"
+        case 604800: return "1 week"
+        default:
+            if seconds % 86400 == 0 { return "\(seconds / 86400) days" }
+            if seconds % 3600 == 0 { return "\(seconds / 3600) hours" }
+            if seconds % 60 == 0 { return "\(seconds / 60) minutes" }
+            return "\(seconds)s"
+        }
+    }
+
     private func clearTransientInputs() {
         newAllowedChain = ""
         newAllowedAccountChain = ""
         newAllowedAccountAddress = ""
+        newAllowedClientBundleId = ""
+        newAllowedClientLabel = ""
         newClientBundleId = ""
         newClientLabel = ""
         newRPCChainId = ""
