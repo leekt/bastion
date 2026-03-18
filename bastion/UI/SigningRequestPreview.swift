@@ -9,7 +9,16 @@ enum SigningRequestPreviewFactory {
                 timestamp: Date(),
                 clientBundleId: "com.bastion.preview"
             ),
-            mode: .policyReview
+            mode: .policyReview,
+            clientContext: ClientSigningContext(
+                bundleId: "com.bastion.preview",
+                profileId: "preview-policy",
+                profileLabel: "Preview Agent",
+                authPolicy: .biometricOrPasscode,
+                keyTag: "com.bastion.signingkey.client.preview-policy",
+                accountAddress: "0xb0c4f8d8d6a60b1d7cb2b4f223e4b86e2d2d48ab",
+                rules: .default
+            )
         )
     }
 
@@ -25,7 +34,16 @@ enum SigningRequestPreviewFactory {
                 "Outside allowed hours (09:00 - 18:00)",
                 "Target 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 not in allowlist for chain 11155111",
                 "USDC spending limit exceeded: 50 USDC per day",
-            ])
+            ]),
+            clientContext: ClientSigningContext(
+                bundleId: "com.bastion.preview",
+                profileId: "preview-override",
+                profileLabel: "Preview Agent",
+                authPolicy: .biometricOrPasscode,
+                keyTag: "com.bastion.signingkey.client.preview-override",
+                accountAddress: "0xb0c4f8d8d6a60b1d7cb2b4f223e4b86e2d2d48ab",
+                rules: .default
+            )
         )
     }
 

@@ -577,6 +577,187 @@ struct ZeroDevAPIIntegrationTests {
             Self.log("ECDSA UserOp not confirmed within 60s")
         }
     }
+    @Test func fullP256UserOpFlow() async throws {
+        guard let config = LiveTestConfig.current else { return }
+        let publicRPC = EthRPC(rpcURLString: config.sepoliaRPCURL)
+        let bundler = ZeroDevAPI(projectId: config.projectId)
+        let logFile = "/tmp/bastion_p256_integration.txt"
+
+        func resetLog() {
+            try? FileManager.default.removeItem(atPath: logFile)
+            FileManager.default.createFile(atPath: logFile, contents: nil)
+        }
+        func log(_ msg: String) {
+            let data = (msg + "\n").data(using: .utf8)!
+            if let handle = FileHandle(forWritingAtPath: logFile) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else {
+                FileManager.default.createFile(atPath: logFile, contents: data)
+            }
+        }
+        resetLog()
+
+        // Ensure the default SE key exists, then read its public key coordinates.
+        _ = try SecureEnclaveManager.shared.loadOrCreateSigningKey()
+        let keyTag = SecureEnclaveManager.defaultSigningKeyIdentifier
+        let pubKey = try SecureEnclaveManager.shared.getPublicKey(keyTag: keyTag)
+        guard let publicKeyX = Data(hexString: pubKey.x),
+              let publicKeyY = Data(hexString: pubKey.y) else {
+            throw BastionError.signingFailed
+        }
+        log("P256 public key X: \(pubKey.x)")
+        log("P256 public key Y: \(pubKey.y)")
+
+        let validator = P256Validator(
+            validatorAddress: ValidatorAddress.p256Validator,
+            publicKeyX: publicKeyX,
+            publicKeyY: publicKeyY,
+            sign: { hash in
+                let response = try SecureEnclaveManager.shared.signDigest(hash: hash, keyTag: keyTag)
+                guard let rData = Data(hexString: response.r),
+                      let sData = Data(hexString: response.s) else {
+                    throw BastionError.signingFailed
+                }
+                return rData + sData
+            }
+        )
+        let account = SmartAccount(validator: validator)
+
+        var finalTraceCommand: String?
+        defer { log(finalTraceCommand ?? "cast call --trace unavailable") }
+
+        let sender = try await account.resolveAddress(using: publicRPC)
+        log("P256 sender: \(sender)")
+
+        let callData = KernelEncoding.executeCalldata(
+            single: KernelEncoding.Execution(to: sender, value: 0, data: Data())
+        )
+        let nonce = try await publicRPC.getNonce(
+            sender: sender,
+            key: account.nonceKeyUInt192,
+            entryPoint: EntryPointAddress.v0_7
+        )
+        let deployed = try await account.isDeployed(using: publicRPC)
+        let estimatedFees = try await publicRPC.estimateUserOperationFeesPerGas()
+        let priorityFee = estimatedFees.maxPriorityFeePerGas
+        let maxFee = estimatedFees.maxFeePerGas
+        log("P256 account deployed: \(deployed)")
+        log("Estimated maxPriorityFeePerGas: \(priorityFee)")
+        log("Estimated maxFeePerGas: \(maxFee)")
+
+        var op = UserOperation(
+            sender: sender,
+            nonce: nonce,
+            callData: callData,
+            factory: deployed ? nil : KernelAddress.metaFactory,
+            factoryData: deployed ? nil : account.factoryData,
+            verificationGasLimit: "0x0",
+            callGasLimit: "0x0",
+            preVerificationGas: "0x0",
+            maxPriorityFeePerGas: priorityFee,
+            maxFeePerGas: maxFee,
+            paymaster: nil,
+            paymasterVerificationGasLimit: nil,
+            paymasterPostOpGasLimit: nil,
+            paymasterData: nil,
+            chainId: Self.chainId,
+            entryPoint: EntryPointAddress.v0_7,
+            entryPointVersion: .v0_7
+        )
+
+        log("Step 1: Sponsoring with P256 dummy signature...")
+        let dummyRpcOp = UserOperationRPC.from(op, signature: validator.dummySignature)
+        let sponsor = try await bundler.sponsorUserOperation(
+            dummyRpcOp,
+            entryPoint: EntryPointAddress.v0_7,
+            chainId: Self.chainId
+        )
+        log("Sponsored! paymaster: \(sponsor.paymaster ?? "nil")")
+        log("  verificationGasLimit: \(sponsor.verificationGasLimit ?? "nil")")
+        log("  callGasLimit: \(sponsor.callGasLimit ?? "nil")")
+
+        op = Self.applying(sponsor, to: op)
+
+        log("Step 2: Signing with Secure Enclave P256 key...")
+        var signature = try account.signUserOperation(op)
+        log("P256 signature: 0x\(signature.hex)")
+        #expect(signature.count == 64)
+
+        let localHash = EthHashing.userOperationHash(op)
+        let entryPointHash = try await publicRPC.getUserOpHash(op)
+        log("Local hash: 0x\(localHash.hex)")
+        log("EntryPoint hash: 0x\(entryPointHash.hex)")
+        #expect(localHash == entryPointHash)
+
+        log("Step 3: Sending to bundler...")
+        finalTraceCommand = Self.traceCommand(
+            rpcURL: config.sepoliaRPCURL,
+            op: op,
+            signature: signature
+        )
+
+        let userOpHash: String
+        do {
+            userOpHash = try await bundler.sendUserOperation(
+                UserOperationRPC.from(op, signature: signature),
+                entryPoint: EntryPointAddress.v0_7,
+                chainId: Self.chainId
+            )
+            log("P256 UserOp sent! Hash: \(userOpHash)")
+            #expect(userOpHash.hasPrefix("0x"))
+        } catch {
+            if Self.requiresBundlerFeeRetry(error) {
+                log("Retrying with bundler gas price...")
+                let bundlerGasPrice = try await bundler.userOperationGasPrice(chainId: Self.chainId)
+                op = Self.applying(
+                    maxPriorityFeePerGas: bundlerGasPrice.standard.maxPriorityFeePerGas,
+                    maxFeePerGas: bundlerGasPrice.standard.maxFeePerGas,
+                    to: op
+                )
+                let retrySponsor = try await bundler.sponsorUserOperation(
+                    UserOperationRPC.from(op, signature: validator.dummySignature),
+                    entryPoint: EntryPointAddress.v0_7,
+                    chainId: Self.chainId
+                )
+                op = Self.applying(retrySponsor, to: op)
+                signature = try account.signUserOperation(op)
+                finalTraceCommand = Self.traceCommand(
+                    rpcURL: config.sepoliaRPCURL,
+                    op: op,
+                    signature: signature
+                )
+                userOpHash = try await bundler.sendUserOperation(
+                    UserOperationRPC.from(op, signature: signature),
+                    entryPoint: EntryPointAddress.v0_7,
+                    chainId: Self.chainId
+                )
+                log("P256 UserOp sent after fee retry! Hash: \(userOpHash)")
+            } else {
+                log("sendUserOperation FAILED: \(error)")
+                throw error
+            }
+        }
+
+        var receipt: UserOperationReceipt?
+        for _ in 1...12 {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            receipt = try await bundler.getUserOperationReceipt(
+                userOpHash: userOpHash,
+                chainId: Self.chainId
+            )
+            if receipt != nil { break }
+        }
+
+        if let receipt {
+            log("P256 receipt success: \(receipt.success)")
+            log("P256 txHash: \(receipt.receipt?.transactionHash ?? "nil")")
+            #expect(receipt.success)
+        } else {
+            log("P256 UserOp not confirmed within 60s")
+        }
+    }
 }
 
 // MARK: - Test Tags

@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 @Observable
+@MainActor
 final class MenuBarManager {
     private var showingRequestID: String?
 
@@ -10,7 +11,7 @@ final class MenuBarManager {
     var iconName: String = "lock.fill"
 
     func startObserving() {
-        Task {
+        Task { @MainActor in
             await observeSigningState()
         }
     }
@@ -29,6 +30,7 @@ final class MenuBarManager {
             switch currentState {
             case .idle:
                 showingRequestID = nil
+                SigningRequestPanelManager.shared.closePanel()
             case .pendingApproval(let approval):
                 if showingRequestID != approval.request.requestID {
                     showingRequestID = approval.request.requestID

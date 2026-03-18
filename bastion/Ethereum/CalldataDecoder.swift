@@ -18,9 +18,11 @@ nonisolated enum CalldataDecoder {
     struct DecodedExecution: Sendable {
         let to: String
         let value: String       // wei (decimal string)
+        let selector: Data?     // 4-byte function selector, nil if no calldata
         let functionName: String?
         let description: String  // human-readable summary
         let tokenOperation: TokenOperation?
+        let hasUnrecognizedCalldata: Bool  // H-03: true when selector is unknown
     }
 
     struct TokenOperation: Sendable {
@@ -67,9 +69,11 @@ nonisolated enum CalldataDecoder {
                 DecodedExecution(
                     to: "unknown",
                     value: "0",
+                    selector: nil,
                     functionName: nil,
                     description: reason,
-                    tokenOperation: nil
+                    tokenOperation: nil,
+                    hasUnrecognizedCalldata: true
                 )
             ]
         }
@@ -106,14 +110,19 @@ nonisolated enum CalldataDecoder {
 
         // bytes offset at params[32..<64], then length at the offset, then data
         let offsetBytes = params[params.startIndex + 32 ..< params.startIndex + 64]
-        let offset = readUInt64(offsetBytes)
+        guard let offset = readUInt64Checked(offsetBytes) else {
+            return .opaque("Kernel bytes offset has non-zero upper bytes — potential ABI manipulation")
+        }
         let dataStart = params.startIndex + Int(offset)
         guard dataStart + 32 <= params.endIndex else {
             return .opaque("Kernel bytes offset is out of bounds")
         }
 
         let lengthBytes = params[dataStart ..< dataStart + 32]
-        let length = Int(readUInt64(lengthBytes))
+        guard let lengthU64 = readUInt64Checked(lengthBytes) else {
+            return .opaque("Kernel payload length has non-zero upper bytes — potential ABI manipulation")
+        }
+        let length = Int(lengthU64)
         let execDataStart = dataStart + 32
         guard execDataStart + length <= params.endIndex else {
             return .opaque("Kernel execution payload is truncated")
@@ -131,8 +140,10 @@ nonisolated enum CalldataDecoder {
                 return .opaque("Invalid batch execution payload")
             }
             return .decoded(executions)
+        case 0x02, 0xFF: // C-01: Delegatecall — always hard-blocked
+            return .opaque("Delegatecall detected (call type 0x\(String(format: "%02x", callType))) — blocked for security")
         default:
-            return .opaque("Unknown Kernel call type: 0x\(String(format: "%02x", callType))")
+            return .opaque("Unknown Kernel call type: 0x\(String(format: "%02x", callType)) — blocked for security")
         }
     }
 
@@ -155,11 +166,12 @@ nonisolated enum CalldataDecoder {
         // offset(32) + length(32) + offsets[n](32 each) + tuple data
         guard data.count >= 64 else { return nil }
 
-        let arrayOffset = Int(readUInt64(data.prefix(32)))
-        let arrayStart = arrayOffset
+        guard let arrayOffset = readUInt64Checked(data.prefix(32)) else { return nil }
+        let arrayStart = Int(arrayOffset)
         guard arrayStart + 32 <= data.count else { return nil }
 
-        let count = Int(readUInt64(Data(data[arrayStart ..< arrayStart + 32])))
+        guard let countU64 = readUInt64Checked(Data(data[arrayStart ..< arrayStart + 32])) else { return nil }
+        let count = Int(countU64)
         guard count > 0, count < 100 else { return nil } // sanity
 
         let offsetTableStart = arrayStart + 32
@@ -168,17 +180,19 @@ nonisolated enum CalldataDecoder {
         for i in 0..<count {
             let offsetPos = offsetTableStart + i * 32
             guard offsetPos + 32 <= data.count else { return nil }
-            let tupleOffset = Int(readUInt64(Data(data[offsetPos ..< offsetPos + 32])))
+            guard let tupleOffsetU64 = readUInt64Checked(Data(data[offsetPos ..< offsetPos + 32])) else { return nil }
+            let tupleOffset = Int(tupleOffsetU64)
             let tupleStart = arrayStart + 32 + tupleOffset  // relative to array elements area
             guard tupleStart + 96 <= data.count else { return nil }
 
             // Tuple: address(32) + value(32) + offset(32) + [length(32) + bytes]
             let target = "0x" + Data(data[tupleStart + 12 ..< tupleStart + 32]).hex // skip 12-byte padding
             let value = parseUInt256(Data(data[tupleStart + 32 ..< tupleStart + 64]))
-            let bytesOffset = Int(readUInt64(Data(data[tupleStart + 64 ..< tupleStart + 96])))
-            let bytesLenPos = tupleStart + bytesOffset
+            guard let bytesOffsetU64 = readUInt64Checked(Data(data[tupleStart + 64 ..< tupleStart + 96])) else { return nil }
+            let bytesLenPos = tupleStart + Int(bytesOffsetU64)
             guard bytesLenPos + 32 <= data.count else { return nil }
-            let bytesLen = Int(readUInt64(Data(data[bytesLenPos ..< bytesLenPos + 32])))
+            guard let bytesLenU64 = readUInt64Checked(Data(data[bytesLenPos ..< bytesLenPos + 32])) else { return nil }
+            let bytesLen = Int(bytesLenU64)
             let bytesStart = bytesLenPos + 32
             guard bytesStart + bytesLen <= data.count else { return nil }
             let innerCalldata = Data(data[bytesStart ..< bytesStart + bytesLen])
@@ -199,23 +213,27 @@ nonisolated enum CalldataDecoder {
     ) -> DecodedExecution {
         let shortTarget = "\(target.prefix(8))...\(target.suffix(4))"
 
-        // No calldata = plain ETH transfer
+        // No calldata = plain ETH transfer or no-op call
         if calldata.isEmpty {
             if value.decimalString != "0" {
                 return DecodedExecution(
                     to: target,
                     value: value.decimalString,
+                    selector: nil,
                     functionName: nil,
                     description: "Send \(formatEth(value)) ETH to \(shortTarget)",
-                    tokenOperation: nil
+                    tokenOperation: nil,
+                    hasUnrecognizedCalldata: false
                 )
             }
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: nil,
                 functionName: nil,
                 description: "Call \(shortTarget) (no data)",
-                tokenOperation: nil
+                tokenOperation: nil,
+                hasUnrecognizedCalldata: false
             )
         }
 
@@ -223,16 +241,18 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: nil,
                 functionName: nil,
                 description: "Call \(shortTarget) (\(calldata.count) bytes)",
-                tokenOperation: nil
+                tokenOperation: nil,
+                hasUnrecognizedCalldata: true
             )
         }
 
-        let selector = calldata.prefix(4)
+        let callSelector = calldata.prefix(4)
 
         // ERC-20 transfer(address, uint256)
-        if selector == erc20Transfer, calldata.count >= 68 {
+        if callSelector == erc20Transfer, calldata.count >= 68 {
             let recipient = "0x" + Data(calldata[16..<36]).hex  // skip 12 bytes padding
             let amount = parseUInt256(Data(calldata[36..<68]))
             let shortRecipient = "\(recipient.prefix(8))...\(recipient.suffix(4))"
@@ -240,6 +260,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: erc20Transfer,
                 functionName: "transfer",
                 description: "Transfer \(formatTokenAmount(amount, token: target, chainId: chainId)) \(tokenName) to \(shortRecipient)",
                 tokenOperation: TokenOperation(
@@ -247,12 +268,13 @@ nonisolated enum CalldataDecoder {
                     amount: amount.decimalString,
                     counterparty: recipient,
                     source: nil
-                )
+                ),
+                hasUnrecognizedCalldata: false
             )
         }
 
         // ERC-20 approve(address, uint256)
-        if selector == erc20Approve, calldata.count >= 68 {
+        if callSelector == erc20Approve, calldata.count >= 68 {
             let spender = "0x" + Data(calldata[16..<36]).hex
             let amount = parseUInt256(Data(calldata[36..<68]))
             let shortSpender = "\(spender.prefix(8))...\(spender.suffix(4))"
@@ -262,6 +284,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: erc20Approve,
                 functionName: "approve",
                 description: "Approve \(amountStr) \(tokenName) for \(shortSpender)",
                 tokenOperation: TokenOperation(
@@ -269,12 +292,13 @@ nonisolated enum CalldataDecoder {
                     amount: amount.decimalString,
                     counterparty: spender,
                     source: nil
-                )
+                ),
+                hasUnrecognizedCalldata: false
             )
         }
 
         // ERC-20 transferFrom(address, address, uint256)
-        if selector == erc20TransferFrom, calldata.count >= 100 {
+        if callSelector == erc20TransferFrom, calldata.count >= 100 {
             let from = "0x" + Data(calldata[16..<36]).hex
             let to = "0x" + Data(calldata[48..<68]).hex
             let amount = parseUInt256(Data(calldata[68..<100]))
@@ -284,6 +308,7 @@ nonisolated enum CalldataDecoder {
             return DecodedExecution(
                 to: target,
                 value: value.decimalString,
+                selector: erc20TransferFrom,
                 functionName: "transferFrom",
                 description: "TransferFrom \(formatTokenAmount(amount, token: target, chainId: chainId)) \(tokenName) from \(shortFrom) to \(shortTo)",
                 tokenOperation: TokenOperation(
@@ -291,19 +316,22 @@ nonisolated enum CalldataDecoder {
                     amount: amount.decimalString,
                     counterparty: to,
                     source: from
-                )
+                ),
+                hasUnrecognizedCalldata: false
             )
         }
 
-        // Unknown selector
-        let selectorHex = "0x" + selector.hex
+        // Unknown selector — H-03: flag for spending limit enforcement
+        let selectorHex = "0x" + callSelector.hex
         let valueStr = value.decimalString != "0" ? " + \(formatEth(value)) ETH" : ""
         return DecodedExecution(
             to: target,
             value: value.decimalString,
+            selector: Data(callSelector),
             functionName: selectorHex,
             description: "Call \(shortTarget) [\(selectorHex)]\(valueStr) (\(calldata.count) bytes)",
-            tokenOperation: nil
+            tokenOperation: nil,
+            hasUnrecognizedCalldata: true
         )
     }
 
@@ -357,10 +385,15 @@ nonisolated enum CalldataDecoder {
     // MARK: - Helpers
 
     /// Read the last 8 bytes of a 32-byte big-endian value as UInt64.
-    private static func readUInt64(_ data: Data) -> UInt64 {
+    /// M-07: Returns nil if upper bytes are non-zero (prevents truncation attacks).
+    private static func readUInt64Checked(_ data: Data) -> UInt64? {
         let bytes = [UInt8](data)
-        var result: UInt64 = 0
         let start = max(0, bytes.count - 8)
+        // Reject if any upper bytes are non-zero
+        for i in 0..<start {
+            if bytes[i] != 0 { return nil }
+        }
+        var result: UInt64 = 0
         for i in start..<bytes.count {
             result = result << 8 | UInt64(bytes[i])
         }

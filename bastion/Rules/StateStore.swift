@@ -84,18 +84,22 @@ nonisolated final class StateStore: @unchecked Sendable {
             guard let state = loadSpendingState(ruleId: ruleId) else { return 0 }
             let now = Date()
 
+            // Use overflow-safe summation to prevent wrapping on UInt128.
+            let entries: [SpendEntry]
             if let windowSeconds {
                 let windowStart = now.addingTimeInterval(-Double(windowSeconds))
-                return state.entries
-                    .filter { $0.timestamp > windowStart.timeIntervalSince1970 }
-                    .compactMap { UInt128($0.amount) }
-                    .reduce(0, +)
+                entries = state.entries.filter { $0.timestamp > windowStart.timeIntervalSince1970 }
             } else {
-                // Lifetime — sum everything
-                return state.entries
-                    .compactMap { UInt128($0.amount) }
-                    .reduce(0, +)
+                entries = state.entries
             }
+            var total: UInt128 = 0
+            for entry in entries {
+                guard let amount = UInt128(entry.amount) else { continue }
+                let (newTotal, overflow) = total.addingReportingOverflow(amount)
+                if overflow { return UInt128.max }
+                total = newTotal
+            }
+            return total
         }
     }
 

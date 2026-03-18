@@ -6,6 +6,9 @@ import Foundation
 /// Each variant knows its semantics and can be validated by the rule engine.
 nonisolated enum SigningOperation: Sendable {
     case message(String)
+    /// Raw bytes signing — no Ethereum prefix is applied. The caller provides exactly 32 bytes
+    /// (a pre-computed hash) to be signed directly by the Secure Enclave.
+    case rawBytes(Data)
     case typedData(EIP712TypedData)
     case userOperation(UserOperation)
 
@@ -14,6 +17,8 @@ nonisolated enum SigningOperation: Sendable {
         case .message(let text):
             let preview = text.count > 80 ? "\(text.prefix(80))..." : text
             return "Sign message: \"\(preview)\""
+        case .rawBytes(let data):
+            return "Sign raw bytes: 0x\(data.prefix(8).hex)..."
         case .typedData(let data):
             return "Sign typed data: \(data.domain.name ?? "unknown")"
         case .userOperation(let op):
@@ -26,6 +31,7 @@ nonisolated enum SigningOperation: Sendable {
     var chainId: Int? {
         switch self {
         case .message: return nil
+        case .rawBytes: return nil
         case .typedData(let data): return data.domain.chainId
         case .userOperation(let op): return op.chainId
         }
@@ -61,6 +67,99 @@ nonisolated enum EntryPointVersion: String, Codable, Sendable {
     case v0_7 = "v0.7"
     case v0_8 = "v0.8"
     case v0_9 = "v0.9"
+}
+
+// MARK: - UserOperation Submission
+
+nonisolated enum UserOperationSubmissionProvider: String, Codable, Sendable {
+    case zeroDev = "zerodev"
+
+    var displayName: String {
+        switch self {
+        case .zeroDev:
+            return "ZeroDev"
+        }
+    }
+}
+
+nonisolated struct UserOperationSubmissionRequest: Codable, Sendable {
+    let provider: UserOperationSubmissionProvider
+    let projectId: String?
+
+    init(
+        provider: UserOperationSubmissionProvider = .zeroDev,
+        projectId: String? = nil
+    ) {
+        self.provider = provider
+        self.projectId = projectId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case provider
+        case projectId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try container.decodeIfPresent(UserOperationSubmissionProvider.self, forKey: .provider) ?? .zeroDev
+        projectId = try container.decodeIfPresent(String.self, forKey: .projectId)
+    }
+}
+
+nonisolated struct UserOperationRequestEnvelope: Codable, Sendable {
+    let userOperation: UserOperation
+    let submission: UserOperationSubmissionRequest?
+}
+
+nonisolated struct RequestedExecution: Codable, Sendable {
+    let target: String
+    let value: String
+    let data: Data
+
+    private enum CodingKeys: String, CodingKey {
+        case target
+        case value
+        case data
+    }
+
+    init(target: String, value: String, data: Data) {
+        self.target = target
+        self.value = value
+        self.data = data
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        target = try container.decode(String.self, forKey: .target)
+        value = try container.decode(String.self, forKey: .value)
+        data = try container.decodeHexData(forKey: .data)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(target, forKey: .target)
+        try container.encode(value, forKey: .value)
+        try container.encodeHexData(data, forKey: .data)
+    }
+}
+
+nonisolated struct UserOperationIntentRequestEnvelope: Codable, Sendable {
+    let projectId: String?
+    let chainId: Int
+    let executions: [RequestedExecution]
+    let submit: Bool
+
+    init(
+        projectId: String? = nil,
+        chainId: Int = 11155111,
+        executions: [RequestedExecution],
+        submit: Bool = false
+    ) {
+        self.projectId = projectId
+        self.chainId = chainId
+        self.executions = executions
+        self.submit = submit
+    }
 }
 
 // MARK: - ERC-4337 PackedUserOperation (v0.7+)

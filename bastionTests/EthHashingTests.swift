@@ -538,6 +538,126 @@ struct UserOperationCodableTests {
     }
 }
 
+// MARK: - UserOperation Submission Envelope Tests
+
+@Suite("UserOperation Submission Envelope")
+struct UserOperationSubmissionEnvelopeTests {
+
+    @Test("Envelope decodes with submission metadata")
+    func decodesEnvelope() throws {
+        let json = """
+        {
+          "userOperation": {
+            "sender": "0x1234567890abcdef1234567890abcdef12345678",
+            "nonce": "0x1",
+            "callData": "0x",
+            "verificationGasLimit": "0x0f4240",
+            "callGasLimit": "0x0f4240",
+            "preVerificationGas": "0x5208",
+            "maxPriorityFeePerGas": "0x3b9aca00",
+            "maxFeePerGas": "0x77359400",
+            "chainId": 11155111,
+            "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+            "entryPointVersion": "v0.7"
+          },
+          "submission": {
+            "projectId": "project-123"
+          }
+        }
+        """
+
+        let envelope = try JSONDecoder().decode(UserOperationRequestEnvelope.self, from: Data(json.utf8))
+        #expect(envelope.userOperation.chainId == 11155111)
+        #expect(envelope.submission?.provider == .zeroDev)
+        #expect(envelope.submission?.projectId == "project-123")
+    }
+
+    @Test("Envelope decodes without project ID for app-configured submission")
+    func decodesEnvelopeWithoutProjectId() throws {
+        let json = """
+        {
+          "userOperation": {
+            "sender": "0x1234567890abcdef1234567890abcdef12345678",
+            "nonce": "0x1",
+            "callData": "0x",
+            "verificationGasLimit": "0x0f4240",
+            "callGasLimit": "0x0f4240",
+            "preVerificationGas": "0x5208",
+            "maxPriorityFeePerGas": "0x3b9aca00",
+            "maxFeePerGas": "0x77359400",
+            "chainId": 11155111,
+            "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+            "entryPointVersion": "v0.7"
+          },
+          "submission": {
+            "provider": "zerodev"
+          }
+        }
+        """
+
+        let envelope = try JSONDecoder().decode(UserOperationRequestEnvelope.self, from: Data(json.utf8))
+        #expect(envelope.submission?.provider == .zeroDev)
+        #expect(envelope.submission?.projectId == nil)
+    }
+}
+
+@Suite("UserOperation Intent Envelope")
+struct UserOperationIntentEnvelopeTests {
+
+    @Test("Intent envelope decodes requested executions")
+    func decodesIntentEnvelope() throws {
+        let json = """
+        {
+          "projectId": "project-123",
+          "chainId": 11155111,
+          "executions": [
+            {
+              "target": "0x1234567890abcdef1234567890abcdef12345678",
+              "value": "0",
+              "data": "0xa9059cbb"
+            },
+            {
+              "target": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+              "value": "0x10",
+              "data": "0x"
+            }
+          ],
+          "submit": true
+        }
+        """
+
+        let envelope = try JSONDecoder().decode(UserOperationIntentRequestEnvelope.self, from: Data(json.utf8))
+        #expect(envelope.projectId == "project-123")
+        #expect(envelope.chainId == 11155111)
+        #expect(envelope.executions.count == 2)
+        #expect(envelope.executions[0].target == "0x1234567890abcdef1234567890abcdef12345678")
+        #expect(envelope.executions[0].value == "0")
+        #expect(envelope.executions[0].data == Data(hexString: "0xa9059cbb"))
+        #expect(envelope.submit)
+    }
+
+    @Test("Intent envelope decodes without project ID")
+    func decodesIntentEnvelopeWithoutProjectId() throws {
+        let json = """
+        {
+          "chainId": 11155111,
+          "executions": [
+            {
+              "target": "0x1234567890abcdef1234567890abcdef12345678",
+              "value": "0",
+              "data": "0x"
+            }
+          ],
+          "submit": false
+        }
+        """
+
+        let envelope = try JSONDecoder().decode(UserOperationIntentRequestEnvelope.self, from: Data(json.utf8))
+        #expect(envelope.projectId == nil)
+        #expect(envelope.executions.count == 1)
+    }
+}
+
 // MARK: - Kernel Encoding Tests
 
 @Suite("Kernel v3.3 Encoding")
@@ -602,5 +722,21 @@ struct KernelEncodingTests {
         #expect(mode.count == 32)
         #expect(mode[0] == 0x01) // CALLTYPE_BATCH
         #expect(mode[1] == 0x00) // EXECTYPE_DEFAULT
+    }
+
+    @Test("Decimal execution values encode as uint256")
+    func decimalExecutionValueEncoding() {
+        let exec = KernelEncoding.Execution(
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            value: "18446744073709551616",
+            data: Data()
+        )
+        let encoded = KernelEncoding.encodeSingle(exec)
+        let valueBytes = Data(encoded.dropFirst(20).prefix(32))
+        #expect(
+            valueBytes == Data(
+                hexString: "0x0000000000000000000000000000000000000000000000010000000000000000"
+            )
+        )
     }
 }

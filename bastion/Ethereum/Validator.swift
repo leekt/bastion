@@ -25,7 +25,7 @@ nonisolated protocol KernelValidator: Sendable {
     var dummySignature: Data { get }
 }
 
-extension KernelValidator {
+nonisolated extension KernelValidator {
     var validationId: Data {
         var id = Data([0x01])
         id += Data(hexString: validatorAddress) ?? Data(repeating: 0, count: 20)
@@ -40,12 +40,12 @@ extension KernelValidator {
 // MARK: - P256 Validator (Secure Enclave) — Production
 
 /// Kernel v3.3 P256 validator using Apple Secure Enclave.
-nonisolated final class P256Validator: KernelValidator, @unchecked Sendable {
-    let validatorAddress: String
+final class P256Validator: KernelValidator, @unchecked Sendable {
+    nonisolated let validatorAddress: String
 
-    private let publicKeyX: Data
-    private let publicKeyY: Data
-    private let signClosure: @Sendable (Data) throws -> Data
+    private nonisolated let publicKeyX: Data
+    private nonisolated let publicKeyY: Data
+    private nonisolated let signClosure: @Sendable (Data) throws -> Data
 
     init(
         validatorAddress: String,
@@ -59,19 +59,19 @@ nonisolated final class P256Validator: KernelValidator, @unchecked Sendable {
         self.signClosure = sign
     }
 
-    var installData: Data {
+    nonisolated var installData: Data {
         // P256 validator expects (x, y) = 64 bytes
         publicKeyX + publicKeyY
     }
 
-    func sign(hash: Data) throws -> Data {
+    nonisolated func sign(hash: Data) throws -> Data {
         let rawSig = try signClosure(hash) // 64 bytes: r[32] + s[32]
         let r = Data(rawSig.prefix(32))
         let s = P256Curve.normalizeS(Data(rawSig.suffix(32)))
         return r + s
     }
 
-    var dummySignature: Data {
+    nonisolated var dummySignature: Data {
         // P256: r[32] + s[32] (no v). Mirror the known-good dummy values used
         // in the TypeScript Kernel flow so sponsor/paymaster simulation sees the
         // same signature shape.
