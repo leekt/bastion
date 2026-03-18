@@ -3,13 +3,19 @@ import Security
 
 /// Generic Keychain CRUD scoped to the com.bastion access group.
 /// Agent processes cannot read, write, or delete these items.
+///
+/// M-01: Uses explicit access group to prevent other same-team apps from
+/// accessing Bastion config/state. Requires the matching Keychain Access Group
+/// entitlement: "926A27BQ7W.com.bastion" in the app's .entitlements file.
 nonisolated enum KeychainStore: Sendable {
     private static let service = "com.bastion"
+    private static let accessGroup = "926A27BQ7W.com.bastion"
 
     nonisolated static func read(account: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
+            kSecAttrAccessGroup as String: accessGroup,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -25,6 +31,7 @@ nonisolated enum KeychainStore: Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
+            kSecAttrAccessGroup as String: accessGroup,
             kSecAttrAccount as String: account
         ]
 
@@ -43,6 +50,7 @@ nonisolated enum KeychainStore: Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
+            kSecAttrAccessGroup as String: accessGroup,
             kSecAttrAccount as String: account
         ]
         SecItemDelete(query as CFDictionary)

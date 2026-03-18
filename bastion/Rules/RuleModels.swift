@@ -432,8 +432,10 @@ nonisolated struct BastionConfig: Codable, Sendable {
     var bundlerPreferences: BundlerPreferences
     var clientProfiles: [ClientProfile]
 
+    // M-04: Default to biometricOrPasscode for production safety.
+    // Prevents new installs from running with no auth.
     static let `default` = BastionConfig(
-        authPolicy: .open,
+        authPolicy: .biometricOrPasscode,
         rules: .default,
         bundlerPreferences: .default,
         clientProfiles: []

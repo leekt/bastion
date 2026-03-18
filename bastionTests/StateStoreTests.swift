@@ -42,10 +42,14 @@ private func makeMessageRequest(
     )
 }
 
+private let defaultValidCallData: Data = KernelEncoding.executeCalldata(
+    single: .init(to: "0x0000000000000000000000000000000000000001", value: 0, data: Data())
+)
+
 private func makeUserOpRequest(
     sender: String = "0x1234567890abcdef1234567890abcdef12345678",
     chainId: Int = 1,
-    callData: Data = Data(),
+    callData: Data? = nil,
     requestID: String = UUID().uuidString,
     clientBundleId: String? = nil
 ) -> SignRequest {
@@ -53,7 +57,7 @@ private func makeUserOpRequest(
         operation: .userOperation(UserOperation(
             sender: sender,
             nonce: "0x0",
-            callData: callData,
+            callData: callData ?? defaultValidCallData,
             factory: nil,
             factoryData: nil,
             verificationGasLimit: "0x0f4240",
@@ -325,7 +329,7 @@ struct RuleEngineConfigTests {
     func loadDefaultConfig() {
         let engine = RuleEngine(keychain: MockKeychainBackend())
         let config = engine.loadConfig()
-        #expect(config.authPolicy == .open)
+        #expect(config.authPolicy == .biometricOrPasscode)
         #expect(config.rules.enabled == true)
         #expect(config.rules.rateLimits.isEmpty)
         #expect(config.rules.spendingLimits.isEmpty)
@@ -752,17 +756,19 @@ struct RuleEngineValidationTests {
         let engine = RuleEngine(keychain: keychain)
         var config = BastionConfig.default
         let usdc = USDCAddresses.address(for: 1)!
+        let ethRuleId = UUID().uuidString
+        let usdcRuleId = UUID().uuidString
         config.rules.spendingLimits = [
-            SpendingLimitRule(id: "eth", token: .eth, allowance: "5000000000000000000", windowSeconds: 3600),
-            SpendingLimitRule(id: "usdc", token: .usdc, allowance: "5000000", windowSeconds: 3600),
+            SpendingLimitRule(id: ethRuleId, token: .eth, allowance: "5000000000000000000", windowSeconds: 3600),
+            SpendingLimitRule(id: usdcRuleId, token: .usdc, allowance: "5000000", windowSeconds: 3600),
         ]
 
         let request = makeUserOpRequest(
             callData: makeKernelSingleCallData(
                 target: usdc,
                 value: 1_000_000_000_000_000_000,
-                calldata: makeERC20ApproveCalldata(
-                    spender: "0xdddddddddddddddddddddddddddddddddddddddd",
+                calldata: makeERC20TransferCalldata(
+                    to: "0xdddddddddddddddddddddddddddddddddddddddd",
                     amount: 2_000_000
                 )
             )
@@ -770,8 +776,8 @@ struct RuleEngineValidationTests {
 
         engine.recordSuccess(request: request, config: config)
 
-        #expect(engine.stateStore.spentAmount(ruleId: "eth", windowSeconds: 3600) == UInt128("1000000000000000000"))
-        #expect(engine.stateStore.spentAmount(ruleId: "usdc", windowSeconds: 3600) == UInt128("2000000"))
+        #expect(engine.stateStore.spentAmount(ruleId: ethRuleId, windowSeconds: 3600) == UInt128("1000000000000000000"))
+        #expect(engine.stateStore.spentAmount(ruleId: usdcRuleId, windowSeconds: 3600) == UInt128("2000000"))
     }
 
     @Test("Opaque UserOp denies when spending rules are configured")

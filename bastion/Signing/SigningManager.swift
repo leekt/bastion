@@ -22,6 +22,7 @@ final class SigningManager {
 
     private(set) var state: SigningState = .idle
     private var pendingContinuation: CheckedContinuation<ApprovalDecision, Never>?
+    private var isProcessing = false
 
     private let seManager = SecureEnclaveManager.shared
     private let authManager = AuthManager.shared
@@ -32,7 +33,41 @@ final class SigningManager {
     private init() {}
 
     func processSignRequest(_ request: SignRequest) async throws -> SignResponse {
+        // H-01 + H-02: Serialize all signing requests. Only one request may be
+        // in-flight at a time, preventing both TOCTOU counter bypass and
+        // approval-hijack via continuation overwrite.
+        guard !isProcessing else {
+            throw BastionError.signingFailed
+        }
+        isProcessing = true
+        defer { isProcessing = false }
+
         let dataPrefix = request.requestID.prefix(8).description
+
+        // M-05: Check global allowedClients list before per-client rule routing.
+        // Per-client profiles have allowedClients = nil, so the global check must
+        // happen here to avoid bypass.
+        if ruleEngine.config.rules.enabled,
+           let globalAllowedClients = ruleEngine.config.rules.allowedClients,
+           !globalAllowedClients.isEmpty {
+            if let clientId = request.clientBundleId {
+                if !globalAllowedClients.contains(where: { $0.bundleId == clientId }) {
+                    auditLog.record(AuditEvent(
+                        type: .signDenied,
+                        dataPrefix: dataPrefix,
+                        reason: "Client \(clientId) not in global allowlist"
+                    ))
+                    throw BastionError.ruleViolation
+                }
+            } else {
+                auditLog.record(AuditEvent(
+                    type: .signDenied,
+                    dataPrefix: dataPrefix,
+                    reason: "Unknown client — global allowlist is configured"
+                ))
+                throw BastionError.ruleViolation
+            }
+        }
 
         let clientContext = ruleEngine.signingContext(for: request.clientBundleId)
         let effectiveConfig = BastionConfig(

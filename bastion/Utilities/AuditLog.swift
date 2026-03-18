@@ -355,6 +355,9 @@ nonisolated struct AuditRequestRecord: Codable, Sendable, Identifiable {
 nonisolated final class AuditLog: @unchecked Sendable {
     static let shared = AuditLog()
 
+    // L-05: Cap audit records to prevent unbounded growth / DoS via flooding.
+    private nonisolated static let maxRecords = 1000
+
     private let logURL: URL
     private let fileManager = FileManager.default
     private let queue = DispatchQueue(label: "com.bastion.auditlog")
@@ -501,6 +504,9 @@ nonisolated final class AuditLog: @unchecked Sendable {
             }
         }
 
+        // L-05: Trim to max records to prevent unbounded growth.
+        let trimmedRecords = Array(sortedRecords.prefix(Self.maxRecords))
+
         let directory = logURL.deletingLastPathComponent()
         if !fileManager.fileExists(atPath: directory.path) {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -508,7 +514,14 @@ nonisolated final class AuditLog: @unchecked Sendable {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(sortedRecords) else { return }
+        guard let data = try? encoder.encode(trimmedRecords) else { return }
         try? data.write(to: logURL, options: .atomic)
+
+        // H-04: Set restrictive file permissions (owner read/write only).
+        // Prevents other user-level processes from tampering with the audit log.
+        try? fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: logURL.path
+        )
     }
 }

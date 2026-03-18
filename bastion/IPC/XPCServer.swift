@@ -131,12 +131,13 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
     }
 
 #if DEBUG
+    // L-04: Require both identifier match AND path check. The previous
+    // fallback accepted any binary at the CLI path regardless of identity.
     private nonisolated func isAllowedDebugSidecar(pid: Int32, signingInfo: [String: Any]) -> Bool {
-        if let identifier = signingInfo[kSecCodeInfoIdentifier as String] as? String,
-           identifier == "bastion-cli-arm64" {
-            return executablePath(for: pid)?.hasSuffix("/bastion.app/Contents/MacOS/bastion-cli") == true
+        guard let identifier = signingInfo[kSecCodeInfoIdentifier as String] as? String,
+              identifier == "bastion-cli-arm64" else {
+            return false
         }
-
         return executablePath(for: pid)?.hasSuffix("/bastion.app/Contents/MacOS/bastion-cli") == true
     }
 
@@ -295,6 +296,19 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
 
         Task { @MainActor in
             do {
+                // M-03: Check rate limits before building sponsored operations.
+                // Prevents agents from draining paymaster credits without signing.
+                let context = ruleEngine.signingContext(for: self.clientBundleId)
+                if context.rules.enabled {
+                    for rule in context.rules.rateLimits {
+                        let count = ruleEngine.stateStore.rateLimitCount(ruleId: rule.id, windowSeconds: rule.windowSeconds)
+                        if count >= rule.maxRequests {
+                            reply(nil, BastionError.ruleViolation.nsError)
+                            return
+                        }
+                    }
+                }
+
                 let projectId = try self.resolvedZeroDevProjectId(from: request.projectId)
                 let (account, _) = try self.currentClientSmartAccount()
                 let bundler = ZeroDevAPI(projectId: projectId)
@@ -316,14 +330,16 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
 
     @MainActor
     private func resolvedZeroDevProjectId(from explicitProjectId: String?) throws -> String {
-        if let explicitProjectId = explicitProjectId?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !explicitProjectId.isEmpty {
-            return explicitProjectId
-        }
-
+        // M-08: App-configured project ID takes priority over client-specified.
+        // Prevents agents from redirecting UserOps to attacker-controlled bundlers.
         if let configured = ruleEngine.config.bundlerPreferences.zeroDevProjectId?.trimmingCharacters(in: .whitespacesAndNewlines),
            !configured.isEmpty {
             return configured
+        }
+
+        if let explicitProjectId = explicitProjectId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicitProjectId.isEmpty {
+            return explicitProjectId
         }
 
         throw NSError(

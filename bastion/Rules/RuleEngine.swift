@@ -41,14 +41,11 @@ final class RuleEngine {
         keychain.write(account: Self.configAccount, data: data)
     }
 
+    // L-01: Load synchronously to prevent race with ensureConfigLoadedIfNeeded.
     func loadConfigOnStartup() {
-        DispatchQueue.global(qos: .utility).async {
-            let loaded = self.loadConfig()
-            DispatchQueue.main.async {
-                self.config = loaded
-                self.configLoaded = true
-            }
-        }
+        let loaded = loadConfig()
+        config = loaded
+        configLoaded = true
     }
 
     private func ensureConfigLoadedIfNeeded() {
@@ -90,7 +87,20 @@ final class RuleEngine {
 
         config.clientProfiles.append(profile)
         config = normalizedConfig(config)
-        try? saveConfig(config)
+        // M-02: Don't silently swallow save errors. If we can't persist the
+        // profile, remove it from the in-memory config to prevent orphaned
+        // SE keys and fresh counter exploits on restart.
+        do {
+            try saveConfig(config)
+        } catch {
+            config.clientProfiles.removeAll { $0.id == profile.id }
+            return nil
+        }
+        auditLog.record(AuditEvent(
+            type: .signSuccess,
+            dataPrefix: "profile",
+            reason: "Auto-created client profile for \(bundleId)"
+        ))
         return clientProfile(bundleId: bundleId)
     }
 
@@ -169,7 +179,7 @@ final class RuleEngine {
 
     private enum OperationInspection {
         case notApplicable
-        case known(targets: [String], spending: [SpendObservation])
+        case known(targets: [String], spending: [SpendObservation], hasUnrecognizedCalldata: Bool)
         case opaque(String)
     }
 
@@ -259,6 +269,13 @@ final class RuleEngine {
         var reasons: [String] = []
         let inspection = inspect(request.operation)
 
+        // C-01: Opaque calldata (delegatecall, unknown call types) is ALWAYS denied
+        // regardless of which rules are configured. This prevents bypass when only
+        // rate limits or hours are set.
+        if case .opaque(let reason) = inspection {
+            reasons.append("UserOperation calldata cannot be verified: \(reason)")
+        }
+
         // 1. Allowed hours
         if let hours = config.rules.allowedHours {
             let calendar = Calendar.current
@@ -320,7 +337,7 @@ final class RuleEngine {
             stateStore.recordRequest(ruleId: rule.id, windowSeconds: rule.windowSeconds)
         }
 
-        guard case .known(_, let observations) = inspect(request.operation) else {
+        guard case .known(_, let observations, _) = inspect(request.operation) else {
             return
         }
 
@@ -342,6 +359,16 @@ final class RuleEngine {
         _ rule: TypedDataDomainRule,
         typedData: EIP712TypedData
     ) -> Bool {
+        // L-02: Require at least one non-nil constraint. An empty rule should
+        // NOT match everything — that's a misconfiguration.
+        guard normalizedOptional(rule.primaryType) != nil ||
+              normalizedOptional(rule.name) != nil ||
+              normalizedOptional(rule.version) != nil ||
+              rule.chainId != nil ||
+              normalizedAddressOptional(rule.verifyingContract) != nil else {
+            return false
+        }
+
         if let primaryType = normalizedOptional(rule.primaryType),
            primaryType.caseInsensitiveCompare(typedData.primaryType) != .orderedSame {
             return false
@@ -418,21 +445,23 @@ final class RuleEngine {
         }
     }
 
-    private func inspect(_ operation: SigningOperation) -> OperationInspection {
+    private nonisolated func inspect(_ operation: SigningOperation) -> OperationInspection {
         switch operation {
         case .message:
             return .notApplicable
         case .typedData(let data):
             if let verifyingContract = data.domain.verifyingContract {
-                return .known(targets: [verifyingContract], spending: [])
+                return .known(targets: [verifyingContract], spending: [], hasUnrecognizedCalldata: false)
             }
-            return .known(targets: [], spending: [])
+            return .known(targets: [], spending: [], hasUnrecognizedCalldata: false)
         case .userOperation(let op):
             switch CalldataDecoder.inspect(op) {
             case .decoded(let executions):
+                let hasUnrecognized = executions.contains(where: \.hasUnrecognizedCalldata)
                 return .known(
                     targets: executions.map(\.to),
-                    spending: spendObservations(from: executions, chainId: op.chainId)
+                    spending: spendObservations(from: executions, chainId: op.chainId),
+                    hasUnrecognizedCalldata: hasUnrecognized
                 )
             case .opaque(let reason):
                 return .opaque(reason)
@@ -440,7 +469,7 @@ final class RuleEngine {
         }
     }
 
-    private func spendObservations(
+    private nonisolated func spendObservations(
         from executions: [CalldataDecoder.DecodedExecution],
         chainId: Int
     ) -> [SpendObservation] {
@@ -451,7 +480,11 @@ final class RuleEngine {
                 observations.append(SpendObservation(token: .eth, amount: execution.value))
             }
 
-            if let tokenOperation = execution.tokenOperation {
+            // M-06: Only count transfers and transferFroms as spending.
+            // Approvals don't move funds immediately and should be handled
+            // by a separate policy (visible in UI but don't count toward limits).
+            if let tokenOperation = execution.tokenOperation,
+               tokenOperation.kind != .approve {
                 let token: TokenIdentifier
                 if let usdcAddress = USDCAddresses.address(for: chainId),
                    usdcAddress.caseInsensitiveCompare(execution.to) == .orderedSame {
@@ -466,7 +499,7 @@ final class RuleEngine {
         return observations
     }
 
-    private func validateTargets(
+    private nonisolated func validateTargets(
         inspection: OperationInspection,
         allowedTargets: [String: [String]],
         chainId: Int,
@@ -484,7 +517,7 @@ final class RuleEngine {
             reasons.append("Unable to inspect targets for chain \(chainId): \(reason)")
         case .notApplicable:
             reasons.append("No inspectable target found for chain \(chainId)")
-        case .known(let targets, _):
+        case .known(let targets, _, _):
             let normalizedTargets = Set(targets.map(normalizedAddress))
             guard !normalizedTargets.isEmpty else {
                 reasons.append("No inspectable target found for chain \(chainId)")
@@ -497,7 +530,7 @@ final class RuleEngine {
         }
     }
 
-    private func validateSpendingLimits(
+    private nonisolated func validateSpendingLimits(
         inspection: OperationInspection,
         rules: [SpendingLimitRule],
         reasons: inout [String]
@@ -509,7 +542,11 @@ final class RuleEngine {
             reasons.append("Unable to inspect UserOperation spending: \(reason)")
         case .notApplicable:
             return
-        case .known(_, let observations):
+        case .known(_, let observations, let hasUnrecognizedCalldata):
+            // H-03: Unrecognized function selectors mean spending cannot be verified.
+            if hasUnrecognizedCalldata {
+                reasons.append("UserOperation contains unrecognized function calls — spending cannot be fully verified")
+            }
             for rule in rules {
                 switch matchedSpendAmount(for: rule, observations: observations) {
                 case .noMatch:
@@ -533,7 +570,7 @@ final class RuleEngine {
         }
     }
 
-    private func matchedSpendAmount(
+    private nonisolated func matchedSpendAmount(
         for rule: SpendingLimitRule,
         observations: [SpendObservation]
     ) -> SpendEvaluation {
@@ -555,7 +592,7 @@ final class RuleEngine {
         return sawMatch ? .amount(total) : .noMatch
     }
 
-    private func matches(_ ruleToken: TokenIdentifier, _ observedToken: TokenIdentifier) -> Bool {
+    private nonisolated func matches(_ ruleToken: TokenIdentifier, _ observedToken: TokenIdentifier) -> Bool {
         switch (ruleToken, observedToken) {
         case (.eth, .eth), (.usdc, .usdc):
             return true
@@ -567,11 +604,11 @@ final class RuleEngine {
         }
     }
 
-    private func normalizedAddress(_ address: String) -> String {
+    private nonisolated func normalizedAddress(_ address: String) -> String {
         address.lowercased()
     }
 
-    private func shortAddress(_ address: String) -> String {
+    private nonisolated func shortAddress(_ address: String) -> String {
         let normalized = normalizedAddress(address)
         guard normalized.count > 12 else { return normalized }
         return "\(normalized.prefix(10))..."

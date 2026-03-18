@@ -42,11 +42,14 @@ final class CLIInstaller {
             try? fileManager.createDirectory(atPath: "/usr/local/bin", withIntermediateDirectories: true)
         }
 
-        try? fileManager.removeItem(atPath: symlinkPath)
-
+        // L-06: Use atomic rename to prevent TOCTOU race between remove and create.
+        let tmpPath = symlinkPath + ".tmp.\(ProcessInfo.processInfo.processIdentifier)"
         do {
-            try fileManager.createSymbolicLink(atPath: symlinkPath, withDestinationPath: bundlePath)
+            try? fileManager.removeItem(atPath: tmpPath)
+            try fileManager.createSymbolicLink(atPath: tmpPath, withDestinationPath: bundlePath)
+            _ = rename(tmpPath, symlinkPath)
         } catch {
+            try? fileManager.removeItem(atPath: tmpPath)
             // User can install the symlink manually if /usr/local/bin is not writable.
         }
     }
