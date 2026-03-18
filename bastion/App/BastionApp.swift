@@ -49,6 +49,12 @@ struct MenuBarContentView: View {
     var body: some View {
         let recentRequests = AuditLog.shared.recentRequestRecords(limit: 5)
 
+        if RuleEngine.shared.configCorrupted {
+            Label("Rules config corrupt — reset to defaults", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            Divider()
+        }
+
         if recentRequests.isEmpty {
             Text("No recent activity")
                 .foregroundStyle(.secondary)
@@ -120,6 +126,7 @@ struct MenuBarContentView: View {
 
     private func iconForEvent(_ type: AuditEvent.EventType) -> String {
         switch type {
+        case .signPending:   return "lock.open"
         case .signSuccess:   return "checkmark.circle"
         case .signDenied:    return "xmark.circle"
         case .ruleViolation: return "exclamationmark.triangle"

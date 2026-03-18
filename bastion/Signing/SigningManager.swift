@@ -81,6 +81,7 @@ final class SigningManager {
         // 1. Check all rules — determine if master key (biometric) is needed
         var requiresMasterKey = false
         var violations: [String] = []
+        var approvalMode: AuditEvent.ApprovalMode = .auto
 
         let validation = ruleEngine.validate(request, config: effectiveConfig)
         if case .denied(let reasons) = validation {
@@ -98,6 +99,7 @@ final class SigningManager {
                 clientContext: clientContext
             ))
 
+            approvalMode = .ruleOverride
             state = .pendingApproval(ApprovalRequest(
                 request: request,
                 mode: .ruleOverride(violations),
@@ -135,6 +137,15 @@ final class SigningManager {
             }
         } else {
             if requiresInteractivePolicyReview(for: request, config: effectiveConfig) {
+                approvalMode = .policyReview
+                // Record that this request reached the approval window. This ensures there is
+                // always an audit entry even if the process is killed while the window is open.
+                auditLog.record(AuditEvent(
+                    type: .signPending,
+                    dataPrefix: dataPrefix,
+                    request: request,
+                    clientContext: clientContext
+                ))
                 state = .pendingApproval(ApprovalRequest(
                     request: request,
                     mode: .policyReview,
@@ -190,10 +201,20 @@ final class SigningManager {
         auditLog.record(AuditEvent(
             type: .signSuccess,
             dataPrefix: dataPrefix,
+            approvalMode: approvalMode,
             request: request,
             clientContext: clientContext
         ))
         ruleEngine.recordSuccess(request: request, config: effectiveConfig)
+
+        // Notify for silently auto-approved requests (no approval window was shown).
+        if !requiresMasterKey && !requiresInteractivePolicyReview(for: request, config: effectiveConfig) {
+            notificationManager.notify(
+                title: "Request Signed",
+                subtitle: clientContext.displayName,
+                body: request.operation.displayDescription
+            )
+        }
 
         let submission = await submitUserOperationIfRequested(
             for: request,
@@ -275,15 +296,8 @@ final class SigningManager {
         }
     }
 
-    private func requiresInteractivePolicyReview(for request: SignRequest, config _: BastionConfig) -> Bool {
-        switch request.operation {
-        case .message:
-            return true
-        case .typedData:
-            return true
-        case .userOperation:
-            return true
-        }
+    private func requiresInteractivePolicyReview(for request: SignRequest, config: BastionConfig) -> Bool {
+        return ruleEngine.requiresExplicitApproval(for: request, config: config)
     }
 
     private func submitUserOperationIfRequested(

@@ -38,6 +38,10 @@ nonisolated struct AuditRequestSnapshot: Codable, Sendable {
 
 nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
     nonisolated enum EventType: String, Codable, Sendable {
+        /// Approval window was shown; awaiting user decision. Records the request
+        /// before the blocking await so there is always an audit entry even if the
+        /// process is killed while the window is open.
+        case signPending = "sign_pending"
         case signSuccess = "sign_success"
         case signDenied = "sign_denied"
         case ruleViolation = "rule_violation"
@@ -49,11 +53,21 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         case userOpReceiptTimeout = "user_op_receipt_timeout"
     }
 
+    nonisolated enum ApprovalMode: String, Codable, Sendable {
+        /// Rules were enabled and passed — signed silently without showing the approval window.
+        case auto = "auto"
+        /// Rules were disabled — the approval window was shown for user review.
+        case policyReview = "policy_review"
+        /// A rule was violated — the approval window required explicit override + biometric.
+        case ruleOverride = "rule_override"
+    }
+
     let id: String
     let timestamp: String
     let type: EventType
     let dataPrefix: String
     let reason: String?
+    let approvalMode: ApprovalMode?
     let client: AuditClientSnapshot?
     let request: AuditRequestSnapshot?
     let submission: AuditSubmissionSnapshot?
@@ -62,6 +76,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         type: EventType,
         dataPrefix: String,
         reason: String? = nil,
+        approvalMode: ApprovalMode? = nil,
         request: SignRequest? = nil,
         clientContext: ClientSigningContext? = nil,
         submission: AuditSubmissionSnapshot? = nil
@@ -74,6 +89,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         self.type = type
         self.dataPrefix = dataPrefix
         self.reason = reason
+        self.approvalMode = approvalMode
         self.client = clientContext.map {
             AuditClientSnapshot(
                 bundleId: $0.bundleId,
@@ -91,6 +107,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         case type
         case dataPrefix
         case reason
+        case approvalMode
         case client
         case request
         case submission
@@ -102,6 +119,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         type = try container.decode(EventType.self, forKey: .type)
         dataPrefix = try container.decodeIfPresent(String.self, forKey: .dataPrefix) ?? "unknown"
         reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        approvalMode = try container.decodeIfPresent(ApprovalMode.self, forKey: .approvalMode)
         client = try container.decodeIfPresent(AuditClientSnapshot.self, forKey: .client)
         request = try container.decodeIfPresent(AuditRequestSnapshot.self, forKey: .request)
         submission = try container.decodeIfPresent(AuditSubmissionSnapshot.self, forKey: .submission)
@@ -130,7 +148,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
             return "UserOp Receipt Failed"
         case .userOpReceiptTimeout:
             return "UserOp Receipt Pending"
-        default:
+        case .signPending, .signSuccess, .signDenied, .ruleViolation, .authFailed:
             break
         }
         return request?.title ?? type.rawValue
@@ -138,8 +156,15 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
 
     var resultLabel: String {
         switch type {
+        case .signPending:
+            return "Pending Approval"
         case .signSuccess:
-            return "Signed"
+            switch approvalMode {
+            case .auto: return "Signed (Auto)"
+            case .policyReview: return "Signed (Approved)"
+            case .ruleOverride: return "Signed (Override)"
+            case nil: return "Signed"
+            }
         case .signDenied:
             return "Denied"
         case .ruleViolation:
@@ -177,6 +202,22 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
                 digestHex: digestHex,
                 payloads: [
                     AuditPayloadSnapshot(title: "Message", value: text),
+                ]
+            )
+
+        case .rawBytes(let data):
+            return AuditRequestSnapshot(
+                requestID: request.requestID,
+                operationKind: "raw_bytes",
+                title: "Raw Bytes Signing",
+                summary: "Direct 32-byte signing — no Ethereum prefix applied",
+                details: [
+                    "Length: \(data.count) bytes",
+                    "Warning: payload signed as-is without any EIP-191 or EIP-712 prefix",
+                ],
+                digestHex: digestHex,
+                payloads: [
+                    AuditPayloadSnapshot(title: "Payload", value: "0x" + data.hex),
                 ]
             )
 
@@ -357,6 +398,8 @@ nonisolated final class AuditLog: @unchecked Sendable {
 
     // L-05: Cap audit records to prevent unbounded growth / DoS via flooding.
     private nonisolated static let maxRecords = 1000
+    // D-01: Drop records older than this to limit on-disk audit footprint.
+    private nonisolated static let maxAgeSeconds: TimeInterval = 90 * 24 * 3600
 
     private let logURL: URL
     private let fileManager = FileManager.default
@@ -504,8 +547,16 @@ nonisolated final class AuditLog: @unchecked Sendable {
             }
         }
 
+        // D-01: Drop records older than maxAgeSeconds. Records with no parseable
+        // timestamp are retained (conservative — better to keep than silently drop).
+        let cutoff = Date().addingTimeInterval(-Self.maxAgeSeconds)
+        let ageFilteredRecords = sortedRecords.filter { record in
+            guard let latest = record.latestTimestamp else { return true }
+            return latest >= cutoff
+        }
+
         // L-05: Trim to max records to prevent unbounded growth.
-        let trimmedRecords = Array(sortedRecords.prefix(Self.maxRecords))
+        let trimmedRecords = Array(ageFilteredRecords.prefix(Self.maxRecords))
 
         let directory = logURL.deletingLastPathComponent()
         if !fileManager.fileExists(atPath: directory.path) {

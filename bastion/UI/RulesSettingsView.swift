@@ -392,23 +392,46 @@ struct RulesSettingsView: View {
     }
 
     private var rawMessageTabContent: some View {
-        SettingsCard(
-            icon: "signature",
-            accent: Color(red: 0.15, green: 0.36, blue: 0.59),
-            title: "Raw / Message Signing",
-            subtitle: "Controls whether the CLI can request raw personal-sign payloads."
-        ) {
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle("Enable rule-based signing for raw messages", isOn: rawMessageEnabledBinding)
-                    .toggleStyle(.switch)
-                    .font(.headline)
+        let msgEnabled = activeRules.rawMessagePolicy.enabled
+        return VStack(spacing: 14) {
+            SettingsCard(
+                icon: "signature",
+                accent: Color(red: 0.15, green: 0.36, blue: 0.59),
+                title: "Message Signing",
+                subtitle: "Controls whether the CLI can request EIP-191 personal-sign payloads."
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Allow message signing", isOn: rawMessageEnabledBinding)
+                        .toggleStyle(.switch)
+                        .font(.headline)
 
-                Text(rawMessageEnabledBinding.wrappedValue
-                    ? "Rule-based signing is active. Raw message requests proceed directly to the authentication gate."
-                    : "Require-signing mode. Every raw message request triggers explicit biometric or passcode authentication.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Text(msgEnabled
+                        ? "Message signing is active. EIP-191 requests proceed to the authentication gate."
+                        : "Require-signing mode. Every message request triggers explicit authentication — no rule checks are applied.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+
+            SettingsCard(
+                icon: "doc.plaintext.fill",
+                accent: Color(red: 0.58, green: 0.18, blue: 0.18),
+                title: "Raw Bytes Signing",
+                subtitle: "Whether the CLI may pass a raw 32-byte hash for direct signing, bypassing any Ethereum prefix."
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Also allow raw bytes signing", isOn: rawMessageAllowRawSigningBinding)
+                        .toggleStyle(.switch)
+
+                    Text(activeRules.rawMessagePolicy.allowRawSigning
+                        ? "Raw bytes signing is enabled. The CLI can pass any 32-byte hash for direct signing with no EIP-191 prefix applied."
+                        : "Only EIP-191 encoded messages are permitted. Raw 32-byte signing requests will be denied.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(!msgEnabled)
+            .opacity(msgEnabled ? 1 : 0.45)
         }
     }
 
@@ -1438,6 +1461,15 @@ struct RulesSettingsView: View {
         )
     }
 
+    private var rawMessageAllowRawSigningBinding: Binding<Bool> {
+        Binding(
+            get: { activeRules.rawMessagePolicy.allowRawSigning },
+            set: { newValue in
+                updateActiveRules { $0.rawMessagePolicy.allowRawSigning = newValue }
+            }
+        )
+    }
+
     private var typedDataEnabledBinding: Binding<Bool> {
         Binding(
             get: { activeRules.typedDataPolicy.enabled },
@@ -2303,7 +2335,7 @@ struct AuditHistoryView: View {
             switch latestType {
             case .signDenied, .ruleViolation, .authFailed, .userOpSendFailed, .userOpReceiptFailed, .userOpReceiptTimeout:
                 return true
-            case .signSuccess, .userOpSubmitted, .userOpReceiptSuccess:
+            case .signPending, .signSuccess, .userOpSubmitted, .userOpReceiptSuccess:
                 return false
             }
         }.count
@@ -2659,6 +2691,8 @@ struct AuditHistoryView: View {
 
     private func colorForEvent(_ type: AuditEvent.EventType?) -> Color {
         switch type {
+        case .signPending?:
+            return .secondary
         case .signSuccess?:
             return Color(red: 0.18, green: 0.45, blue: 0.34)
         case .signDenied?:
@@ -2684,6 +2718,8 @@ struct AuditHistoryView: View {
 
     private func iconForEvent(_ type: AuditEvent.EventType?) -> String {
         switch type {
+        case .signPending?:
+            return "lock.open"
         case .signSuccess?:
             return "checkmark.circle.fill"
         case .signDenied?:
