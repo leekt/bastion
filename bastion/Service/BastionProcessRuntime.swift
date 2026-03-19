@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 enum BastionLaunchMode {
@@ -16,6 +17,7 @@ enum BastionLaunchController {
 final class BastionServiceRuntime {
     private let xpcServer: XPCServer
     private let ruleEngine: RuleEngine
+    private var lockFD: Int32 = -1
 
     init() {
         self.xpcServer = .shared
@@ -31,11 +33,57 @@ final class BastionServiceRuntime {
     }
 
     func start(menuBarManager: MenuBarManager? = nil) {
+        guard acquireServiceLock() else {
+            NSLog("Another Bastion service instance is already running. Exiting.")
+            exit(0)
+        }
+
         BastionNotificationManager.shared.configureIfNeeded()
         menuBarManager?.startObserving()
         xpcServer.start()
         ruleEngine.loadConfigOnStartup()
         warmSecureEnclaveKey()
+    }
+
+    private func acquireServiceLock() -> Bool {
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            NSLog("BastionServiceRuntime: could not resolve Application Support directory; skipping lock")
+            return true
+        }
+
+        let bastionDir = appSupport.appendingPathComponent("Bastion", isDirectory: true)
+        let lockPath = bastionDir.appendingPathComponent("service.lock").path
+
+        do {
+            try FileManager.default.createDirectory(at: bastionDir, withIntermediateDirectories: true)
+        } catch {
+            NSLog("BastionServiceRuntime: could not create Bastion support directory (%@); skipping lock", error.localizedDescription)
+            return true
+        }
+
+        let fd = Darwin.open(lockPath, O_CREAT | O_RDWR, mode_t(0o600))
+        guard fd >= 0 else {
+            NSLog("BastionServiceRuntime: could not open lock file at %@; skipping lock", lockPath)
+            return true
+        }
+
+        let result = flock(fd, LOCK_EX | LOCK_NB)
+        if result == 0 {
+            lockFD = fd
+            return true
+        }
+
+        if errno == EWOULDBLOCK {
+            Darwin.close(fd)
+            return false
+        }
+
+        NSLog("BastionServiceRuntime: flock returned unexpected errno %d; skipping lock", errno)
+        lockFD = fd
+        return true
     }
 
     private func warmSecureEnclaveKey() {

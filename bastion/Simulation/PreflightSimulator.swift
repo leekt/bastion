@@ -250,33 +250,35 @@ nonisolated final class PreflightSimulator: Sendable {
     /// For each decoded execution inside the UserOp, run eth_call against the chain RPC
     /// to detect application-level reverts before the approval window opens.
     ///
+    /// Multicall wrappers are transparently flattened via `allLeafExecutions` so each
+    /// inner call is simulated individually with its exact calldata.
+    ///
     /// Returns warning strings for any reverts; never throws.
     private nonisolated func calldataSimulation(_ op: UserOperation, rpcURL: URL) async -> [String] {
-        let executions: [CalldataDecoder.DecodedExecution]
+        let topLevelExecutions: [CalldataDecoder.DecodedExecution]
         switch CalldataDecoder.inspect(op) {
         case .decoded(let decoded):
-            executions = decoded
+            topLevelExecutions = decoded
         case .opaque:
             // Can't simulate what we can't decode.
             return []
         }
+
+        // Flatten multicall wrappers so each leaf execution is simulated independently.
+        let executions = topLevelExecutions.flatMap(\.allLeafExecutions)
 
         let rpc = EthRPC(rpcURL: rpcURL)
         var warnings: [String] = []
 
         for execution in executions {
             // Skip plain ETH transfers (no calldata to simulate).
-            guard let selector = execution.selector else { continue }
+            guard !execution.rawCalldata.isEmpty else { continue }
 
-            // Reconstruct the full calldata: we need the raw bytes, not just the selector.
-            // Use CalldataDecoder's output to identify the target and re-derive the calldata
-            // from the original op.callData for this specific execution.
-            // Since we only have the decoded description and selector here, we build a
-            // minimal eth_call using the selector as a 4-byte probe to check reachability.
-            // For a full revert check we would need the original inner calldata per execution;
-            // the decoder does not currently expose that, so we call with selector-only
-            // calldata as a lightweight revert probe.
-            let calldataHex = "0x" + selector.hex
+            // Use the full rawCalldata (selector + args) for an accurate revert check.
+            // Previously only the 4-byte selector was sent, which caused false passes
+            // because contracts would receive a malformed call and revert for the wrong
+            // reason (or not revert at all if they have a fallback).
+            let calldataHex = "0x" + execution.rawCalldata.hex
 
             do {
                 _ = try await rpc.ethCall(to: execution.to, data: calldataHex, from: op.sender)
