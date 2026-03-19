@@ -9,6 +9,7 @@ final class RuleEngine {
     private let auditLog = AuditLog.shared
 
     private nonisolated static let configAccount = "config"
+    private nonisolated static let configBackupAccount = "config.premigration"
 
     private(set) var config: BastionConfig = .default
     private(set) var configLoaded = false
@@ -36,11 +37,28 @@ final class RuleEngine {
         guard let decoded = try? JSONDecoder().decode(BastionConfig.self, from: data) else {
             return (.default, true) // data exists but unreadable — corruption
         }
+        if decoded.version < 7, keychain.read(account: Self.configBackupAccount) == nil {
+            keychain.write(account: Self.configBackupAccount, data: data)
+        }
         return (normalizedConfig(migrateConfig(decoded)), false)
     }
 
     nonisolated func loadConfig() -> BastionConfig {
         loadConfigRaw().config
+    }
+
+    /// Returns true if a pre-migration config backup exists in the keychain.
+    nonisolated func hasConfigBackup() -> Bool {
+        keychain.read(account: Self.configBackupAccount) != nil
+    }
+
+    /// Reads and decodes the pre-migration config backup without applying migration.
+    /// Returns nil if no backup exists or the backup data cannot be decoded.
+    nonisolated func restoreConfigBackup() -> BastionConfig? {
+        guard let data = keychain.read(account: Self.configBackupAccount) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(BastionConfig.self, from: data)
     }
 
     // P0.2 / P0.3: Upgrade configs saved before schema version 7.
