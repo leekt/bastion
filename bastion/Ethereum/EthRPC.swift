@@ -449,6 +449,8 @@ nonisolated struct TraceCallResult: Codable, Sendable {
     let from: String
     let to: String?
     let value: String?
+    let gas: String?
+    let gasUsed: String?
     let input: String?
     let output: String?
     let calls: [TraceCallResult]?
