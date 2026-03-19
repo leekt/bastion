@@ -23,6 +23,45 @@ nonisolated struct PreflightResult: Codable, Sendable {
     let recommendations: [String]
     /// Overall severity: success, warning (passed but with caveats), error (failed).
     let severity: Severity
+    /// Trace analysis from `debug_traceCall`, if the RPC supports it.
+    /// Contains ERC-20 Transfer events, touched addresses, and native ETH spending.
+    let traceAnalysis: TraceAnalysis?
+    /// Spend observations derived from the trace analysis.
+    /// When available, these represent the *actual* on-chain spending detected via simulation
+    /// and are more accurate than the static calldata-based observations.
+    let simulatedSpendObservations: [SimulatedSpendObservation]?
+
+    init(
+        passed: Bool,
+        gasEstimate: GasEstimate?,
+        aaError: String?,
+        failureReason: String?,
+        staticWarnings: [String],
+        diagnosis: String,
+        recommendations: [String],
+        severity: Severity,
+        traceAnalysis: TraceAnalysis? = nil,
+        simulatedSpendObservations: [SimulatedSpendObservation]? = nil
+    ) {
+        self.passed = passed
+        self.gasEstimate = gasEstimate
+        self.aaError = aaError
+        self.failureReason = failureReason
+        self.staticWarnings = staticWarnings
+        self.diagnosis = diagnosis
+        self.recommendations = recommendations
+        self.severity = severity
+        self.traceAnalysis = traceAnalysis
+        self.simulatedSpendObservations = simulatedSpendObservations
+    }
+}
+
+/// A spend observation derived from trace simulation.
+/// Similar to the internal `SpendObservation` in RuleEngine, but public and Codable
+/// so it can be attached to `PreflightResult`.
+nonisolated struct SimulatedSpendObservation: Codable, Sendable {
+    let token: TokenIdentifier
+    let amount: String  // decimal string in smallest unit (wei, 6-decimal for USDC)
 }
 
 // MARK: - Debug Bundle
@@ -77,6 +116,17 @@ nonisolated final class PreflightSimulator: Sendable {
             staticWarnings.append(contentsOf: feeWarnings)
         }
 
+        // ─── Trace-based simulation (non-blocking) ──────────────────────────
+        // Run debug_traceCall to detect actual ERC-20 transfers and touched addresses.
+        // Falls back silently when the RPC doesn't support debug_traceCall.
+        var traceAnalysis: TraceAnalysis? = nil
+        var simulatedSpendObservations: [SimulatedSpendObservation]? = nil
+        if let rpcURL = chainRPCURL {
+            let traceResult = await traceSimulation(op: op, rpcURL: rpcURL)
+            traceAnalysis = traceResult.analysis
+            simulatedSpendObservations = traceResult.observations
+        }
+
         // ─── Bundler simulation ──────────────────────────────────────────────
         let projectId = submission?.projectId ?? preferences.zeroDevProjectId
         guard let projectId, !projectId.isEmpty else {
@@ -85,7 +135,11 @@ nonisolated final class PreflightSimulator: Sendable {
                 let calldataWarnings = await calldataSimulation(op, rpcURL: rpcURL)
                 staticWarnings.append(contentsOf: calldataWarnings)
             }
-            return buildStaticOnlyResult(staticWarnings: staticWarnings)
+            return buildStaticOnlyResult(
+                staticWarnings: staticWarnings,
+                traceAnalysis: traceAnalysis,
+                simulatedSpendObservations: simulatedSpendObservations
+            )
         }
 
         let api = ZeroDevAPI(projectId: projectId)
@@ -120,10 +174,17 @@ nonisolated final class PreflightSimulator: Sendable {
                 staticWarnings: staticWarnings,
                 diagnosis: "Preflight simulation passed. Gas estimates retrieved from bundler.",
                 recommendations: staticWarnings.isEmpty ? [] : ["Review the warnings above before approving"],
-                severity: staticWarnings.isEmpty ? .success : .warning
+                severity: staticWarnings.isEmpty ? .success : .warning,
+                traceAnalysis: traceAnalysis,
+                simulatedSpendObservations: simulatedSpendObservations
             )
         } catch let error as ZeroDevError {
-            return buildBundlerFailure(error: error, staticWarnings: staticWarnings)
+            return buildBundlerFailure(
+                error: error,
+                staticWarnings: staticWarnings,
+                traceAnalysis: traceAnalysis,
+                simulatedSpendObservations: simulatedSpendObservations
+            )
         } catch {
             let msg = String(describing: error)
             return PreflightResult(
@@ -134,7 +195,9 @@ nonisolated final class PreflightSimulator: Sendable {
                 staticWarnings: staticWarnings,
                 diagnosis: "Preflight simulation could not complete: \(msg)",
                 recommendations: ["Check your network connection and RPC configuration"],
-                severity: .error
+                severity: .error,
+                traceAnalysis: traceAnalysis,
+                simulatedSpendObservations: simulatedSpendObservations
             )
         }
     }
@@ -300,7 +363,7 @@ nonisolated final class PreflightSimulator: Sendable {
         switch error {
         case .rpcError(_, let msg): message = msg
         case .httpError(_, let body): message = body
-        case .networkError: return nil
+        case .networkError, .debugTraceUnsupported: return nil
         }
 
         let lower = message.lowercased()
@@ -331,6 +394,78 @@ nonisolated final class PreflightSimulator: Sendable {
         }
 
         return "Call to \(shortTarget) would revert"
+    }
+
+    // MARK: - Trace Simulation
+
+    private struct TraceSimulationResult {
+        let analysis: TraceAnalysis?
+        let observations: [SimulatedSpendObservation]?
+    }
+
+    /// Run `debug_traceCall` on the UserOp's calldata to detect actual ERC-20 transfers
+    /// and native ETH spending. Falls back silently when the RPC doesn't support it.
+    private nonisolated func traceSimulation(op: UserOperation, rpcURL: URL) async -> TraceSimulationResult {
+        let rpc = EthRPC(rpcURL: rpcURL)
+        let entryPoint = EntryPointAddress.address(for: op.entryPointVersion)
+        let calldataHex = "0x" + op.callData.hex
+
+        do {
+            let trace = try await rpc.debugTraceCall(
+                to: op.sender,
+                from: entryPoint,
+                data: calldataHex
+            )
+
+            let analysis = TraceAnalyzer.analyze(trace, accountAddress: op.sender)
+            let observations = buildSimulatedSpendObservations(
+                from: analysis,
+                accountAddress: op.sender,
+                chainId: op.chainId
+            )
+            return TraceSimulationResult(analysis: analysis, observations: observations)
+        } catch let rpcError as EthRPCError {
+            if case .debugTraceUnsupported = rpcError {
+                // Expected: many RPC providers don't support debug_traceCall. Skip silently.
+            }
+            // Non-blocking: any RPC error — skip.
+            return TraceSimulationResult(analysis: nil, observations: nil)
+        } catch {
+            // Non-blocking: any other error (network, timeout, etc.) — skip.
+            return TraceSimulationResult(analysis: nil, observations: nil)
+        }
+    }
+
+    /// Convert trace analysis into spend observations for spending limit validation.
+    private nonisolated func buildSimulatedSpendObservations(
+        from analysis: TraceAnalysis,
+        accountAddress: String,
+        chainId: Int
+    ) -> [SimulatedSpendObservation] {
+        var observations: [SimulatedSpendObservation] = []
+        let normalizedAccount = accountAddress.lowercased()
+
+        // Native ETH spending (from call value fields).
+        if analysis.nativeSpend != "0" {
+            observations.append(SimulatedSpendObservation(token: .eth, amount: analysis.nativeSpend))
+        }
+
+        // ERC-20 Transfer events where the account is the sender.
+        for transfer in analysis.transfers {
+            guard transfer.from == normalizedAccount else { continue }
+            guard transfer.amount != "0" else { continue }
+
+            let token: TokenIdentifier
+            if let usdcAddress = USDCAddresses.address(for: chainId),
+               usdcAddress.lowercased() == transfer.token {
+                token = .usdc
+            } else {
+                token = .erc20(address: transfer.token, chainId: chainId)
+            }
+            observations.append(SimulatedSpendObservation(token: token, amount: transfer.amount))
+        }
+
+        return observations
     }
 
     private nonisolated func gasWarning(_ op: UserOperation) -> String? {
@@ -368,7 +503,11 @@ nonisolated final class PreflightSimulator: Sendable {
 
     // MARK: - Result builders
 
-    private nonisolated func buildStaticOnlyResult(staticWarnings: [String]) -> PreflightResult {
+    private nonisolated func buildStaticOnlyResult(
+        staticWarnings: [String],
+        traceAnalysis: TraceAnalysis? = nil,
+        simulatedSpendObservations: [SimulatedSpendObservation]? = nil
+    ) -> PreflightResult {
         if staticWarnings.isEmpty {
             return PreflightResult(
                 passed: true,
@@ -378,7 +517,9 @@ nonisolated final class PreflightSimulator: Sendable {
                 staticWarnings: [],
                 diagnosis: "Basic checks passed. No bundler configured — gas simulation skipped.",
                 recommendations: ["Configure a ZeroDev project ID to enable bundler simulation"],
-                severity: .warning
+                severity: .warning,
+                traceAnalysis: traceAnalysis,
+                simulatedSpendObservations: simulatedSpendObservations
             )
         }
         return PreflightResult(
@@ -389,13 +530,17 @@ nonisolated final class PreflightSimulator: Sendable {
             staticWarnings: staticWarnings,
             diagnosis: "Static checks found issues before simulation.",
             recommendations: staticWarnings,
-            severity: .error
+            severity: .error,
+            traceAnalysis: traceAnalysis,
+            simulatedSpendObservations: simulatedSpendObservations
         )
     }
 
     private nonisolated func buildBundlerFailure(
         error: ZeroDevError,
-        staticWarnings: [String]
+        staticWarnings: [String],
+        traceAnalysis: TraceAnalysis? = nil,
+        simulatedSpendObservations: [SimulatedSpendObservation]? = nil
     ) -> PreflightResult {
         let message: String
         switch error {
@@ -416,7 +561,9 @@ nonisolated final class PreflightSimulator: Sendable {
             staticWarnings: staticWarnings,
             diagnosis: diagnosis,
             recommendations: recommendations,
-            severity: .error
+            severity: .error,
+            traceAnalysis: traceAnalysis,
+            simulatedSpendObservations: simulatedSpendObservations
         )
     }
 
