@@ -23,6 +23,44 @@ nonisolated enum CalldataDecoder {
         let description: String  // human-readable summary
         let tokenOperation: TokenOperation?
         let hasUnrecognizedCalldata: Bool  // H-03: true when selector is unknown
+        /// Full inner calldata for this execution (selector + args). Empty for plain ETH transfers.
+        /// Used by PreflightSimulator to replay the exact call via eth_call.
+        let rawCalldata: Data
+        /// For multicall wrappers: the decoded sub-calls. Empty for regular (non-multicall) executions.
+        /// Callers that need all token operations must flatten this recursively using `allLeafExecutions`.
+        let subExecutions: [DecodedExecution]
+
+        init(
+            to: String,
+            value: String,
+            selector: Data?,
+            functionName: String?,
+            description: String,
+            tokenOperation: TokenOperation?,
+            hasUnrecognizedCalldata: Bool,
+            rawCalldata: Data,
+            subExecutions: [DecodedExecution] = []
+        ) {
+            self.to = to
+            self.value = value
+            self.selector = selector
+            self.functionName = functionName
+            self.description = description
+            self.tokenOperation = tokenOperation
+            self.hasUnrecognizedCalldata = hasUnrecognizedCalldata
+            self.rawCalldata = rawCalldata
+            self.subExecutions = subExecutions
+        }
+
+        /// Returns all leaf executions: if this is a multicall, returns its sub-executions
+        /// (recursively flattened); otherwise returns [self].
+        /// Use this when iterating for spending observation or simulation.
+        var allLeafExecutions: [DecodedExecution] {
+            if subExecutions.isEmpty {
+                return [self]
+            }
+            return subExecutions.flatMap(\.allLeafExecutions)
+        }
     }
 
     struct TokenOperation: Sendable {
@@ -54,6 +92,9 @@ nonisolated enum CalldataDecoder {
     private static let erc20Transfer = Data([0xa9, 0x05, 0x9c, 0xbb])       // transfer(address,uint256)
     private static let erc20Approve  = Data([0x09, 0x5e, 0xa7, 0xb3])       // approve(address,uint256)
     private static let erc20TransferFrom = Data([0x23, 0xb8, 0x72, 0xdd])   // transferFrom(address,address,uint256)
+    // Multicall wrappers — inner calls are decoded recursively for spending enforcement
+    private static let multicall     = Data([0xac, 0x96, 0x50, 0xd8])       // multicall(bytes[])
+    private static let multicallDeadline = Data([0x5a, 0xe4, 0x01, 0xdc])   // multicall(uint256,bytes[]) — Uniswap v3 router
 
     // MARK: - Decode UserOperation
 
@@ -73,7 +114,8 @@ nonisolated enum CalldataDecoder {
                     functionName: nil,
                     description: reason,
                     tokenOperation: nil,
-                    hasUnrecognizedCalldata: true
+                    hasUnrecognizedCalldata: true,
+                    rawCalldata: Data()
                 )
             ]
         }
@@ -223,7 +265,8 @@ nonisolated enum CalldataDecoder {
                     functionName: nil,
                     description: "Send \(formatEth(value)) ETH to \(shortTarget)",
                     tokenOperation: nil,
-                    hasUnrecognizedCalldata: false
+                    hasUnrecognizedCalldata: false,
+                    rawCalldata: Data()
                 )
             }
             return DecodedExecution(
@@ -233,7 +276,8 @@ nonisolated enum CalldataDecoder {
                 functionName: nil,
                 description: "Call \(shortTarget) (no data)",
                 tokenOperation: nil,
-                hasUnrecognizedCalldata: false
+                hasUnrecognizedCalldata: false,
+                rawCalldata: Data()
             )
         }
 
@@ -245,7 +289,8 @@ nonisolated enum CalldataDecoder {
                 functionName: nil,
                 description: "Call \(shortTarget) (\(calldata.count) bytes)",
                 tokenOperation: nil,
-                hasUnrecognizedCalldata: true
+                hasUnrecognizedCalldata: true,
+                rawCalldata: calldata
             )
         }
 
@@ -269,7 +314,8 @@ nonisolated enum CalldataDecoder {
                     counterparty: recipient,
                     source: nil
                 ),
-                hasUnrecognizedCalldata: false
+                hasUnrecognizedCalldata: false,
+                rawCalldata: calldata
             )
         }
 
@@ -293,7 +339,8 @@ nonisolated enum CalldataDecoder {
                     counterparty: spender,
                     source: nil
                 ),
-                hasUnrecognizedCalldata: false
+                hasUnrecognizedCalldata: false,
+                rawCalldata: calldata
             )
         }
 
@@ -317,8 +364,19 @@ nonisolated enum CalldataDecoder {
                     counterparty: to,
                     source: from
                 ),
-                hasUnrecognizedCalldata: false
+                hasUnrecognizedCalldata: false,
+                rawCalldata: calldata
             )
+        }
+
+        // Multicall wrappers — recurse into inner calls for spending enforcement.
+        // multicall(bytes[]) — selector 0xac9650d8
+        // multicall(uint256,bytes[]) — selector 0x5ae401dc (Uniswap v3 router, deadline in first arg)
+        if callSelector == multicall || callSelector == multicallDeadline {
+            if let innerExecutions = decodeMulticall(calldata, to: target, value: value, chainId: chainId) {
+                return innerExecutions
+            }
+            // If decoding fails, fall through to the unknown-selector path below.
         }
 
         // Unknown selector — H-03: flag for spending limit enforcement
@@ -331,7 +389,103 @@ nonisolated enum CalldataDecoder {
             functionName: selectorHex,
             description: "Call \(shortTarget) [\(selectorHex)]\(valueStr) (\(calldata.count) bytes)",
             tokenOperation: nil,
-            hasUnrecognizedCalldata: true
+            hasUnrecognizedCalldata: true,
+            rawCalldata: calldata
+        )
+    }
+
+    // MARK: - Multicall Decoding
+
+    /// Decode multicall(bytes[]) or multicall(uint256,bytes[]) inner calldata.
+    ///
+    /// Both variants ABI-encode a `bytes[]` dynamic array. The uint256 deadline variant
+    /// simply prepends a 32-byte deadline before the array offset, so we skip it.
+    ///
+    /// Returns a synthetic `DecodedExecution` that aggregates the inner calls:
+    /// - `hasUnrecognizedCalldata` is true if ANY inner call is unrecognized.
+    /// - `tokenOperation` is nil on the multicall node itself; callers use `allLeafExecutions`
+    ///   to collect token operations from each sub-call individually.
+    /// - `subExecutions` holds the decoded inner calls for recursive iteration.
+    /// - `rawCalldata` is the full multicall calldata (for eth_call simulation).
+    ///
+    /// Returns nil if the calldata is malformed and cannot be decoded.
+    private static func decodeMulticall(
+        _ calldata: Data,
+        to target: String,
+        value: ParsedAmount,
+        chainId: Int
+    ) -> DecodedExecution? {
+        let callSelector = calldata.prefix(4)
+        let params = calldata.dropFirst(4)
+        guard params.count >= 32 else { return nil }
+
+        // For multicall(uint256,bytes[]), skip the 32-byte deadline to reach the bytes[] offset.
+        let arrayOffsetStart: Data.Index
+        if callSelector == multicallDeadline {
+            guard params.count >= 64 else { return nil }
+            arrayOffsetStart = params.startIndex + 32  // skip deadline word
+        } else {
+            arrayOffsetStart = params.startIndex
+        }
+
+        // Read the offset to the bytes[] head
+        guard let arrayOffsetU64 = readUInt64Checked(Data(params[arrayOffsetStart ..< arrayOffsetStart + 32])) else {
+            return nil
+        }
+        // The offset is relative to the start of params (after selector)
+        let arrayStart = params.startIndex + Int(arrayOffsetU64)
+        guard arrayStart + 32 <= params.endIndex else { return nil }
+
+        // Element count
+        guard let countU64 = readUInt64Checked(Data(params[arrayStart ..< arrayStart + 32])) else { return nil }
+        let count = Int(countU64)
+        guard count > 0, count < 100 else { return nil }
+
+        let offsetTableStart = arrayStart + 32
+        var innerExecutions: [DecodedExecution] = []
+
+        for i in 0..<count {
+            let offsetPos = offsetTableStart + i * 32
+            guard offsetPos + 32 <= params.endIndex else { return nil }
+            guard let elemOffsetU64 = readUInt64Checked(Data(params[offsetPos ..< offsetPos + 32])) else { return nil }
+            // Element offsets are relative to the start of the array head (arrayStart)
+            let elemLenPos = arrayStart + 32 + Int(elemOffsetU64)
+            guard elemLenPos + 32 <= params.endIndex else { return nil }
+            guard let elemLenU64 = readUInt64Checked(Data(params[elemLenPos ..< elemLenPos + 32])) else { return nil }
+            let elemLen = Int(elemLenU64)
+            let elemStart = elemLenPos + 32
+            guard elemStart + elemLen <= params.endIndex else { return nil }
+            let innerCalldata = Data(params[elemStart ..< elemStart + elemLen])
+
+            // Each bytes element is a self-contained inner call to the same target (msg.sender = router).
+            // Value is 0 for multicall sub-calls; ETH value (if any) comes from the outer call.
+            let innerValue = ParsedAmount(decimalString: "0", uint128Value: 0)
+            let exec = decodeInnerCall(to: target, value: innerValue, calldata: innerCalldata, chainId: chainId)
+            innerExecutions.append(exec)
+        }
+
+        guard !innerExecutions.isEmpty else { return nil }
+
+        // Aggregate: if any sub-call is unrecognized, the whole multicall has unrecognized calldata.
+        let hasUnrecognized = innerExecutions.contains(where: \.hasUnrecognizedCalldata)
+        // Descriptions: join all sub-call descriptions.
+        let descriptions = innerExecutions.map(\.description).joined(separator: "; ")
+        let shortTarget = "\(target.prefix(8))...\(target.suffix(4))"
+        let valueStr = value.decimalString != "0" ? " + \(formatEth(value)) ETH" : ""
+        let description = "Multicall [\(innerExecutions.count) calls] on \(shortTarget)\(valueStr): \(descriptions)"
+
+        // tokenOperation on the multicall node itself is nil — callers use allLeafExecutions
+        // to iterate sub-calls and collect all token operations individually.
+        return DecodedExecution(
+            to: target,
+            value: value.decimalString,
+            selector: callSelector,
+            functionName: callSelector == multicallDeadline ? "multicall(uint256,bytes[])" : "multicall(bytes[])",
+            description: description,
+            tokenOperation: nil,
+            hasUnrecognizedCalldata: hasUnrecognized,
+            rawCalldata: calldata,
+            subExecutions: innerExecutions
         )
     }
 

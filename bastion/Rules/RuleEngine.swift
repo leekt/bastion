@@ -589,7 +589,11 @@ final class RuleEngine {
     ) -> [SpendObservation] {
         var observations: [SpendObservation] = []
 
-        for execution in executions {
+        // Use allLeafExecutions so that multicall wrappers are transparently unwrapped:
+        // a multicall with two ERC-20 transfers produces two leaf executions, each
+        // contributing its own SpendObservation. Without this, only the multicall node
+        // itself would be inspected and its tokenOperation is nil by design.
+        for execution in executions.flatMap(\.allLeafExecutions) {
             if execution.value != "0" {
                 observations.append(SpendObservation(token: .eth, amount: execution.value))
             }
