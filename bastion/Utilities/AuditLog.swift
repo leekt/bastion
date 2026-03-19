@@ -1,3 +1,4 @@
+import CommonCrypto
 import Foundation
 
 nonisolated struct AuditClientSnapshot: Codable, Sendable {
@@ -81,7 +82,8 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         approvalMode: ApprovalMode? = nil,
         request: SignRequest? = nil,
         clientContext: ClientSigningContext? = nil,
-        submission: AuditSubmissionSnapshot? = nil
+        submission: AuditSubmissionSnapshot? = nil,
+        redactionLevel: AuditRedactionLevel = .none
     ) {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -99,7 +101,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
                 accountAddress: $0.accountAddress
             )
         }
-        self.request = request.map(Self.makeRequestSnapshot)
+        self.request = request.map { Self.makeRequestSnapshot($0, redactionLevel: redactionLevel) }
         self.submission = submission
     }
 
@@ -188,7 +190,71 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         }
     }
 
-    private static func makeRequestSnapshot(_ request: SignRequest) -> AuditRequestSnapshot {
+    private static func makeRequestSnapshot(
+        _ request: SignRequest,
+        redactionLevel: AuditRedactionLevel
+    ) -> AuditRequestSnapshot {
+        let rawSnapshot = makeRawRequestSnapshot(request)
+        return applyRedaction(rawSnapshot, level: redactionLevel)
+    }
+
+    // MARK: - Redaction
+
+    private static func applyRedaction(
+        _ snapshot: AuditRequestSnapshot,
+        level: AuditRedactionLevel
+    ) -> AuditRequestSnapshot {
+        switch level {
+        case .none:
+            return snapshot
+        case .redactPayloads:
+            let redactedDetails = snapshot.details.map { detail -> String in
+                // Redact lines that contain Ethereum addresses (0x + 40 hex chars) or
+                // numeric amounts (pure digit strings longer than 10 chars, e.g. wei).
+                if containsSensitiveData(detail) {
+                    return "[REDACTED]"
+                }
+                return detail
+            }
+            return AuditRequestSnapshot(
+                requestID: snapshot.requestID,
+                operationKind: snapshot.operationKind,
+                title: snapshot.title,
+                summary: snapshot.summary,
+                details: redactedDetails,
+                digestHex: snapshot.digestHex,
+                payloads: nil
+            )
+        case .redactAll:
+            return AuditRequestSnapshot(
+                requestID: snapshot.requestID,
+                operationKind: snapshot.operationKind,
+                title: snapshot.title,
+                summary: snapshot.summary,
+                details: ["[REDACTED]"],
+                digestHex: "[REDACTED]",
+                payloads: nil
+            )
+        }
+    }
+
+    /// Returns true if the string appears to contain an Ethereum address or large numeric amount.
+    private static func containsSensitiveData(_ string: String) -> Bool {
+        // Ethereum address: 0x followed by exactly 40 hex characters
+        if let range = string.range(of: "0x[0-9a-fA-F]{40}", options: .regularExpression) {
+            _ = range
+            return true
+        }
+        // Large numeric value (>10 digits, e.g. wei amounts)
+        if let _ = string.range(of: "\\b[0-9]{11,}\\b", options: .regularExpression) {
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Raw snapshot construction (no redaction)
+
+    private static func makeRawRequestSnapshot(_ request: SignRequest) -> AuditRequestSnapshot {
         let digestHex = "0x" + request.data.hex
 
         switch request.operation {
@@ -397,6 +463,27 @@ nonisolated struct AuditRequestRecord: Codable, Sendable, Identifiable {
     }
 }
 
+// MARK: - HMAC helpers (CommonCrypto)
+
+private nonisolated func hmacSHA256(key: Data, data: Data) -> Data {
+    var mac = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
+    mac.withUnsafeMutableBytes { macPtr in
+        key.withUnsafeBytes { keyPtr in
+            data.withUnsafeBytes { dataPtr in
+                CCHmac(
+                    CCHmacAlgorithm(kCCHmacAlgSHA256),
+                    keyPtr.baseAddress, key.count,
+                    dataPtr.baseAddress, data.count,
+                    macPtr.baseAddress
+                )
+            }
+        }
+    }
+    return mac
+}
+
+// MARK: - AuditLog
+
 nonisolated final class AuditLog: @unchecked Sendable {
     static let shared = AuditLog()
 
@@ -405,9 +492,32 @@ nonisolated final class AuditLog: @unchecked Sendable {
     // D-01: Drop records older than this to limit on-disk audit footprint.
     private nonisolated static let maxAgeSeconds: TimeInterval = 90 * 24 * 3600
 
+    // Keychain accounts for HMAC tamper evidence.
+    private nonisolated static let hmacKeyAccount = "auditlog.hmackey"
+    private nonisolated static let hmacMacAccount = "auditlog.mac"
+
     private let logURL: URL
     private let fileManager = FileManager.default
     private let queue = DispatchQueue(label: "com.bastion.auditlog")
+
+    /// The keychain backend used for HMAC key and MAC storage.
+    /// Defaults to the system keychain; can be injected for testing.
+    private let keychain: KeychainBackend
+
+    /// Whether the last load detected a HMAC mismatch (file may have been tampered with).
+    /// Written only from the serial queue; read from any thread.
+    private var _logTampered: Bool = false
+    var logTampered: Bool {
+        queue.sync { _logTampered }
+    }
+
+    /// Redaction level applied when building `AuditRequestSnapshot` values.
+    /// Set from config on startup and whenever config is updated.
+    var redactionLevel: AuditRedactionLevel {
+        get { queue.sync { _redactionLevel } }
+        set { queue.sync { _redactionLevel = newValue } }
+    }
+    private var _redactionLevel: AuditRedactionLevel = .none
 
     private init() {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -416,10 +526,12 @@ nonisolated final class AuditLog: @unchecked Sendable {
             try? fileManager.createDirectory(at: bastionDir, withIntermediateDirectories: true)
         }
         self.logURL = bastionDir.appendingPathComponent("audit.log")
+        self.keychain = SystemKeychainBackend()
     }
 
-    init(logURL: URL) {
+    init(logURL: URL, keychain: KeychainBackend = SystemKeychainBackend()) {
         self.logURL = logURL
+        self.keychain = keychain
     }
 
     nonisolated func record(_ event: AuditEvent) {
@@ -435,6 +547,29 @@ nonisolated final class AuditLog: @unchecked Sendable {
 
             saveRequestRecordsLocked(records)
         }
+    }
+
+    nonisolated func record(
+        type: AuditEvent.EventType,
+        dataPrefix: String,
+        reason: String? = nil,
+        approvalMode: AuditEvent.ApprovalMode? = nil,
+        request: SignRequest? = nil,
+        clientContext: ClientSigningContext? = nil,
+        submission: AuditSubmissionSnapshot? = nil
+    ) {
+        let level = queue.sync { _redactionLevel }
+        let event = AuditEvent(
+            type: type,
+            dataPrefix: dataPrefix,
+            reason: reason,
+            approvalMode: approvalMode,
+            request: request,
+            clientContext: clientContext,
+            submission: submission,
+            redactionLevel: level
+        )
+        record(event)
     }
 
     nonisolated func recentEvents(limit: Int) -> [AuditEvent] {
@@ -487,10 +622,43 @@ nonisolated final class AuditLog: @unchecked Sendable {
         }
     }
 
+    // MARK: - HMAC key management (called on queue)
+
+    private nonisolated func hmacKeyLocked() -> Data {
+        if let existing = keychain.read(account: Self.hmacKeyAccount) {
+            return existing
+        }
+        var fresh = Data(count: 32)
+        fresh.withUnsafeMutableBytes { ptr in
+            _ = SecRandomCopyBytes(kSecRandomDefault, 32, ptr.baseAddress!)
+        }
+        keychain.write(account: Self.hmacKeyAccount, data: fresh)
+        return fresh
+    }
+
+    // MARK: - Load / Save (called on queue)
+
     private nonisolated func loadRequestRecordsLocked() -> [AuditRequestRecord] {
         guard let data = try? Data(contentsOf: logURL), !data.isEmpty else {
+            // Fresh start — clear any stale MAC.
+            keychain.delete(account: Self.hmacMacAccount)
+            _logTampered = false
             return []
         }
+
+        // HMAC verification
+        let key = hmacKeyLocked()
+        let computedMAC = hmacSHA256(key: key, data: data)
+        if let storedMAC = keychain.read(account: Self.hmacMacAccount) {
+            if storedMAC != computedMAC {
+                NSLog("[AuditLog] WARNING: HMAC mismatch — audit log may have been tampered with")
+                _logTampered = true
+            } else {
+                _logTampered = false
+            }
+        }
+        // If no stored MAC yet (e.g. migrating from older version), accept data and store MAC now.
+        // _logTampered remains unchanged from its current value.
 
         let decoder = JSONDecoder()
         if let records = try? decoder.decode([AuditRequestRecord].self, from: data) {
@@ -578,5 +746,10 @@ nonisolated final class AuditLog: @unchecked Sendable {
             [.posixPermissions: 0o600],
             ofItemAtPath: logURL.path
         )
+
+        // Store HMAC-SHA256(key, data) so tamper detection works on next load.
+        let key = hmacKeyLocked()
+        let mac = hmacSHA256(key: key, data: data)
+        keychain.write(account: Self.hmacMacAccount, data: mac)
     }
 }

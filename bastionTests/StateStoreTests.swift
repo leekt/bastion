@@ -545,7 +545,7 @@ struct RuleEngineConfigTests {
         let loaded = engine.loadConfig()
         #expect(loaded.authPolicy == .biometricOrPasscode)
         #expect(loaded.clientProfiles.first?.authPolicy == .biometricOrPasscode)
-        #expect(loaded.version == 6)
+        #expect(loaded.version == 7)
     }
 
     @Test("P0.2: Version 6+ config with explicit open policy is not migrated")
@@ -559,7 +559,7 @@ struct RuleEngineConfigTests {
 
         let loaded = engine.loadConfig()
         #expect(loaded.authPolicy == .open)
-        #expect(loaded.version == 6)
+        #expect(loaded.version == 7)
     }
 
     @Test("Existing client profile overrides global defaults")
@@ -1121,5 +1121,100 @@ struct DataHexTests {
     func emptyHex() {
         let data = Data(hexString: "")
         #expect(data == Data())
+    }
+}
+
+// MARK: - RuleEngine Config Backup Tests
+
+@Suite("RuleEngine Config Backup")
+struct RuleEngineConfigBackupTests {
+
+    /// Raw v5 config JSON — simulates a config saved before schema version 7.
+    private static let v5ConfigJSON = """
+    {
+        "version": 5,
+        "authPolicy": "open",
+        "rules": {
+            "enabled": true, "requireExplicitApproval": false,
+            "rateLimits": [], "spendingLimits": [],
+            "rawMessagePolicy": {"enabled": true},
+            "typedDataPolicy": {"enabled": true, "requireExplicitApproval": false, "domainRules": [], "structRules": []}
+        },
+        "bundlerPreferences": {"chainRPCs": []},
+        "clientProfiles": []
+    }
+    """
+
+    @Test("Migration from v5 creates a backup")
+    func migrationCreatesBackup() {
+        let keychain = MockKeychainBackend()
+        keychain.write(account: "config", data: Self.v5ConfigJSON.data(using: .utf8)!)
+        let engine = RuleEngine(keychain: keychain)
+
+        _ = engine.loadConfig()
+
+        #expect(engine.hasConfigBackup() == true)
+    }
+
+    @Test("Second load does not overwrite existing backup")
+    func secondLoadDoesNotOverwriteBackup() throws {
+        let keychain = MockKeychainBackend()
+        keychain.write(account: "config", data: Self.v5ConfigJSON.data(using: .utf8)!)
+        let engine = RuleEngine(keychain: keychain)
+
+        // First load — creates the backup
+        _ = engine.loadConfig()
+        let backupAfterFirst = keychain.read(account: "config.premigration")
+
+        // Overwrite the main config slot with a different v5 payload
+        let v5AltJSON = """
+        {
+            "version": 5,
+            "authPolicy": "passcode",
+            "rules": {
+                "enabled": false, "requireExplicitApproval": false,
+                "rateLimits": [], "spendingLimits": [],
+                "rawMessagePolicy": {"enabled": true},
+                "typedDataPolicy": {"enabled": true, "requireExplicitApproval": false, "domainRules": [], "structRules": []}
+            },
+            "bundlerPreferences": {"chainRPCs": []},
+            "clientProfiles": []
+        }
+        """
+        keychain.write(account: "config", data: v5AltJSON.data(using: .utf8)!)
+
+        // Second load — backup must NOT be overwritten
+        _ = engine.loadConfig()
+        let backupAfterSecond = keychain.read(account: "config.premigration")
+
+        #expect(backupAfterFirst == backupAfterSecond)
+    }
+
+    @Test("restoreConfigBackup returns the pre-migration config")
+    func restoreConfigBackupReturnsPremigrationConfig() {
+        let keychain = MockKeychainBackend()
+        keychain.write(account: "config", data: Self.v5ConfigJSON.data(using: .utf8)!)
+        let engine = RuleEngine(keychain: keychain)
+
+        _ = engine.loadConfig()
+
+        let backup = engine.restoreConfigBackup()
+        #expect(backup != nil)
+        // Backup holds the original (unmodified) data — version and auth policy are from before migration
+        #expect(backup?.version == 5)
+        #expect(backup?.authPolicy == .open)
+    }
+
+    @Test("No backup is created when config is already at current version")
+    func noBackupForCurrentVersionConfig() throws {
+        let keychain = MockKeychainBackend()
+        let engine = RuleEngine(keychain: keychain)
+
+        // Save a fully-current config (version 7)
+        try engine.saveConfig(.default)
+
+        _ = engine.loadConfig()
+
+        #expect(engine.hasConfigBackup() == false)
     }
 }

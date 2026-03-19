@@ -467,12 +467,26 @@ nonisolated enum AuthPolicy: String, Codable, CaseIterable, Sendable {
     }
 }
 
+// MARK: - Audit Redaction
+
+/// Controls how sensitive fields are redacted in the on-disk audit log.
+nonisolated enum AuditRedactionLevel: String, Codable, CaseIterable, Sendable {
+    /// No redaction — full fidelity (default).
+    case none
+    /// Payloads (raw message text, typed-data JSON, UserOp JSON) are removed.
+    /// Detail strings containing addresses or amounts are replaced with "[REDACTED]".
+    case redactPayloads
+    /// Payloads, all detail strings, and the digest hex are replaced with "[REDACTED]".
+    case redactAll
+}
+
 nonisolated struct BastionConfig: Codable, Sendable {
     var version: Int = 7
     var authPolicy: AuthPolicy
     var rules: RuleConfig
     var bundlerPreferences: BundlerPreferences
     var clientProfiles: [ClientProfile]
+    var auditRedactionLevel: AuditRedactionLevel
 
     // M-04: Default to biometricOrPasscode for production safety.
     // Prevents new installs from running with no auth.
@@ -480,7 +494,8 @@ nonisolated struct BastionConfig: Codable, Sendable {
         authPolicy: .biometricOrPasscode,
         rules: .default,
         bundlerPreferences: .default,
-        clientProfiles: []
+        clientProfiles: [],
+        auditRedactionLevel: .none
     )
 
     init(
@@ -488,13 +503,15 @@ nonisolated struct BastionConfig: Codable, Sendable {
         authPolicy: AuthPolicy,
         rules: RuleConfig,
         bundlerPreferences: BundlerPreferences = .default,
-        clientProfiles: [ClientProfile] = []
+        clientProfiles: [ClientProfile] = [],
+        auditRedactionLevel: AuditRedactionLevel = .none
     ) {
         self.version = version
         self.authPolicy = authPolicy
         self.rules = rules
         self.bundlerPreferences = bundlerPreferences
         self.clientProfiles = clientProfiles
+        self.auditRedactionLevel = auditRedactionLevel
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -503,6 +520,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
         case rules
         case bundlerPreferences
         case clientProfiles
+        case auditRedactionLevel
     }
 
     init(from decoder: Decoder) throws {
@@ -512,6 +530,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
         rules = try container.decodeIfPresent(RuleConfig.self, forKey: .rules) ?? .default
         bundlerPreferences = try container.decodeIfPresent(BundlerPreferences.self, forKey: .bundlerPreferences) ?? .default
         clientProfiles = try container.decodeIfPresent([ClientProfile].self, forKey: .clientProfiles) ?? []
+        auditRedactionLevel = try container.decodeIfPresent(AuditRedactionLevel.self, forKey: .auditRedactionLevel) ?? .none
     }
 
     func encode(to encoder: Encoder) throws {
@@ -521,6 +540,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
         try container.encode(rules, forKey: .rules)
         try container.encode(bundlerPreferences, forKey: .bundlerPreferences)
         try container.encode(clientProfiles, forKey: .clientProfiles)
+        try container.encode(auditRedactionLevel, forKey: .auditRedactionLevel)
     }
 }
 

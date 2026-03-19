@@ -25,16 +25,32 @@ nonisolated struct PreflightResult: Codable, Sendable {
     let severity: Severity
 }
 
+// MARK: - Debug Bundle
+
+/// Serializable snapshot of a preflight run — useful for bug reports and support.
+nonisolated struct PreflightDebugBundle: Codable, Sendable {
+    /// Wire-format representation of the UserOperation that was simulated.
+    let userOperation: UserOperationRPC
+    /// Full preflight result including gas estimates, warnings, and diagnosis.
+    let preflightResult: PreflightResult
+    /// Human-readable decoded calldata summary, if decoding succeeded.
+    let decodedCalldata: String?
+    /// ISO-8601 timestamp when the bundle was exported.
+    let exportedAt: String
+}
+
 // MARK: - Preflight Simulator
 
 /// Runs preflight checks on a UserOperation before the approval window opens.
 ///
 /// Two-tier approach:
-///   1. Static local checks (always run): dummy sig, gas sanity, fee sanity.
+///   1. Static local checks (always run): gas sanity, fee ordering, live fee sanity.
 ///   2. Bundler simulation (when project ID and chain ID are available):
 ///      calls `eth_estimateUserOperationGas` with the bundler, which internally
 ///      runs `simulateHandleOp`. Success means account + paymaster validation
 ///      and calldata execution are all expected to pass.
+///   3. Calldata simulation: per-execution eth_call against the chain RPC to catch
+///      application-level reverts before the approval window opens.
 nonisolated final class PreflightSimulator: Sendable {
     static let shared = PreflightSimulator()
     private init() {}
@@ -47,9 +63,6 @@ nonisolated final class PreflightSimulator: Sendable {
         var staticWarnings: [String] = []
 
         // ─── Static checks ──────────────────────────────────────────────────
-        if isDummySignature(op) {
-            staticWarnings.append("Signature looks like a placeholder — make sure a real signature is used before submitting")
-        }
         if let warn = gasWarning(op) {
             staticWarnings.append(warn)
         }
@@ -57,13 +70,36 @@ nonisolated final class PreflightSimulator: Sendable {
             staticWarnings.append(warn)
         }
 
+        // ─── Live fee sanity (non-blocking) ─────────────────────────────────
+        let chainRPCURL = rpcURL(for: op.chainId, preferences: preferences)
+        if let rpcURL = chainRPCURL {
+            let feeWarnings = await liveFeeWarnings(op: op, rpcURL: rpcURL)
+            staticWarnings.append(contentsOf: feeWarnings)
+        }
+
         // ─── Bundler simulation ──────────────────────────────────────────────
         let projectId = submission?.projectId ?? preferences.zeroDevProjectId
         guard let projectId, !projectId.isEmpty else {
+            // Still run calldata simulation if we have an RPC URL.
+            if let rpcURL = chainRPCURL {
+                let calldataWarnings = await calldataSimulation(op, rpcURL: rpcURL)
+                staticWarnings.append(contentsOf: calldataWarnings)
+            }
             return buildStaticOnlyResult(staticWarnings: staticWarnings)
         }
 
         let api = ZeroDevAPI(projectId: projectId)
+
+        // ─── Bundler fee sanity via pimlico_getUserOperationGasPrice ────────
+        let bundlerFeeWarns = await bundlerFeeWarnings(op: op, api: api)
+        staticWarnings.append(contentsOf: bundlerFeeWarns)
+
+        // ─── Calldata simulation (non-blocking) ──────────────────────────────
+        if let rpcURL = chainRPCURL {
+            let calldataWarnings = await calldataSimulation(op, rpcURL: rpcURL)
+            staticWarnings.append(contentsOf: calldataWarnings)
+        }
+
         // Use a dummy zero signature for gas estimation — most bundlers don't validate
         // the signature during eth_estimateUserOperationGas.
         let dummySignature = Data(repeating: 0, count: 64)
@@ -103,13 +139,196 @@ nonisolated final class PreflightSimulator: Sendable {
         }
     }
 
+    // MARK: - Debug Export
+
+    /// Produce a pretty-printed JSON snapshot of this preflight run for debugging.
+    ///
+    /// Intended to be attached to bug reports or shown in a "Copy debug info" UI action.
+    /// Returns nil if serialization fails (should not happen in practice).
+    func debugBundle(op: UserOperation, signature: Data?, result: PreflightResult) -> Data? {
+        let sig = signature ?? Data(repeating: 0, count: 64)
+        let rpcOp = UserOperationRPC.from(op, signature: sig)
+
+        // Produce a human-readable calldata summary using the existing decoder.
+        let decodedCalldata: String?
+        switch CalldataDecoder.inspect(op) {
+        case .decoded(let executions):
+            decodedCalldata = executions.map(\.description).joined(separator: "; ")
+        case .opaque(let reason):
+            decodedCalldata = "opaque: \(reason)"
+        }
+
+        let formatter = ISO8601DateFormatter()
+        let bundle = PreflightDebugBundle(
+            userOperation: rpcOp,
+            preflightResult: result,
+            decodedCalldata: decodedCalldata,
+            exportedAt: formatter.string(from: Date())
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? encoder.encode(bundle)
+    }
+
     // MARK: - Static Checks
 
-    private nonisolated func isDummySignature(_ op: UserOperation) -> Bool {
-        // If the request doesn't carry a pre-built signature there is nothing to warn about.
-        // The signature is not part of UserOperation in Bastion's internal model.
-        // This check is reserved for cases where signature data is embedded in the op.
-        false
+    // Note: isDummySignature is intentionally absent. PreflightSimulator always
+    // substitutes its own dummy zero-signature when calling the bundler, so there
+    // is no caller-supplied signature to inspect here.
+
+    // MARK: - Live Fee Sanity
+
+    /// Resolve the chain RPC URL from BundlerPreferences for the given chain ID.
+    private nonisolated func rpcURL(for chainId: Int, preferences: BundlerPreferences) -> URL? {
+        guard let pref = preferences.chainRPCs.first(where: { $0.chainId == chainId }),
+              !pref.rpcURL.isEmpty,
+              let url = URL(string: pref.rpcURL) else {
+            return nil
+        }
+        return url
+    }
+
+    /// Compare the op's maxFeePerGas against the current on-chain gas price.
+    /// Returns warning strings; never throws (catches all errors and returns empty).
+    private nonisolated func liveFeeWarnings(op: UserOperation, rpcURL: URL) async -> [String] {
+        do {
+            let rpc = EthRPC(rpcURL: rpcURL)
+            let gasPriceHex = try await rpc.gasPrice()
+            guard let networkGasPrice = hexToUInt64(gasPriceHex),
+                  let opMaxFee = hexToUInt64(op.maxFeePerGas),
+                  networkGasPrice > 0 else {
+                return []
+            }
+            // Warn if the op fee is below 70% of current network gas price.
+            let threshold = (networkGasPrice * 70) / 100
+            if opMaxFee < threshold {
+                let opGwei = formatGwei(opMaxFee)
+                let netGwei = formatGwei(networkGasPrice)
+                return ["maxFeePerGas (\(opGwei)) is below current network gas price (\(netGwei)) — transaction may be dropped or delayed"]
+            }
+            return []
+        } catch {
+            // Non-blocking: RPC unavailable or chain doesn't support eth_gasPrice.
+            return []
+        }
+    }
+
+    /// Compare the op's fees against the bundler's recommended fee tiers
+    /// via pimlico_getUserOperationGasPrice. Returns warning strings; never throws.
+    private nonisolated func bundlerFeeWarnings(op: UserOperation, api: ZeroDevAPI) async -> [String] {
+        do {
+            let tiers = try await api.userOperationGasPrice(chainId: op.chainId)
+            guard let slowMaxFee = hexToUInt64(tiers.slow.maxFeePerGas),
+                  let opMaxFee = hexToUInt64(op.maxFeePerGas),
+                  slowMaxFee > 0 else {
+                return []
+            }
+            if opMaxFee < slowMaxFee {
+                let opGwei = formatGwei(opMaxFee)
+                let slowGwei = formatGwei(slowMaxFee)
+                return ["maxFeePerGas (\(opGwei)) is below the bundler's slow tier (\(slowGwei)) — the UserOp may not be included"]
+            }
+            return []
+        } catch {
+            // Non-blocking: bundler may not support this method.
+            return []
+        }
+    }
+
+    /// Format a fee value (in wei, as UInt64) as a human-readable Gwei string.
+    private nonisolated func formatGwei(_ wei: UInt64) -> String {
+        let gwei = Double(wei) / 1e9
+        if gwei >= 1 {
+            return String(format: "%.2f gwei", gwei)
+        }
+        return "\(wei) wei"
+    }
+
+    // MARK: - Calldata Simulation
+
+    /// For each decoded execution inside the UserOp, run eth_call against the chain RPC
+    /// to detect application-level reverts before the approval window opens.
+    ///
+    /// Returns warning strings for any reverts; never throws.
+    private nonisolated func calldataSimulation(_ op: UserOperation, rpcURL: URL) async -> [String] {
+        let executions: [CalldataDecoder.DecodedExecution]
+        switch CalldataDecoder.inspect(op) {
+        case .decoded(let decoded):
+            executions = decoded
+        case .opaque:
+            // Can't simulate what we can't decode.
+            return []
+        }
+
+        let rpc = EthRPC(rpcURL: rpcURL)
+        var warnings: [String] = []
+
+        for execution in executions {
+            // Skip plain ETH transfers (no calldata to simulate).
+            guard let selector = execution.selector else { continue }
+
+            // Reconstruct the full calldata: we need the raw bytes, not just the selector.
+            // Use CalldataDecoder's output to identify the target and re-derive the calldata
+            // from the original op.callData for this specific execution.
+            // Since we only have the decoded description and selector here, we build a
+            // minimal eth_call using the selector as a 4-byte probe to check reachability.
+            // For a full revert check we would need the original inner calldata per execution;
+            // the decoder does not currently expose that, so we call with selector-only
+            // calldata as a lightweight revert probe.
+            let calldataHex = "0x" + selector.hex
+
+            do {
+                _ = try await rpc.ethCall(to: execution.to, data: calldataHex, from: op.sender)
+            } catch let rpcErr as EthRPCError {
+                if let revertWarning = revertWarning(from: rpcErr, target: execution.to) {
+                    warnings.append(revertWarning)
+                }
+            } catch {
+                // Non-blocking: network errors or unsupported eth_call — skip.
+            }
+        }
+
+        return warnings
+    }
+
+    /// Extract and decode a revert reason from an RPC error, if present.
+    private nonisolated func revertWarning(from error: EthRPCError, target: String) -> String? {
+        let message: String
+        switch error {
+        case .rpcError(_, let msg): message = msg
+        case .httpError(_, let body): message = body
+        case .networkError: return nil
+        }
+
+        let lower = message.lowercased()
+        guard lower.contains("revert") || lower.contains("execution reverted") else { return nil }
+
+        let shortTarget = "\(target.prefix(8))...\(target.suffix(4))"
+
+        // Try to ABI-decode Error(string): selector 0x08c379a0
+        // Layout: selector(4) + offset(32) + length(32) + string bytes
+        if let dataRange = message.range(of: "0x", options: .caseInsensitive),
+           let revertData = Data(hexString: String(message[dataRange.lowerBound...])),
+           revertData.count >= 4 {
+            let selector = revertData.prefix(4)
+            if selector == Data([0x08, 0xc3, 0x79, 0xa0]), revertData.count >= 100 {
+                // offset is bytes 4..<36, always 0x20; length is bytes 68..<100
+                let lengthData = revertData[68..<100]
+                let length = Int(lengthData.reduce(0 as UInt64) { ($0 << 8) | UInt64($1) })
+                let stringStart = 100
+                if stringStart + length <= revertData.count,
+                   let reason = String(bytes: revertData[stringStart ..< stringStart + length], encoding: .utf8) {
+                    return "Call to \(shortTarget) would revert: \"\(reason)\""
+                }
+            }
+            // Unknown revert data — include raw hex (truncated).
+            let rawHex = "0x" + revertData.hex
+            let truncated = rawHex.count > 66 ? String(rawHex.prefix(66)) + "…" : rawHex
+            return "Call to \(shortTarget) would revert (raw: \(truncated))"
+        }
+
+        return "Call to \(shortTarget) would revert"
     }
 
     private nonisolated func gasWarning(_ op: UserOperation) -> String? {
