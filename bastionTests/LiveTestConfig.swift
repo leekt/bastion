@@ -4,6 +4,7 @@ struct LiveTestConfig {
     let projectId: String
     let sepoliaRPCURL: String
     let baseSepoliaRPCURL: String?
+    let arbSepoliaRPCURL: String?
 
     static var current: LiveTestConfig? {
         let env = resolvedEnvironment()
@@ -19,10 +20,12 @@ struct LiveTestConfig {
             return nil
         }
         let baseSepoliaRPCURL = env["BASTION_BASE_SEPOLIA_RPC_URL"]
+        let arbSepoliaRPCURL = env["BASTION_ARB_SEPOLIA_RPC_URL"]
         return LiveTestConfig(
             projectId: projectId,
             sepoliaRPCURL: sepoliaRPCURL,
-            baseSepoliaRPCURL: baseSepoliaRPCURL?.isEmpty == false ? baseSepoliaRPCURL : nil
+            baseSepoliaRPCURL: baseSepoliaRPCURL?.isEmpty == false ? baseSepoliaRPCURL : nil,
+            arbSepoliaRPCURL: arbSepoliaRPCURL?.isEmpty == false ? arbSepoliaRPCURL : nil
         )
     }
 

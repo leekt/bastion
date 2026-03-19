@@ -1093,37 +1093,14 @@ struct P256ZeroDevIntegrationTests {
     }
 }
 
-// MARK: - Base Sepolia E2E (P256Validator deployed at 0x9906AB44fF795883C5a725687A2705BE4118B0f3)
+// MARK: - Multi-chain P256 E2E Helper
 
-@Suite("P256 Base Sepolia E2E", .tags(.integration), .serialized)
-struct P256BaseSepoliaIntegrationTests {
+enum P256E2EHelper {
 
-    static let chainId = 84532 // Base Sepolia
-    static let diagFile = "/tmp/bastion_p256_base_sepolia.txt"
-
-    private static func resetLog() {
-        try? FileManager.default.removeItem(atPath: diagFile)
-        FileManager.default.createFile(atPath: diagFile, contents: nil)
-    }
-
-    private static func log(_ msg: String) {
-        let data = (msg + "\n").data(using: .utf8)!
-        if let handle = FileHandle(forWritingAtPath: diagFile) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        } else {
-            FileManager.default.createFile(atPath: diagFile, contents: data)
-        }
-    }
-
-    private static func applying(_ sponsor: SponsorResult, to op: UserOperation) -> UserOperation {
+    static func applying(_ sponsor: SponsorResult, to op: UserOperation) -> UserOperation {
         UserOperation(
-            sender: op.sender,
-            nonce: op.nonce,
-            callData: op.callData,
-            factory: op.factory,
-            factoryData: op.factoryData,
+            sender: op.sender, nonce: op.nonce, callData: op.callData,
+            factory: op.factory, factoryData: op.factoryData,
             verificationGasLimit: sponsor.verificationGasLimit ?? op.verificationGasLimit,
             callGasLimit: sponsor.callGasLimit ?? op.callGasLimit,
             preVerificationGas: sponsor.preVerificationGas ?? op.preVerificationGas,
@@ -1133,229 +1110,164 @@ struct P256BaseSepoliaIntegrationTests {
             paymasterVerificationGasLimit: sponsor.paymasterVerificationGasLimit,
             paymasterPostOpGasLimit: sponsor.paymasterPostOpGasLimit,
             paymasterData: sponsor.paymasterData.flatMap { Data(hexString: $0) },
-            chainId: op.chainId,
-            entryPoint: op.entryPoint,
-            entryPointVersion: op.entryPointVersion
+            chainId: op.chainId, entryPoint: op.entryPoint, entryPointVersion: op.entryPointVersion
         )
     }
 
-    private static func applying(
-        maxPriorityFeePerGas: String,
-        maxFeePerGas: String,
-        to op: UserOperation
-    ) -> UserOperation {
+    static func applying(fees bundlerGasPrice: UserOperationGasPriceTier, to op: UserOperation) -> UserOperation {
         UserOperation(
-            sender: op.sender,
-            nonce: op.nonce,
-            callData: op.callData,
-            factory: op.factory,
-            factoryData: op.factoryData,
+            sender: op.sender, nonce: op.nonce, callData: op.callData,
+            factory: op.factory, factoryData: op.factoryData,
             verificationGasLimit: op.verificationGasLimit,
-            callGasLimit: op.callGasLimit,
-            preVerificationGas: op.preVerificationGas,
-            maxPriorityFeePerGas: maxPriorityFeePerGas,
-            maxFeePerGas: maxFeePerGas,
+            callGasLimit: op.callGasLimit, preVerificationGas: op.preVerificationGas,
+            maxPriorityFeePerGas: bundlerGasPrice.maxPriorityFeePerGas,
+            maxFeePerGas: bundlerGasPrice.maxFeePerGas,
             paymaster: op.paymaster,
             paymasterVerificationGasLimit: op.paymasterVerificationGasLimit,
             paymasterPostOpGasLimit: op.paymasterPostOpGasLimit,
             paymasterData: op.paymasterData,
-            chainId: op.chainId,
-            entryPoint: op.entryPoint,
-            entryPointVersion: op.entryPointVersion
+            chainId: op.chainId, entryPoint: op.entryPoint, entryPointVersion: op.entryPointVersion
         )
     }
 
-    @Test func p256ValidatorHasCode() async throws {
-        guard let config = LiveTestConfig.current,
-              let rpcURL = config.baseSepoliaRPCURL else { return }
-        let rpc = EthRPC(rpcURLString: rpcURL)
-        let code = try await rpc.getCode(address: ValidatorAddress.p256Validator)
-        #expect(code.count > 2, "P256Validator not deployed on Base Sepolia")
-        print("P256Validator code length on Base Sepolia: \(code.count) chars")
-    }
-
-    @Test func resolveCounterfactualAddress() async throws {
-        guard let config = LiveTestConfig.current,
-              let rpcURL = config.baseSepoliaRPCURL else { return }
-        let rpc = EthRPC(rpcURLString: rpcURL)
-        let (privKey, pubX, pubY) = try P256TestHelper.createKeyPair()
-        let validator = P256Validator(
-            validatorAddress: ValidatorAddress.p256Validator,
-            publicKeyX: pubX,
-            publicKeyY: pubY,
-            sign: { hash in try P256TestHelper.signDigest(hash: hash, privateKey: privKey) }
-        )
-        let account = SmartAccount(validator: validator)
-        let address = try await account.resolveAddress(using: rpc)
-        #expect(address.hasPrefix("0x"))
-        #expect(address.count == 42)
-        print("P256 Base Sepolia counterfactual address: \(address)")
-    }
-
-    @Test func fullP256UserOpFlowBaseSepolia() async throws {
-        guard let config = LiveTestConfig.current,
-              let rpcURL = config.baseSepoliaRPCURL else { return }
+    static func runFullE2E(
+        chainId: Int,
+        chainName: String,
+        rpcURL: String,
+        projectId: String
+    ) async throws {
         let publicRPC = EthRPC(rpcURLString: rpcURL)
-        let bundler = ZeroDevAPI(projectId: config.projectId)
-        Self.resetLog()
-        var finalTraceCommand: String?
-        defer {
-            Self.log(finalTraceCommand ?? "cast call --trace unavailable")
-            if let path = Self.diagFile as String? {
-                print("Diagnostic log: \(path)")
-            }
-        }
+        let bundler = ZeroDevAPI(projectId: projectId)
 
         let (privKey, pubX, pubY) = try P256TestHelper.createKeyPair()
-        Self.log("pubX: 0x\(pubX.hex)")
-        Self.log("pubY: 0x\(pubY.hex)")
-
         let validator = P256Validator(
             validatorAddress: ValidatorAddress.p256Validator,
-            publicKeyX: pubX,
-            publicKeyY: pubY,
+            publicKeyX: pubX, publicKeyY: pubY,
             sign: { hash in try P256TestHelper.signDigest(hash: hash, privateKey: privKey) }
         )
         let account = SmartAccount(validator: validator)
         let sender = try await account.resolveAddress(using: publicRPC)
-        Self.log("P256 Base Sepolia sender: \(sender)")
+        print("[\(chainName)] sender: \(sender)")
 
-        // No-op: send 0 ETH to self
         let callData = KernelEncoding.executeCalldata(
             single: KernelEncoding.Execution(to: sender, value: 0, data: Data())
         )
-
         let nonce = try await publicRPC.getNonce(
-            sender: sender,
-            key: account.nonceKeyUInt192,
-            entryPoint: EntryPointAddress.v0_7
+            sender: sender, key: account.nonceKeyUInt192, entryPoint: EntryPointAddress.v0_7
         )
         let deployed = try await account.isDeployed(using: publicRPC)
-        let estimatedFees = try await publicRPC.estimateUserOperationFeesPerGas()
-        Self.log("Account deployed: \(deployed)")
-        Self.log("Estimated fees: priority=\(estimatedFees.maxPriorityFeePerGas) max=\(estimatedFees.maxFeePerGas)")
+        let fees = try await publicRPC.estimateUserOperationFeesPerGas()
+        print("[\(chainName)] deployed: \(deployed), fees: \(fees.maxFeePerGas)")
 
         var op = UserOperation(
-            sender: sender,
-            nonce: nonce,
-            callData: callData,
+            sender: sender, nonce: nonce, callData: callData,
             factory: deployed ? nil : KernelAddress.metaFactory,
             factoryData: deployed ? nil : account.factoryData,
-            verificationGasLimit: "0x0",
-            callGasLimit: "0x0",
-            preVerificationGas: "0x0",
-            maxPriorityFeePerGas: estimatedFees.maxPriorityFeePerGas,
-            maxFeePerGas: estimatedFees.maxFeePerGas,
-            paymaster: nil,
-            paymasterVerificationGasLimit: nil,
-            paymasterPostOpGasLimit: nil,
-            paymasterData: nil,
-            chainId: Self.chainId,
-            entryPoint: EntryPointAddress.v0_7,
-            entryPointVersion: .v0_7
+            verificationGasLimit: "0x0", callGasLimit: "0x0", preVerificationGas: "0x0",
+            maxPriorityFeePerGas: fees.maxPriorityFeePerGas, maxFeePerGas: fees.maxFeePerGas,
+            chainId: chainId, entryPoint: EntryPointAddress.v0_7, entryPointVersion: .v0_7
         )
 
-        // 1. Sponsor
-        let dummySig = validator.dummySignature
-        Self.log("Step 1: Sponsoring on Base Sepolia...")
+        // Sponsor
         let sponsor = try await bundler.sponsorUserOperation(
-            UserOperationRPC.from(op, signature: dummySig),
-            entryPoint: EntryPointAddress.v0_7,
-            chainId: Self.chainId
+            UserOperationRPC.from(op, signature: validator.dummySignature),
+            entryPoint: EntryPointAddress.v0_7, chainId: chainId
         )
-        Self.log("Sponsored! paymaster: \(sponsor.paymaster ?? "nil")")
+        op = applying(sponsor, to: op)
+        print("[\(chainName)] sponsored, paymaster: \(sponsor.paymaster ?? "nil")")
 
-        // 2. Apply sponsor data
-        op = Self.applying(sponsor, to: op)
-
-        // 3. Sign
-        Self.log("Step 2: Signing...")
-        let localHash = EthHashing.userOperationHash(op)
-        Self.log("Local UserOp hash: 0x\(localHash.hex)")
-
+        // Sign + verify precompile
         var signature = try account.signUserOperation(op)
         #expect(signature.count == 64)
-        Self.log("Signature: 0x\(signature.hex)")
-
         let s = Data(signature.suffix(32))
         #expect(P256Curve.compareBigEndian(s, P256Curve.halfN) <= 0, "s not normalized")
 
-        // Verify against P256 precompile
-        let verifyCalldata = "0x" + (
-            localHash
-            + Data(signature.prefix(32))
-            + Data(signature.suffix(32))
-            + pubX
-            + pubY
-        ).hex
+        let localHash = EthHashing.userOperationHash(op)
+        let verifyCalldata = "0x" + (localHash + Data(signature.prefix(32)) + Data(signature.suffix(32)) + pubX + pubY).hex
         let precompileResult = try await publicRPC.ethCall(
-            to: "0x0000000000000000000000000000000000000100",
-            data: verifyCalldata
+            to: "0x0000000000000000000000000000000000000100", data: verifyCalldata
         )
-        Self.log("P256 precompile result: \(precompileResult)")
-        #expect(precompileResult.hasSuffix("1"), "P256 precompile verification failed")
+        #expect(precompileResult.hasSuffix("1"), "[\(chainName)] P256 precompile verification failed")
 
-        // 4. Send
-        Self.log("Step 3: Sending to bundler...")
-        finalTraceCommand = "cast call --trace --rpc-url \(rpcURL) --from 0x0000000071727De22E5E9d8BAf0edAc6f37da032 ..."
+        // Send (with fee retry)
         let userOpHash: String
         do {
             userOpHash = try await bundler.sendUserOperation(
                 UserOperationRPC.from(op, signature: signature),
-                entryPoint: EntryPointAddress.v0_7,
-                chainId: Self.chainId
+                entryPoint: EntryPointAddress.v0_7, chainId: chainId
             )
-            Self.log("UserOp sent! Hash: \(userOpHash)")
-            #expect(userOpHash.hasPrefix("0x"))
         } catch {
-            Self.log("sendUserOperation FAILED: \(error)")
-            // Retry with bundler gas price
-            Self.log("Retrying with bundler gas price...")
-            let bundlerGasPrice = try await bundler.userOperationGasPrice(chainId: Self.chainId)
-            op = Self.applying(
-                maxPriorityFeePerGas: bundlerGasPrice.standard.maxPriorityFeePerGas,
-                maxFeePerGas: bundlerGasPrice.standard.maxFeePerGas,
-                to: op
-            )
+            print("[\(chainName)] send failed, retrying with bundler gas price...")
+            let gasPrice = try await bundler.userOperationGasPrice(chainId: chainId)
+            op = applying(fees: gasPrice.standard, to: op)
             let retrySponsor = try await bundler.sponsorUserOperation(
                 UserOperationRPC.from(op, signature: validator.dummySignature),
-                entryPoint: EntryPointAddress.v0_7,
-                chainId: Self.chainId
+                entryPoint: EntryPointAddress.v0_7, chainId: chainId
             )
-            op = Self.applying(retrySponsor, to: op)
+            op = applying(retrySponsor, to: op)
             signature = try account.signUserOperation(op)
             userOpHash = try await bundler.sendUserOperation(
                 UserOperationRPC.from(op, signature: signature),
-                entryPoint: EntryPointAddress.v0_7,
-                chainId: Self.chainId
+                entryPoint: EntryPointAddress.v0_7, chainId: chainId
             )
-            Self.log("UserOp sent after retry! Hash: \(userOpHash)")
         }
+        print("[\(chainName)] sent! hash: \(userOpHash)")
 
-        // 5. Poll for receipt
+        // Poll receipt
         var receipt: UserOperationReceipt?
         for attempt in 1...12 {
             try await Task.sleep(nanoseconds: 5_000_000_000)
-            receipt = try await bundler.getUserOperationReceipt(
-                userOpHash: userOpHash,
-                chainId: Self.chainId
-            )
-            if receipt != nil {
-                Self.log("UserOp confirmed after \(attempt * 5)s")
-                break
-            }
-            Self.log("  waiting... attempt \(attempt)/12")
+            receipt = try await bundler.getUserOperationReceipt(userOpHash: userOpHash, chainId: chainId)
+            if receipt != nil { break }
+            print("[\(chainName)] waiting... \(attempt)/12")
         }
 
         if let receipt {
-            Self.log("Receipt: success=\(receipt.success) tx=\(receipt.receipt?.transactionHash ?? "nil")")
-            print("Base Sepolia P256 UserOp receipt:")
-            print("  success: \(receipt.success)")
-            print("  txHash: \(receipt.receipt?.transactionHash ?? "nil")")
-            #expect(receipt.success, "UserOp execution failed on-chain")
+            print("[\(chainName)] confirmed! success=\(receipt.success) tx=\(receipt.receipt?.transactionHash ?? "nil")")
+            #expect(receipt.success, "[\(chainName)] UserOp execution failed on-chain")
         } else {
-            Self.log("UserOp not confirmed within 60s")
-            print("Base Sepolia P256 UserOp not confirmed within 60s (may still be pending)")
+            print("[\(chainName)] not confirmed within 60s (may still be pending)")
         }
+    }
+}
+
+// MARK: - Base Sepolia E2E
+
+@Suite("P256 Base Sepolia E2E", .tags(.integration), .serialized)
+struct P256BaseSepoliaE2ETests {
+    @Test func fullFlow() async throws {
+        guard let config = LiveTestConfig.current,
+              let rpcURL = config.baseSepoliaRPCURL else { return }
+        try await P256E2EHelper.runFullE2E(
+            chainId: 84532, chainName: "Base Sepolia",
+            rpcURL: rpcURL, projectId: config.projectId
+        )
+    }
+}
+
+// MARK: - Arbitrum Sepolia E2E
+
+@Suite("P256 Arbitrum Sepolia E2E", .tags(.integration), .serialized)
+struct P256ArbSepoliaE2ETests {
+    @Test func fullFlow() async throws {
+        guard let config = LiveTestConfig.current,
+              let rpcURL = config.arbSepoliaRPCURL else { return }
+        try await P256E2EHelper.runFullE2E(
+            chainId: 421614, chainName: "Arb Sepolia",
+            rpcURL: rpcURL, projectId: config.projectId
+        )
+    }
+}
+
+// MARK: - Sepolia E2E
+
+@Suite("P256 Sepolia E2E", .tags(.integration), .serialized)
+struct P256SepoliaE2ETests {
+    @Test func fullFlow() async throws {
+        guard let config = LiveTestConfig.current else { return }
+        try await P256E2EHelper.runFullE2E(
+            chainId: 11155111, chainName: "Sepolia",
+            rpcURL: config.sepoliaRPCURL, projectId: config.projectId
+        )
     }
 }
