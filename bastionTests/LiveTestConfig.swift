@@ -3,6 +3,7 @@ import Foundation
 struct LiveTestConfig {
     let projectId: String
     let sepoliaRPCURL: String
+    let baseSepoliaRPCURL: String?
 
     static var current: LiveTestConfig? {
         let env = resolvedEnvironment()
@@ -17,7 +18,12 @@ struct LiveTestConfig {
         else {
             return nil
         }
-        return LiveTestConfig(projectId: projectId, sepoliaRPCURL: sepoliaRPCURL)
+        let baseSepoliaRPCURL = env["BASTION_BASE_SEPOLIA_RPC_URL"]
+        return LiveTestConfig(
+            projectId: projectId,
+            sepoliaRPCURL: sepoliaRPCURL,
+            baseSepoliaRPCURL: baseSepoliaRPCURL?.isEmpty == false ? baseSepoliaRPCURL : nil
+        )
     }
 
     private static func resolvedEnvironment() -> [String: String] {
