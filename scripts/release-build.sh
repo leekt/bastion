@@ -20,6 +20,7 @@ xcodebuild \
   ENABLE_USER_SCRIPT_SANDBOXING=NO \
   ENABLE_DEBUG_DYLIB=NO \
   ENABLE_PREVIEWS=NO \
+  "CODE_SIGN_IDENTITY=Developer ID Application" \
   build
 
 if [ ! -d "${BUILD_APP_PATH}" ]; then
