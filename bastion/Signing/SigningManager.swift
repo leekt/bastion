@@ -79,19 +79,8 @@ final class SigningManager {
             clientProfiles: ruleEngine.config.clientProfiles
         )
 
-        // 1. Check all rules — determine if master key (biometric) is needed
-        var requiresMasterKey = false
-        var violations: [String] = []
-        var approvalMode: AuditEvent.ApprovalMode = .auto
-
-        let validation = ruleEngine.validate(request, config: effectiveConfig)
-        if case .denied(let reasons) = validation {
-            requiresMasterKey = true
-            violations.append(contentsOf: reasons)
-        }
-
-        // 1b. Run preflight simulation for UserOperation requests.
-        // Runs concurrently with rule validation result; does not block signing if it fails.
+        // 1. Run preflight simulation for UserOperation requests BEFORE rule validation.
+        // Trace data from the simulation is used to enhance spending limit and target checks.
         var preflightResult: PreflightResult? = nil
         if case .userOperation(let op) = request.operation {
             preflightResult = await preflightSimulator.simulate(
@@ -106,6 +95,24 @@ final class SigningManager {
                 request: request,
                 clientContext: clientContext
             ))
+        }
+
+        // 2. Check all rules — determine if master key (biometric) is needed.
+        // Pass trace analysis from preflight so validation can use simulation data
+        // for more accurate spending limit and target checks.
+        var requiresMasterKey = false
+        var violations: [String] = []
+        var approvalMode: AuditEvent.ApprovalMode = .auto
+
+        let validation = ruleEngine.validate(
+            request,
+            config: effectiveConfig,
+            traceAnalysis: preflightResult?.traceAnalysis,
+            simulatedSpendObservations: preflightResult?.simulatedSpendObservations
+        )
+        if case .denied(let reasons) = validation {
+            requiresMasterKey = true
+            violations.append(contentsOf: reasons)
         }
 
         if requiresMasterKey {

@@ -14,6 +14,31 @@ nonisolated struct TransferEvent: Codable, Sendable, Equatable {
     let amount: String
 }
 
+/// A structured record of a single call frame from a `debug_traceCall` result.
+/// Captures ALL data from each call frame for inspection, debugging, and future use.
+nonisolated struct CallFrameRecord: Codable, Sendable {
+    /// Call type: CALL, DELEGATECALL, STATICCALL, CREATE, CREATE2.
+    let type: String
+    /// Address that initiated this call.
+    let from: String
+    /// Target address of the call (nil for CREATE/CREATE2 before deployment).
+    let to: String?
+    /// Native ETH value sent with this call (hex string).
+    let value: String?
+    /// Gas allocated for this call (hex string).
+    let gas: String?
+    /// Gas actually consumed by this call (hex string).
+    let gasUsed: String?
+    /// Full calldata sent to the target.
+    let input: String?
+    /// Return data from the call.
+    let output: String?
+    /// Call depth (0 = top level).
+    let depth: Int
+    /// Nested calls made within this frame.
+    let children: [CallFrameRecord]
+}
+
 /// Aggregated analysis of a `debug_traceCall` result.
 nonisolated struct TraceAnalysis: Codable, Sendable {
     /// ERC-20 Transfer events found in the trace logs.
@@ -22,6 +47,8 @@ nonisolated struct TraceAnalysis: Codable, Sendable {
     let touchedAddresses: Set<String>
     /// Total native ETH value sent from the account across all call frames (decimal string in wei).
     let nativeSpend: String
+    /// Full call tree preserved from the trace result for inspection and debugging.
+    let callTree: CallFrameRecord?
 }
 
 // MARK: - Trace Analyzer
@@ -51,10 +78,30 @@ nonisolated enum TraceAnalyzer {
             nativeSpendTotal: &nativeSpendTotal
         )
 
+        let callTree = buildCallTree(from: trace, depth: 0)
+
         return TraceAnalysis(
             transfers: transfers,
             touchedAddresses: touchedAddresses,
-            nativeSpend: String(nativeSpendTotal)
+            nativeSpend: String(nativeSpendTotal),
+            callTree: callTree
+        )
+    }
+
+    /// Recursively converts the RPC trace response into a `CallFrameRecord` tree.
+    static func buildCallTree(from trace: TraceCallResult, depth: Int) -> CallFrameRecord {
+        let children = (trace.calls ?? []).map { buildCallTree(from: $0, depth: depth + 1) }
+        return CallFrameRecord(
+            type: trace.type,
+            from: trace.from,
+            to: trace.to,
+            value: trace.value,
+            gas: trace.gas,
+            gasUsed: trace.gasUsed,
+            input: trace.input,
+            output: trace.output,
+            depth: depth,
+            children: children
         )
     }
 
