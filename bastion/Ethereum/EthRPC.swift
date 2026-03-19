@@ -120,6 +120,53 @@ nonisolated final class EthRPC: Sendable {
         return try await call(method: "eth_call", params: [callObj, "latest"] as [Any])
     }
 
+    // MARK: - Debug Trace
+
+    /// Simulate a call using `debug_traceCall` with the `callTracer` and log collection.
+    ///
+    /// This is used to trace ERC-20 Transfer events and all addresses touched during
+    /// UserOperation execution. Not all RPC providers support this method — callers
+    /// should handle `EthRPCError.debugTraceUnsupported` gracefully.
+    func debugTraceCall(
+        to: String,
+        from: String,
+        data: String,
+        value: String = "0x0"
+    ) async throws -> TraceCallResult {
+        let txObject: [String: String] = [
+            "to": to,
+            "from": from,
+            "data": data,
+            "value": value
+        ]
+        let tracerConfig: [String: Any] = [
+            "tracer": "callTracer",
+            "tracerConfig": ["withLog": true] as [String: Bool]
+        ]
+        do {
+            return try await call(
+                method: "debug_traceCall",
+                params: [txObject, "latest", tracerConfig] as [Any]
+            )
+        } catch let error as EthRPCError {
+            // Detect unsupported method and wrap in a specific error type.
+            switch error {
+            case .rpcError(let code, let msg):
+                let lower = msg.lowercased()
+                if lower.contains("method not found") ||
+                    lower.contains("not supported") ||
+                    lower.contains("does not exist") ||
+                    lower.contains("method not available") ||
+                    code == -32601 {
+                    throw EthRPCError.debugTraceUnsupported
+                }
+                throw error
+            default:
+                throw error
+            }
+        }
+    }
+
     // MARK: - Chain Methods
 
     func chainId() async throws -> String {
@@ -393,18 +440,43 @@ nonisolated struct UserOperationFeeEstimate: Sendable, Equatable {
     let maxFeePerGas: String
 }
 
+// MARK: - Trace Types
+
+/// A single call frame returned by `debug_traceCall` with `callTracer` + `withLog: true`.
+/// The structure is recursive: each frame may contain nested `calls`.
+nonisolated struct TraceCallResult: Codable, Sendable {
+    let type: String
+    let from: String
+    let to: String?
+    let value: String?
+    let input: String?
+    let output: String?
+    let calls: [TraceCallResult]?
+    let logs: [TraceLog]?
+}
+
+/// A log entry emitted during a traced call frame.
+nonisolated struct TraceLog: Codable, Sendable {
+    let address: String
+    let topics: [String]
+    let data: String
+}
+
 // MARK: - Errors
 
 nonisolated enum EthRPCError: Error, CustomStringConvertible {
     case networkError(String)
     case httpError(Int, String)
     case rpcError(Int, String)
+    /// The RPC provider does not support `debug_traceCall`.
+    case debugTraceUnsupported
 
     var description: String {
         switch self {
         case .networkError(let msg): return "ETH RPC network error: \(msg)"
         case .httpError(let code, let body): return "ETH RPC HTTP \(code): \(body)"
         case .rpcError(let code, let msg): return "ETH RPC error \(code): \(msg)"
+        case .debugTraceUnsupported: return "debug_traceCall is not supported by this RPC provider"
         }
     }
 }
