@@ -43,7 +43,11 @@ final class SigningManager {
         isProcessing = true
         defer { isProcessing = false }
 
-        let dataPrefix = request.requestID.prefix(8).description
+        // M-05: Server-generated requestID prevents audit log manipulation.
+        // The client's requestID is preserved in the SignRequest for backward compatibility,
+        // but the audit trail and internal references use a server-generated UUID.
+        let serverRequestID = UUID().uuidString
+        let dataPrefix = serverRequestID.prefix(8).description
 
         // M-05: Check global allowedClients list before per-client rule routing.
         // Per-client profiles have allowedClients = nil, so the global check must
@@ -223,6 +227,17 @@ final class SigningManager {
         state = .signing
         defer { state = .idle }
 
+        // C-02: Record rate limit and spending counters BEFORE signing. This ensures a
+        // concurrent request that arrives between validation and signing sees the updated
+        // counters and cannot bypass limits via TOCTOU. If signing fails, the counter is
+        // "wasted" (one phantom request counted) which is the safe/conservative direction —
+        // better to over-count than under-count and allow a limit bypass.
+        ruleEngine.recordSuccess(
+            request: request,
+            config: effectiveConfig,
+            simulatedSpendObservations: preflightResult?.simulatedSpendObservations
+        )
+
         // `request.data` is already the Ethereum-standard 32-byte digest for every operation type.
         // Feed that digest directly into the Secure Enclave to avoid double-hashing message requests.
         let hash = request.data
@@ -238,7 +253,6 @@ final class SigningManager {
             request: request,
             clientContext: clientContext
         ))
-        ruleEngine.recordSuccess(request: request, config: effectiveConfig)
 
         // Notify for silently auto-approved requests (no approval window was shown).
         if !requiresMasterKey && !Self.requiresOwnerAuthenticationAfterApproval(
