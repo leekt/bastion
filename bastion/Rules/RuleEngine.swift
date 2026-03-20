@@ -446,11 +446,16 @@ final class RuleEngine {
         // When trace analysis is available, also check traced addresses against the allowlist.
         if let allowedTargets = config.rules.allowedTargets,
            let chainId = request.operation.chainId {
+            let senderAddr: String? = {
+                if case .userOperation(let op) = request.operation { return op.sender }
+                return nil
+            }()
             validateTargets(
                 inspection: inspection,
                 allowedTargets: allowedTargets,
                 chainId: chainId,
                 traceAnalysis: traceAnalysis,
+                senderAddress: senderAddr,
                 reasons: &reasons
             )
         }
@@ -698,6 +703,7 @@ final class RuleEngine {
         allowedTargets: [String: [String]],
         chainId: Int,
         traceAnalysis: TraceAnalysis? = nil,
+        senderAddress: String? = nil,
         reasons: inout [String]
     ) {
         let chainKey = String(chainId)
@@ -727,8 +733,28 @@ final class RuleEngine {
             // simulated execution. This catches targets reached via internal calls (e.g.,
             // a router calling into a pool contract) that static calldata decoding misses.
             if let trace = traceAnalysis {
-                for tracedAddress in trace.touchedAddresses {
-                    let normalized = normalizedAddress(tracedAddress)
+                // R2-H-01: Filter infrastructure addresses from trace to avoid false denials.
+                // EntryPoints, the account itself, precompiles, and the zero address are not
+                // meaningful targets — they appear in every UserOp execution trace.
+                let infraAddresses: Set<String> = {
+                    var infra = Set<String>()
+                    if let sender = senderAddress {
+                        infra.insert(normalizedAddress(sender))
+                    }
+                    infra.insert(normalizedAddress(EntryPointAddress.v0_7))
+                    infra.insert(normalizedAddress(EntryPointAddress.v0_8))
+                    infra.insert(normalizedAddress(EntryPointAddress.v0_9))
+                    infra.insert(normalizedAddress("0x0000000000000000000000000000000000000000"))
+                    return infra
+                }()
+
+                let tracedTargets = trace.touchedAddresses
+                    .map(normalizedAddress)
+                    .filter { addr in
+                        !infraAddresses.contains(addr) && !isPrecompileAddress(addr)
+                    }
+
+                for normalized in tracedTargets {
                     // Skip addresses already checked via static inspection to avoid
                     // duplicate violation messages.
                     guard !normalizedTargets.contains(normalized) else { continue }
@@ -910,6 +936,32 @@ final class RuleEngine {
 
     private nonisolated func normalizedAddress(_ address: String) -> String {
         address.lowercased()
+    }
+
+    /// R2-H-01: Returns true if the address is a precompile (numeric value < 0x200 / 512).
+    private nonisolated func isPrecompileAddress(_ address: String) -> Bool {
+        let hex = address.hasPrefix("0x") ? String(address.dropFirst(2)) : address
+        guard let data = Data(hexString: hex), data.count <= 20 else { return false }
+        // Pad to 20 bytes and check if the value is < 0x200.
+        // Addresses < 0x200 have all leading bytes zero except possibly the last two,
+        // and the last two bytes form a value < 512.
+        let bytes = [UInt8](data)
+        let padCount = max(0, 20 - bytes.count)
+        // Check all bytes except the last two are zero.
+        for i in 0..<(padCount + bytes.count - 2) {
+            let byteValue: UInt8
+            if i < padCount {
+                byteValue = 0
+            } else {
+                byteValue = bytes[i - padCount]
+            }
+            if byteValue != 0 { return false }
+        }
+        // Last two bytes form a uint16 value.
+        let highByte: UInt8 = bytes.count >= 2 ? bytes[bytes.count - 2] : 0
+        let lowByte: UInt8 = bytes[bytes.count - 1]
+        let value = UInt16(highByte) << 8 | UInt16(lowByte)
+        return value < 0x200
     }
 
     private nonisolated func shortAddress(_ address: String) -> String {
