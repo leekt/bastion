@@ -2335,7 +2335,7 @@ struct AuditHistoryView: View {
             switch latestType {
             case .signDenied, .ruleViolation, .authFailed, .userOpSendFailed, .userOpReceiptFailed, .userOpReceiptTimeout:
                 return true
-            case .signPending, .signSuccess, .userOpSubmitted, .userOpReceiptSuccess, .preflightCompleted:
+            case .signPending, .signSuccess, .userOpSubmitted, .userOpReceiptSuccess, .preflightCompleted, .keyReset:
                 return false
             }
         }.count
@@ -2713,6 +2713,8 @@ struct AuditHistoryView: View {
             return Color(red: 0.56, green: 0.39, blue: 0.11)
         case .preflightCompleted?:
             return Color(red: 0.28, green: 0.38, blue: 0.56)
+        case .keyReset?:
+            return Color(red: 0.72, green: 0.43, blue: 0.11)
         case nil:
             return .secondary
         }
@@ -2742,6 +2744,8 @@ struct AuditHistoryView: View {
             return "clock.badge.exclamationmark"
         case .preflightCompleted?:
             return "shield.lefthalf.filled"
+        case .keyReset?:
+            return "key.slash"
         case nil:
             return "clock"
         }

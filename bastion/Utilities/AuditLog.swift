@@ -54,6 +54,8 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         case userOpReceiptSuccess = "user_op_receipt_success"
         case userOpReceiptFailed = "user_op_receipt_failed"
         case userOpReceiptTimeout = "user_op_receipt_timeout"
+        /// All signing keys were deleted via resetSigningKeys.
+        case keyReset = "key_reset"
     }
 
     nonisolated enum ApprovalMode: String, Codable, Sendable {
@@ -152,7 +154,7 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
             return "UserOp Receipt Failed"
         case .userOpReceiptTimeout:
             return "UserOp Receipt Pending"
-        case .signPending, .signSuccess, .signDenied, .ruleViolation, .authFailed, .preflightCompleted:
+        case .signPending, .signSuccess, .signDenied, .ruleViolation, .authFailed, .preflightCompleted, .keyReset:
             break
         }
         return request?.title ?? type.rawValue
@@ -187,6 +189,8 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
             return "Receipt Pending"
         case .preflightCompleted:
             return "Preflight"
+        case .keyReset:
+            return "Keys Reset"
         }
     }
 
