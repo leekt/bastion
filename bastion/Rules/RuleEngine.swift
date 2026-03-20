@@ -149,6 +149,9 @@ final class RuleEngine {
         configCorrupted = false
     }
 
+    // L-05: Maximum number of client profiles to prevent unbounded growth.
+    private nonisolated static let maxClientProfiles = 20
+
     func ensureClientProfile(bundleId: String?) -> ClientProfile? {
         ensureConfigLoadedIfNeeded()
 
@@ -158,6 +161,12 @@ final class RuleEngine {
 
         if let existing = clientProfile(bundleId: bundleId) {
             return existing
+        }
+
+        // L-05: Cap the number of client profiles.
+        guard config.clientProfiles.count < Self.maxClientProfiles else {
+            NSLog("[RuleEngine] Client profile cap reached (%d). Refusing to create profile for %@", Self.maxClientProfiles, bundleId)
+            return nil
         }
 
         let profile = ClientProfile(
