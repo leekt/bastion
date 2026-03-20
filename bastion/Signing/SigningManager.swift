@@ -48,10 +48,17 @@ final class SigningManager {
         isProcessing = true
         defer { isProcessing = false }
 
-        // M-05: Server-generated requestID prevents audit log manipulation.
-        // The client's requestID is preserved in the SignRequest for backward compatibility,
-        // but the audit trail and internal references use a server-generated UUID.
+        // M-05 + R2-M-02: Server-generated requestID prevents audit log manipulation.
+        // Replace the client-provided requestID with a server-generated UUID so that ALL
+        // audit events and audit record grouping use the server ID, not the client's.
         let serverRequestID = UUID().uuidString
+        let request = SignRequest(
+            operation: request.operation,
+            requestID: serverRequestID,
+            timestamp: request.timestamp,
+            clientBundleId: request.clientBundleId,
+            userOperationSubmission: request.userOperationSubmission
+        )
         let dataPrefix = serverRequestID.prefix(8).description
 
         // M-05: Check global allowedClients list before per-client rule routing.

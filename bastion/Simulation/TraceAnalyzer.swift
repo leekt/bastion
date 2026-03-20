@@ -65,20 +65,28 @@ nonisolated enum TraceAnalyzer {
     ///   - trace: The root call frame from `debug_traceCall`.
     ///   - accountAddress: The smart account address (used to track native ETH outflows).
     /// - Returns: A `TraceAnalysis` with all extracted data.
+    // R2-M-03: Limits to prevent stack overflow / DoS from deeply nested or wide traces.
+    private static let maxRecursionDepth = 256
+    private static let maxFrameCount = 10_000
+
     static func analyze(_ trace: TraceCallResult, accountAddress: String) -> TraceAnalysis {
         var transfers: [TransferEvent] = []
         var touchedAddresses: Set<String> = []
         var nativeSpendTotal: UInt128 = 0
+        var walkFrameCount = 0
 
         walkTrace(
             trace,
             accountAddress: accountAddress.lowercased(),
+            depth: 0,
+            frameCount: &walkFrameCount,
             transfers: &transfers,
             touchedAddresses: &touchedAddresses,
             nativeSpendTotal: &nativeSpendTotal
         )
 
-        let callTree = buildCallTree(from: trace, depth: 0)
+        var treeFrameCount = 0
+        let callTree = buildCallTree(from: trace, depth: 0, frameCount: &treeFrameCount)
 
         return TraceAnalysis(
             transfers: transfers,
@@ -89,8 +97,11 @@ nonisolated enum TraceAnalyzer {
     }
 
     /// Recursively converts the RPC trace response into a `CallFrameRecord` tree.
-    static func buildCallTree(from trace: TraceCallResult, depth: Int) -> CallFrameRecord {
-        let children = (trace.calls ?? []).map { buildCallTree(from: $0, depth: depth + 1) }
+    /// R2-M-03: Limited by recursion depth and total frame count to prevent DoS.
+    static func buildCallTree(from trace: TraceCallResult, depth: Int, frameCount: inout Int) -> CallFrameRecord? {
+        guard depth < maxRecursionDepth, frameCount < maxFrameCount else { return nil }
+        frameCount += 1
+        let children = (trace.calls ?? []).compactMap { buildCallTree(from: $0, depth: depth + 1, frameCount: &frameCount) }
         return CallFrameRecord(
             type: trace.type,
             from: trace.from,
@@ -107,13 +118,19 @@ nonisolated enum TraceAnalyzer {
 
     // MARK: - Recursive Tree Walk
 
+    /// R2-M-03: Limited by recursion depth and total frame count to prevent DoS.
     private static func walkTrace(
         _ frame: TraceCallResult,
         accountAddress: String,
+        depth: Int,
+        frameCount: inout Int,
         transfers: inout [TransferEvent],
         touchedAddresses: inout Set<String>,
         nativeSpendTotal: inout UInt128
     ) {
+        guard depth < maxRecursionDepth, frameCount < maxFrameCount else { return }
+        frameCount += 1
+
         // Collect the `to` address from this call frame.
         if let to = frame.to {
             touchedAddresses.insert(to.lowercased())
@@ -148,6 +165,8 @@ nonisolated enum TraceAnalyzer {
                 walkTrace(
                     child,
                     accountAddress: accountAddress,
+                    depth: depth + 1,
+                    frameCount: &frameCount,
                     transfers: &transfers,
                     touchedAddresses: &touchedAddresses,
                     nativeSpendTotal: &nativeSpendTotal

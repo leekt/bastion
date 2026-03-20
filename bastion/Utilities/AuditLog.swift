@@ -678,6 +678,14 @@ nonisolated final class AuditLog: @unchecked Sendable {
         encoder.outputFormatting = [.sortedKeys]
 
         for i in 0..<records.count - 1 {
+            // R2-M-01: Non-genesis records MUST have a chainHash. Only the last record
+            // (genesis / oldest) may have nil. If a non-genesis record is missing its
+            // hash, the chain has been tampered with or corrupted.
+            if records[i].chainHash == nil {
+                _chainBroken = true
+                NSLog("[AuditLog] WARNING: Hash chain broken — non-genesis record at index \(i) has nil chainHash")
+                return
+            }
             guard let expectedHash = records[i].chainHash else { continue }
             guard let previousJSON = try? encoder.encode(records[i + 1]) else {
                 _chainBroken = true
