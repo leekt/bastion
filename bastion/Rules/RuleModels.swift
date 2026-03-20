@@ -526,7 +526,10 @@ nonisolated struct BastionConfig: Codable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 4
-        authPolicy = try container.decodeIfPresent(AuthPolicy.self, forKey: .authPolicy) ?? .open
+        // H-01: Default to biometricOrPasscode when the key is missing from stored JSON.
+        // The previous default of .open silently downgraded security for configs saved
+        // before authPolicy was introduced.
+        authPolicy = try container.decodeIfPresent(AuthPolicy.self, forKey: .authPolicy) ?? .biometricOrPasscode
         rules = try container.decodeIfPresent(RuleConfig.self, forKey: .rules) ?? .default
         bundlerPreferences = try container.decodeIfPresent(BundlerPreferences.self, forKey: .bundlerPreferences) ?? .default
         clientProfiles = try container.decodeIfPresent([ClientProfile].self, forKey: .clientProfiles) ?? []

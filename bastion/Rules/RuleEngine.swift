@@ -330,12 +330,24 @@ final class RuleEngine {
     }
 
     /// Records state after a successful sign (increment counters, track spending).
-    nonisolated func recordSuccess(request: SignRequest, config: BastionConfig) {
+    ///
+    /// M-06: When `simulatedSpendObservations` is provided, trace-based observations are
+    /// used for recording spending (same data that validation used). When nil, falls back
+    /// to static calldata inspection (original behavior).
+    nonisolated func recordSuccess(
+        request: SignRequest,
+        config: BastionConfig,
+        simulatedSpendObservations: [SimulatedSpendObservation]? = nil
+    ) {
         guard case .userOperation = request.operation else {
             return
         }
 
-        recordUserOperationSuccess(request: request, config: config)
+        recordUserOperationSuccess(
+            request: request,
+            config: config,
+            simulatedSpendObservations: simulatedSpendObservations
+        )
     }
 
     private nonisolated func validateRawMessage(_ request: SignRequest, rules: RuleConfig) -> ValidationResult {
@@ -469,27 +481,57 @@ final class RuleEngine {
         return .denied(reasons: reasons)
     }
 
-    private nonisolated func recordUserOperationSuccess(request: SignRequest, config: BastionConfig) {
+    private nonisolated func recordUserOperationSuccess(
+        request: SignRequest,
+        config: BastionConfig,
+        simulatedSpendObservations: [SimulatedSpendObservation]? = nil
+    ) {
         // Record rate limit entries
         for rule in config.rules.rateLimits {
             stateStore.recordRequest(ruleId: rule.id, windowSeconds: rule.windowSeconds)
         }
 
-        guard case .known(_, _, let observations, _) = inspect(request.operation) else {
+        guard case .known(_, _, let staticObservations, _) = inspect(request.operation) else {
             return
         }
 
+        // M-06: Use the same max-of-both principle as validation. When trace-based
+        // observations are available, record the higher of static vs trace spend
+        // so counters stay consistent with what validation checked.
+        let traceObservations: [SpendObservation]? = {
+            guard let simulated = simulatedSpendObservations, !simulated.isEmpty else { return nil }
+            return simulated.map { SpendObservation(token: $0.token, amount: $0.amount) }
+        }()
+
         for rule in config.rules.spendingLimits {
-            switch matchedSpendAmount(for: rule, observations: observations) {
-            case .amount(let amount) where amount > 0:
-                stateStore.recordSpend(
-                    ruleId: rule.id,
-                    amount: String(amount),
-                    windowSeconds: rule.windowSeconds
-                )
-            default:
-                continue
+            let staticEval = matchedSpendAmount(for: rule, observations: staticObservations)
+            let traceEval = traceObservations.map { matchedSpendAmount(for: rule, observations: $0) }
+
+            let staticAmount: UInt128
+            switch staticEval {
+            case .amount(let a): staticAmount = a
+            case .noMatch: staticAmount = 0
+            case .unsupportedAmount: continue
             }
+
+            let traceAmount: UInt128
+            if let te = traceEval {
+                switch te {
+                case .amount(let a): traceAmount = a
+                case .noMatch: traceAmount = 0
+                case .unsupportedAmount: continue
+                }
+            } else {
+                traceAmount = 0
+            }
+
+            let effectiveAmount = max(staticAmount, traceAmount)
+            guard effectiveAmount > 0 else { continue }
+            stateStore.recordSpend(
+                ruleId: rule.id,
+                amount: String(effectiveAmount),
+                windowSeconds: rule.windowSeconds
+            )
         }
     }
 
@@ -759,53 +801,65 @@ final class RuleEngine {
         case .notApplicable:
             return
         case .known(_, _, let staticObservations, let hasUnrecognizedCalldata):
-            // H-03: Unrecognized function selectors mean spending cannot be verified.
-            // However, when trace-based observations are available, we downgrade this
-            // from a hard denial to a warning — the trace captured actual execution
-            // spending at every call depth, which is more reliable than static decoding.
-            // We still flag it so the user knows calldata was partially opaque.
-            let hasSimulatedData = simulatedObservations != nil && !(simulatedObservations?.isEmpty ?? true)
-            if hasUnrecognizedCalldata && !hasSimulatedData {
+            // H-02: Unrecognized function selectors mean spending cannot be verified.
+            // This is a hard block regardless of whether trace data is available.
+            // Trace data can supplement but never excuse opaque calldata.
+            if hasUnrecognizedCalldata {
                 reasons.append("UserOperation contains unrecognized function calls — spending cannot be fully verified")
-            } else if hasUnrecognizedCalldata && hasSimulatedData {
-                // Downgraded: trace data provides actual spending. Still note it for
-                // transparency, but as a non-blocking informational message appended
-                // only if there are other violations (i.e., we don't block on this alone).
-                // The trace-based observations below will handle accurate limit checking.
             }
 
-            // When trace-based simulated spend observations are available, use them
-            // INSTEAD of static observations. Trace data is more accurate because it
-            // captures transfers at any call depth, including DeFi protocol side effects
-            // (e.g., a swap that transfers tokens from the account via an intermediate
-            // router contract). Static decoding only sees the top-level calldata.
-            let effectiveObservations: [SpendObservation]
-            if let simulated = simulatedObservations, !simulated.isEmpty {
-                effectiveObservations = simulated.map {
-                    SpendObservation(token: $0.token, amount: $0.amount)
-                }
-            } else {
-                effectiveObservations = staticObservations
-            }
+            // H-02: Max-of-both principle. Always compute static spend. If trace-based
+            // observations are available, also compute trace spend. For each rule, use
+            // the HIGHER of the two amounts. This ensures trace data can only ADD
+            // spending (e.g., catching DeFi side-effects), never reduce it.
+            let traceObservations: [SpendObservation]? = {
+                guard let simulated = simulatedObservations, !simulated.isEmpty else { return nil }
+                return simulated.map { SpendObservation(token: $0.token, amount: $0.amount) }
+            }()
 
             for rule in rules {
-                switch matchedSpendAmount(for: rule, observations: effectiveObservations) {
-                case .noMatch:
-                    continue
-                case .unsupportedAmount:
-                    reasons.append("Unable to safely evaluate \(rule.token.displayName) amount for spending limit")
-                case .amount(let pendingSpend):
-                    guard pendingSpend > 0 else { continue }
-                    guard let allowance = UInt128(rule.allowance) else {
-                        reasons.append("Invalid allowance configured for \(rule.token.displayName)")
-                        continue
-                    }
+                let staticEval = matchedSpendAmount(for: rule, observations: staticObservations)
+                let traceEval = traceObservations.map { matchedSpendAmount(for: rule, observations: $0) }
 
-                    let spent = stateStore.spentAmount(ruleId: rule.id, windowSeconds: rule.windowSeconds)
-                    let (projectedSpend, overflow) = spent.addingReportingOverflow(pendingSpend)
-                    if overflow || projectedSpend > allowance {
-                        reasons.append("\(rule.token.displayName) spending limit exceeded: \(rule.displayDescription)")
+                // If either source reports unsupported, treat as unsupported.
+                if case .unsupportedAmount = staticEval {
+                    reasons.append("Unable to safely evaluate \(rule.token.displayName) amount for spending limit")
+                    continue
+                }
+                if case .unsupportedAmount = traceEval {
+                    reasons.append("Unable to safely evaluate \(rule.token.displayName) amount for spending limit (trace)")
+                    continue
+                }
+
+                let staticAmount: UInt128
+                switch staticEval {
+                case .amount(let a): staticAmount = a
+                case .noMatch: staticAmount = 0
+                case .unsupportedAmount: continue // already handled above
+                }
+
+                let traceAmount: UInt128
+                if let te = traceEval {
+                    switch te {
+                    case .amount(let a): traceAmount = a
+                    case .noMatch: traceAmount = 0
+                    case .unsupportedAmount: continue // already handled above
                     }
+                } else {
+                    traceAmount = 0
+                }
+
+                let pendingSpend = max(staticAmount, traceAmount)
+                guard pendingSpend > 0 else { continue }
+                guard let allowance = UInt128(rule.allowance) else {
+                    reasons.append("Invalid allowance configured for \(rule.token.displayName)")
+                    continue
+                }
+
+                let spent = stateStore.spentAmount(ruleId: rule.id, windowSeconds: rule.windowSeconds)
+                let (projectedSpend, overflow) = spent.addingReportingOverflow(pendingSpend)
+                if overflow || projectedSpend > allowance {
+                    reasons.append("\(rule.token.displayName) spending limit exceeded: \(rule.displayDescription)")
                 }
             }
         }

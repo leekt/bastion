@@ -234,6 +234,18 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
 
     nonisolated func resetSigningKeys(withReply reply: @escaping (Data?, Error?) -> Void) {
         Task { @MainActor in
+            // C-01: Require biometric/passcode authentication before deleting signing keys.
+            // Key deletion is irreversible and must not be available without owner confirmation.
+            do {
+                try await AuthManager.shared.authenticate(
+                    policy: .biometricOrPasscode,
+                    reason: "Authorize deletion of all signing keys"
+                )
+            } catch {
+                reply(nil, BastionError.authFailed.nsError)
+                return
+            }
+
             let storedConfig = ruleEngine.loadConfig()
             let keyTags = [
                 SecureEnclaveManager.defaultSigningKeyIdentifier,
@@ -245,6 +257,12 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                 deletedKeyTags: deleted.sorted(),
                 requestedKeyTags: Array(Set(keyTags)).sorted()
             )
+
+            AuditLog.shared.record(AuditEvent(
+                type: .keyReset,
+                dataPrefix: "reset",
+                reason: "Deleted \(deleted.count) of \(keyTags.count) requested keys"
+            ))
 
             do {
                 let data = try JSONEncoder().encode(result)
