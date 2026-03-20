@@ -162,6 +162,12 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         case intent(UserOperationIntentRequestEnvelope)
     }
 
+    // H-04: Rate limit openUI to prevent UI flood attacks.
+    private static let openUIRateLimit = 5
+    private static let openUIWindowSeconds: TimeInterval = 10.0
+    private static let openUILock = NSLock()
+    private static var openUITimestamps: [Date] = []
+
     private let signingManager: SigningManager
     private let ruleEngine: RuleEngine
     private let clientBundleId: String?
@@ -281,6 +287,27 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         target: String,
         withReply reply: @escaping (Bool, Error?) -> Void
     ) {
+        // H-04: Rate limit openUI calls to prevent UI flood attacks.
+        let allowed: Bool = Self.openUILock.withLock {
+            let now = Date()
+            let cutoff = now.addingTimeInterval(-Self.openUIWindowSeconds)
+            Self.openUITimestamps.removeAll { $0 < cutoff }
+            if Self.openUITimestamps.count >= Self.openUIRateLimit {
+                return false
+            }
+            Self.openUITimestamps.append(now)
+            return true
+        }
+
+        guard allowed else {
+            reply(false, NSError(
+                domain: "com.bastion.error",
+                code: BastionError.ruleViolation.rawValue,
+                userInfo: [NSLocalizedDescriptionKey: "openUI rate limit exceeded — max \(Self.openUIRateLimit) calls per \(Int(Self.openUIWindowSeconds)) seconds"]
+            ))
+            return
+        }
+
         Task { @MainActor in
             guard let uiTarget = ServiceUITarget(rawValue: target) else {
                 reply(false, BastionError.invalidInput.nsError)
@@ -294,13 +321,14 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
 
     nonisolated func getRules(withReply reply: @escaping (Data?, Error?) -> Void) {
         Task { @MainActor in
-            let config = ruleEngine.config
             let context = ruleEngine.signingContext(for: self.clientBundleId)
+            // M-02: Return only the client's effective rules, not the global config.
+            // Each client already gets its resolved rules via signingContext.
             let response = RulesResponse(
                 authPolicy: context.authPolicy.rawValue,
-                globalAuthPolicy: config.authPolicy.rawValue,
+                globalAuthPolicy: nil,
                 rules: context.rules,
-                globalRules: config.rules,
+                globalRules: nil,
                 clientProfile: ruleEngine.clientProfileInfo(bundleId: self.clientBundleId),
                 accountAddress: context.accountAddress
             )

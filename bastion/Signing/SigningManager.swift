@@ -31,6 +31,11 @@ final class SigningManager {
     private let notificationManager = BastionNotificationManager.shared
     private let preflightSimulator = PreflightSimulator.shared
 
+    // L-02: Notification rate limiting — max 3 notifications per 30 seconds.
+    private static let notificationRateLimit = 3
+    private static let notificationWindowSeconds: TimeInterval = 30.0
+    private var notificationTimestamps: [Date] = []
+
     private init() {}
 
     func processSignRequest(_ request: SignRequest) async throws -> SignResponse {
@@ -255,11 +260,12 @@ final class SigningManager {
         ))
 
         // Notify for silently auto-approved requests (no approval window was shown).
+        // L-02: Rate-limited to prevent notification flood.
         if !requiresMasterKey && !Self.requiresOwnerAuthenticationAfterApproval(
             requiresInteractiveReview: requiresInteractivePolicyReview(for: request, config: effectiveConfig),
             authPolicy: clientContext.authPolicy
         ) {
-            notificationManager.notify(
+            rateLimitedNotify(
                 title: "Request Signed",
                 subtitle: clientContext.displayName,
                 body: request.operation.displayDescription
@@ -559,6 +565,16 @@ final class SigningManager {
             lines.append("Actual Gas Used: \(actualGasUsed)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    // L-02: Rate-limited notification delivery.
+    private func rateLimitedNotify(title: String, subtitle: String? = nil, body: String) {
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-Self.notificationWindowSeconds)
+        notificationTimestamps.removeAll { $0 < cutoff }
+        guard notificationTimestamps.count < Self.notificationRateLimit else { return }
+        notificationTimestamps.append(now)
+        notificationManager.notify(title: title, subtitle: subtitle, body: body)
     }
 
     nonisolated static func requiresOwnerAuthenticationAfterApproval(
