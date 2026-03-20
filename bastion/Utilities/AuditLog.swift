@@ -406,8 +406,11 @@ nonisolated struct AuditRequestRecord: Codable, Sendable, Identifiable {
     let client: AuditClientSnapshot?
     let request: AuditRequestSnapshot?
     let events: [AuditEvent]
+    /// M-04: SHA-256 hash of the previous record's JSON encoding.
+    /// Nil for the first record in the chain or records migrated before hash chain support.
+    let chainHash: String?
 
-    init(events: [AuditEvent]) {
+    init(events: [AuditEvent], chainHash: String? = nil) {
         let sortedEvents = events.sorted { lhs, rhs in
             switch (lhs.timestampDate, rhs.timestampDate) {
             case let (left?, right?):
@@ -421,13 +424,14 @@ nonisolated struct AuditRequestRecord: Codable, Sendable, Identifiable {
         self.request = sortedEvents.reversed().compactMap(\.request).first
         self.client = sortedEvents.reversed().compactMap(\.client).first
         self.id = self.request?.requestID ?? sortedEvents.last?.id ?? UUID().uuidString
+        self.chainHash = chainHash
     }
 
     func appending(_ event: AuditEvent) -> AuditRequestRecord {
         if events.contains(where: { $0.id == event.id }) {
             return self
         }
-        return AuditRequestRecord(events: events + [event])
+        return AuditRequestRecord(events: events + [event], chainHash: chainHash)
     }
 
     var latestEvent: AuditEvent? {
@@ -467,7 +471,18 @@ nonisolated struct AuditRequestRecord: Codable, Sendable, Identifiable {
     }
 }
 
-// MARK: - HMAC helpers (CommonCrypto)
+// MARK: - Hash helpers (CommonCrypto)
+
+/// M-04: SHA-256 hash of raw data, returned as lowercase hex string.
+private nonisolated func sha256Hex(_ data: Data) -> String {
+    var hash = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
+    hash.withUnsafeMutableBytes { hashPtr in
+        data.withUnsafeBytes { dataPtr in
+            _ = CC_SHA256(dataPtr.baseAddress, CC_LONG(data.count), hashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self))
+        }
+    }
+    return hash.map { String(format: "%02x", $0) }.joined()
+}
 
 private nonisolated func hmacSHA256(key: Data, data: Data) -> Data {
     var mac = Data(count: Int(CC_SHA256_DIGEST_LENGTH))
@@ -513,6 +528,12 @@ nonisolated final class AuditLog: @unchecked Sendable {
     private var _logTampered: Bool = false
     var logTampered: Bool {
         queue.sync { _logTampered }
+    }
+
+    /// M-04: Whether the last load detected a broken hash chain (record insertion, deletion, or reordering).
+    private var _chainBroken: Bool = false
+    var chainBroken: Bool {
+        queue.sync { _chainBroken }
     }
 
     /// Redaction level applied when building `AuditRequestSnapshot` values.
@@ -626,6 +647,53 @@ nonisolated final class AuditLog: @unchecked Sendable {
         }
     }
 
+    // MARK: - Hash chain (M-04, called on queue)
+
+    /// Computes chain hashes for records that don't have one.
+    /// Records are ordered newest-first (descending by timestamp). The chain hash
+    /// of record at index i is SHA-256 of the JSON encoding of record at index i+1
+    /// (the next-older record). The last record has chainHash = nil (genesis).
+    private nonisolated func applyChainHashes(_ records: [AuditRequestRecord]) -> [AuditRequestRecord] {
+        guard records.count > 1 else { return records }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        var result = records
+        // Walk from second-to-last to first (newest). For each record,
+        // compute the hash of the NEXT record (the one after it, i.e. older).
+        for i in stride(from: result.count - 2, through: 0, by: -1) {
+            if result[i].chainHash != nil { continue } // already has a hash
+            guard let previousJSON = try? encoder.encode(result[i + 1]) else { continue }
+            let hash = sha256Hex(previousJSON)
+            result[i] = AuditRequestRecord(events: result[i].events, chainHash: hash)
+        }
+        return result
+    }
+
+    /// Verifies the hash chain. Sets `_chainBroken` if any record's chainHash
+    /// doesn't match the SHA-256 of the subsequent (older) record.
+    private nonisolated func verifyChainIntegrity(_ records: [AuditRequestRecord]) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        for i in 0..<records.count - 1 {
+            guard let expectedHash = records[i].chainHash else { continue }
+            guard let previousJSON = try? encoder.encode(records[i + 1]) else {
+                _chainBroken = true
+                NSLog("[AuditLog] WARNING: Hash chain broken — cannot encode record at index \(i + 1)")
+                return
+            }
+            let computed = sha256Hex(previousJSON)
+            if computed != expectedHash {
+                _chainBroken = true
+                NSLog("[AuditLog] WARNING: Hash chain broken at index \(i) — expected %@, got %@", expectedHash, computed)
+                return
+            }
+        }
+        _chainBroken = false
+    }
+
     // MARK: - HMAC key management (called on queue)
 
     private nonisolated func hmacKeyLocked() -> Data {
@@ -666,6 +734,8 @@ nonisolated final class AuditLog: @unchecked Sendable {
 
         let decoder = JSONDecoder()
         if let records = try? decoder.decode([AuditRequestRecord].self, from: data) {
+            // M-04: Verify hash chain integrity.
+            verifyChainIntegrity(records)
             return records
         }
 
@@ -704,7 +774,7 @@ nonisolated final class AuditLog: @unchecked Sendable {
             let key = event.request?.requestID ?? "legacy|\(event.id)"
             grouped[key, default: []].append(event)
         }
-        let records = grouped.values.map(AuditRequestRecord.init)
+        let records = grouped.values.map { AuditRequestRecord(events: $0) }
         saveRequestRecordsLocked(records)
         return records
     }
@@ -734,6 +804,9 @@ nonisolated final class AuditLog: @unchecked Sendable {
         // L-05: Trim to max records to prevent unbounded growth.
         let trimmedRecords = Array(ageFilteredRecords.prefix(Self.maxRecords))
 
+        // M-04: Compute chain hashes for records that don't have one yet.
+        let chainedRecords = applyChainHashes(trimmedRecords)
+
         let directory = logURL.deletingLastPathComponent()
         if !fileManager.fileExists(atPath: directory.path) {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -741,7 +814,7 @@ nonisolated final class AuditLog: @unchecked Sendable {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(trimmedRecords) else { return }
+        guard let data = try? encoder.encode(chainedRecords) else { return }
         try? data.write(to: logURL, options: .atomic)
 
         // H-04: Set restrictive file permissions (owner read/write only).

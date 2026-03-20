@@ -79,7 +79,7 @@ nonisolated struct RulesResponse: Codable, Sendable {
     let authPolicy: String
     let globalAuthPolicy: String?
     let rules: RuleConfig
-    let globalRules: RuleConfig
+    let globalRules: RuleConfig?
     let clientProfile: ClientProfileInfo?
     let accountAddress: String?
 }
