@@ -651,10 +651,16 @@ final class RuleEngine {
         case .userOperation(let op):
             switch CalldataDecoder.inspect(op) {
             case .decoded(let executions):
+                // R3-04: Use leaf executions for selector extraction so that denied
+                // selectors cannot be bypassed by wrapping calls in a multicall.
+                // Targets and hasUnrecognizedCalldata are computed from top-level
+                // executions (the decoder already flattens inner targets there),
+                // but SelectorObservations must reflect the actual functions called.
+                let leafExecutions = executions.flatMap(\.allLeafExecutions)
                 let hasUnrecognized = executions.contains(where: \.hasUnrecognizedCalldata)
                 return .known(
                     targets: executions.map(\.to),
-                    selectors: executions.map { SelectorObservation(target: $0.to, selector: $0.selector) },
+                    selectors: leafExecutions.map { SelectorObservation(target: $0.to, selector: $0.selector) },
                     spending: spendObservations(from: executions, chainId: op.chainId),
                     hasUnrecognizedCalldata: hasUnrecognized
                 )
@@ -679,11 +685,10 @@ final class RuleEngine {
                 observations.append(SpendObservation(token: .eth, amount: execution.value))
             }
 
-            // M-06: Only count transfers and transferFroms as spending.
-            // Approvals don't move funds immediately and should be handled
-            // by a separate policy (visible in UI but don't count toward limits).
-            if let tokenOperation = execution.tokenOperation,
-               tokenOperation.kind != .approve {
+            // R3-01: Approvals count toward spending limits. Unlimited approvals
+            // (amount == type(uint256).max) produce nil from UInt128 parsing and
+            // fall through to .unsupportedAmount → denial, forcing biometric override.
+            if let tokenOperation = execution.tokenOperation {
                 let token: TokenIdentifier
                 if let usdcAddress = USDCAddresses.address(for: chainId),
                    usdcAddress.caseInsensitiveCompare(execution.to) == .orderedSame {
