@@ -792,6 +792,60 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             }
         }
     }
+
+    // MARK: - Phase 2 Handlers
+
+    nonisolated func installAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(InstallAgentOnChainRequest.self, from: requestData)
+                let result = try await self.ruleEngine.installAgentOnChain(
+                    groupId: request.groupId,
+                    memberId: request.memberId,
+                    chainId: request.chainId,
+                    projectId: request.projectId,
+                    submit: request.submit,
+                    waitForReceiptSeconds: request.waitForReceiptSeconds ?? 30
+                )
+                let info = WalletGroupHandlerCodec.info(for: result)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func uninstallAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(UninstallAgentOnChainRequest.self, from: requestData)
+                let result = try await self.ruleEngine.uninstallAgentOnChain(
+                    groupId: request.groupId,
+                    memberId: request.memberId,
+                    chainId: request.chainId,
+                    projectId: request.projectId,
+                    submit: request.submit,
+                    waitForReceiptSeconds: request.waitForReceiptSeconds ?? 30
+                )
+                let info = WalletGroupHandlerCodec.info(for: result)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
 }
 
 // MARK: - Wallet Group Codec
@@ -813,6 +867,18 @@ private enum WalletGroupHandlerCodec {
             createdAt: iso8601(group.createdAt),
             memberCount: group.members.count,
             activeMemberCount: activeCount
+        )
+    }
+
+    static func info(for result: RuleEngine.WalletGroupChainResult) -> WalletGroupChainResultInfo {
+        WalletGroupChainResultInfo(
+            groupId: result.groupId,
+            memberId: result.memberId,
+            chainId: result.chainId,
+            userOp: result.userOpRPC,
+            userOpHash: result.userOpHash,
+            txHash: result.txHash,
+            membership: result.membership.map(info(for:))
         )
     }
 

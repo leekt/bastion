@@ -96,6 +96,24 @@ import Foundation
         requestData: Data,
         withReply reply: @escaping (Data?, Error?) -> Void
     )
+
+    // MARK: - Phase 2: On-Chain Validator Install
+
+    /// requestData = `InstallAgentOnChainRequest` JSON → returns
+    /// `WalletGroupChainResultInfo`. Owner-signed UserOp that installs the
+    /// agent's validator module on the group's smart account; optionally
+    /// submitted via ZeroDev.
+    func installAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// requestData = `UninstallAgentOnChainRequest` JSON → returns
+    /// `WalletGroupChainResultInfo`. Inverse of `installAgentOnChain`.
+    func uninstallAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
 }
 
 let xpcServiceName = "com.bastion.xpc"

@@ -632,6 +632,41 @@ nonisolated struct WalletGroupListResponse: Codable, Sendable {
     let groups: [WalletGroupInfo]
 }
 
+// MARK: - Phase 2 — On-Chain Install Requests
+
+nonisolated struct InstallAgentOnChainRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let projectId: String?
+    /// If true, Bastion submits the UserOp via ZeroDev and waits for a
+    /// receipt. If false, the signed UserOp is returned for the caller to
+    /// submit elsewhere.
+    let submit: Bool
+    /// How long to poll for a UserOp receipt, in seconds. 0 = no poll.
+    let waitForReceiptSeconds: Int?
+}
+
+nonisolated struct UninstallAgentOnChainRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let projectId: String?
+    let submit: Bool
+    let waitForReceiptSeconds: Int?
+}
+
+/// XPC-safe serialization of `RuleEngine.WalletGroupChainResult`.
+nonisolated struct WalletGroupChainResultInfo: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let userOp: UserOperationRPC
+    let userOpHash: String?
+    let txHash: String?
+    let membership: AgentMembershipInfo?
+}
+
 nonisolated struct AllowedHours: Codable, Sendable {
     let start: Int
     let end: Int

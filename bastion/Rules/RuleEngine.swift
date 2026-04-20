@@ -5,8 +5,10 @@ final class RuleEngine {
 
     private let keychain: KeychainBackend
     let stateStore: StateStore
-    private let authManager = AuthManager.shared
-    private let auditLog = AuditLog.shared
+    // Internal (default) so extensions in other files within the module
+    // — e.g. WalletGroupOnChain — can authenticate and audit.
+    let authManager = AuthManager.shared
+    let auditLog = AuditLog.shared
 
     private nonisolated static let configAccount = "config"
     private nonisolated static let configBackupAccount = "config.premigration"
@@ -129,7 +131,7 @@ final class RuleEngine {
         configLoaded = true
     }
 
-    private func ensureConfigLoadedIfNeeded() {
+    func ensureConfigLoadedIfNeeded() {
         guard !configLoaded else { return }
         let result = loadConfigRaw()
         config = result.config

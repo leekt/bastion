@@ -31,6 +31,8 @@ import Foundation
     )
     func updateAgentScope(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
     func markAgentInstalled(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func installAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func uninstallAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
 let xpcServiceName = "com.bastion.xpc"
