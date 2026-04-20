@@ -19,6 +19,8 @@ import Foundation
     func removeAgentFromGroup(groupId: String, memberId: String, txHash: String?, withReply reply: @escaping (Data?, Error?) -> Void)
     func updateAgentScope(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
     func markAgentInstalled(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func installAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func uninstallAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
 private let userOpFieldHelp = """
@@ -63,6 +65,12 @@ Wallet groups (owner sudo + scoped agent validators):
                                                 # Revoke an agent (deletes its SE key)
   bastion groups mark-installed <groupId> <memberId> --tx <hash> [--validator <addr>]
                                                 # Record on-chain validator install (Phase 1 manual)
+  bastion groups install-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>]
+                                                [--wait-seconds <n>]
+                                                # Phase 2: build (and optionally submit) the owner-
+                                                # signed UserOp that installs the agent's validator.
+  bastion groups uninstall-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>]
+                                                # Phase 2: inverse of install-agent.
   bastion groups update-scope <groupId> <memberId> --scope-json-file <path>
                                                 # Tighten/relax an agent's scope
 
@@ -830,6 +838,77 @@ func cmdGroupsUpdateScope(_ args: ArraySlice<String>) {
     print("Scope updated for agent \(memberId) in group \(groupId).")
 }
 
+func cmdGroupsInstallAgentOnChain(_ args: ArraySlice<String>) {
+    guard args.count >= 2 else {
+        exitWithError("Usage: bastion groups install-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>] [--wait-seconds <n>]")
+    }
+    let groupId = args[args.startIndex]
+    let memberId = args[args.index(after: args.startIndex)]
+    let rest = args.dropFirst(2)
+    guard let chainIdStr = optionValue(rest, flag: "--chain"),
+          let chainId = Int(chainIdStr) else {
+        exitWithError("--chain <id> is required")
+    }
+    let projectId = optionValue(rest, flag: "--project-id")
+    let submit = rest.contains("--submit")
+    let wait = optionValue(rest, flag: "--wait-seconds").flatMap(Int.init)
+
+    var body: [String: Any] = [
+        "groupId": groupId,
+        "memberId": memberId,
+        "chainId": chainId,
+        "submit": submit
+    ]
+    if let projectId { body["projectId"] = projectId }
+    if let wait { body["waitForReceiptSeconds"] = wait }
+
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize install-agent request")
+    }
+
+    // Install flows can take a while (bundler + receipt polling). Generous timeout.
+    let timeout = max(45, (wait ?? 30) + 15)
+    let response = performDataRequest(timeoutSeconds: timeout, timeoutMessage: "On-chain install timed out") { proxy, reply in
+        proxy.installAgentOnChain(requestData: requestData, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
+func cmdGroupsUninstallAgentOnChain(_ args: ArraySlice<String>) {
+    guard args.count >= 2 else {
+        exitWithError("Usage: bastion groups uninstall-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>] [--wait-seconds <n>]")
+    }
+    let groupId = args[args.startIndex]
+    let memberId = args[args.index(after: args.startIndex)]
+    let rest = args.dropFirst(2)
+    guard let chainIdStr = optionValue(rest, flag: "--chain"),
+          let chainId = Int(chainIdStr) else {
+        exitWithError("--chain <id> is required")
+    }
+    let projectId = optionValue(rest, flag: "--project-id")
+    let submit = rest.contains("--submit")
+    let wait = optionValue(rest, flag: "--wait-seconds").flatMap(Int.init)
+
+    var body: [String: Any] = [
+        "groupId": groupId,
+        "memberId": memberId,
+        "chainId": chainId,
+        "submit": submit
+    ]
+    if let projectId { body["projectId"] = projectId }
+    if let wait { body["waitForReceiptSeconds"] = wait }
+
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize uninstall-agent request")
+    }
+
+    let timeout = max(45, (wait ?? 30) + 15)
+    let response = performDataRequest(timeoutSeconds: timeout, timeoutMessage: "On-chain uninstall timed out") { proxy, reply in
+        proxy.uninstallAgentOnChain(requestData: requestData, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
 func cmdGroupsMarkInstalled(_ args: ArraySlice<String>) {
     guard args.count >= 2 else {
         exitWithError("Usage: bastion groups mark-installed <groupId> <memberId> --tx <hash> [--validator <addr>]")
@@ -980,8 +1059,12 @@ case "groups":
         cmdGroupsUpdateScope(args[3...])
     case "mark-installed":
         cmdGroupsMarkInstalled(args[3...])
+    case "install-agent":
+        cmdGroupsInstallAgentOnChain(args[3...])
+    case "uninstall-agent":
+        cmdGroupsUninstallAgentOnChain(args[3...])
     default:
-        exitWithError("Unknown groups subcommand: \(args[2]). Use: create, list, show, add-agent, remove-agent, update-scope, mark-installed")
+        exitWithError("Unknown groups subcommand: \(args[2]). Use: create, list, show, add-agent, remove-agent, update-scope, mark-installed, install-agent, uninstall-agent")
     }
 
 default:
