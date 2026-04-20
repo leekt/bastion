@@ -166,4 +166,119 @@ export async function signUserOpJson(json: string): Promise<SignResponse> {
   return parseJson(r.stdout);
 }
 
+// --- Wallet Groups ---
+
+export interface WalletGroupInfo {
+  id: string;
+  label: string;
+  ownerKeyTag: string;
+  accountAddress?: string;
+  chainIds: number[];
+  sharedRules: unknown;
+  members: AgentMembershipInfo[];
+  createdAt: string;
+  memberCount: number;
+  activeMemberCount: number;
+}
+
+export interface AgentMembershipInfo {
+  id: string;
+  label?: string;
+  keyTag: string;
+  clientProfileId?: string;
+  scopedRules: unknown;
+  validatorAddress?: string;
+  installStatus: { state: "pending" } | { state: "installed"; txHash: string } | { state: "revoked"; txHash: string };
+  installedAt?: string;
+  revokedAt?: string;
+}
+
+export interface CreateWalletGroupOptions {
+  label: string;
+  chainIds?: number[];
+  sharedRulesJson?: string;
+}
+
+export interface AddAgentOptions {
+  groupId: string;
+  label?: string;
+  clientProfileId?: string;
+  scopedRulesJson?: string;
+}
+
+export async function createWalletGroup(
+  opts: CreateWalletGroupOptions,
+): Promise<WalletGroupInfo> {
+  const args: string[] = ["groups", "create", "--label", opts.label];
+  for (const id of opts.chainIds ?? []) {
+    args.push("--chain", String(id));
+  }
+  if (opts.sharedRulesJson) {
+    args.push("--scope-json", opts.sharedRulesJson);
+  }
+  const r = await run(args, 60_000);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "create wallet group failed");
+  return parseJson(r.stdout);
+}
+
+export async function listWalletGroups(): Promise<{ groups: WalletGroupInfo[] }> {
+  const r = await run(["groups", "list"]);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "list wallet groups failed");
+  return parseJson(r.stdout);
+}
+
+export async function getWalletGroup(groupId: string): Promise<WalletGroupInfo> {
+  const r = await run(["groups", "show", groupId]);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "get wallet group failed");
+  return parseJson(r.stdout);
+}
+
+export async function addAgentToGroup(
+  opts: AddAgentOptions,
+): Promise<AgentMembershipInfo> {
+  const args: string[] = ["groups", "add-agent", opts.groupId];
+  if (opts.label) args.push("--label", opts.label);
+  if (opts.clientProfileId) args.push("--profile-id", opts.clientProfileId);
+  if (opts.scopedRulesJson) args.push("--scope-json", opts.scopedRulesJson);
+  const r = await run(args, 60_000);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "add agent failed");
+  return parseJson(r.stdout);
+}
+
+export async function removeAgentFromGroup(
+  groupId: string,
+  memberId: string,
+  txHash?: string,
+): Promise<void> {
+  const args = ["groups", "remove-agent", groupId, memberId];
+  if (txHash) args.push("--tx", txHash);
+  const r = await run(args, 60_000);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "remove agent failed");
+}
+
+export async function updateAgentScope(
+  groupId: string,
+  memberId: string,
+  scopedRulesJson: string,
+): Promise<void> {
+  const r = await run(
+    ["groups", "update-scope", groupId, memberId, "--scope-json", scopedRulesJson],
+    60_000,
+  );
+  if (r.exitCode !== 0) throw new Error(r.stderr || "update scope failed");
+}
+
+export async function markAgentInstalled(
+  groupId: string,
+  memberId: string,
+  txHash: string,
+  validatorAddress?: string,
+): Promise<AgentMembershipInfo> {
+  const args = ["groups", "mark-installed", groupId, memberId, "--tx", txHash];
+  if (validatorAddress) args.push("--validator", validatorAddress);
+  const r = await run(args, 60_000);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "mark installed failed");
+  return parseJson(r.stdout);
+}
+
 export { CLI as cliPath };

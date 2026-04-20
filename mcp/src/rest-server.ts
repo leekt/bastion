@@ -129,6 +129,123 @@ app.post("/sign/user-op", async (c) => {
   }
 });
 
+// --- Wallet Group endpoints ---
+
+app.get("/groups", async (c) => {
+  try {
+    return c.json(await cli.listWalletGroups());
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 502);
+  }
+});
+
+app.post("/groups", async (c) => {
+  try {
+    const body = await c.req.json<{
+      label: string;
+      chainIds?: number[];
+      sharedRules?: unknown;
+    }>();
+    if (!body.label) return c.json({ error: "label is required" }, 400);
+    const sharedRulesJson = body.sharedRules
+      ? JSON.stringify(body.sharedRules)
+      : undefined;
+    return c.json(
+      await cli.createWalletGroup({
+        label: body.label,
+        chainIds: body.chainIds,
+        sharedRulesJson,
+      }),
+    );
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+app.get("/groups/:id", async (c) => {
+  try {
+    return c.json(await cli.getWalletGroup(c.req.param("id")));
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 502);
+  }
+});
+
+app.post("/groups/:id/agents", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const body = await c.req.json<{
+      label?: string;
+      clientProfileId?: string;
+      scopedRules?: unknown;
+    }>();
+    const scopedRulesJson = body.scopedRules
+      ? JSON.stringify(body.scopedRules)
+      : undefined;
+    return c.json(
+      await cli.addAgentToGroup({
+        groupId,
+        label: body.label,
+        clientProfileId: body.clientProfileId,
+        scopedRulesJson,
+      }),
+    );
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+app.delete("/groups/:id/agents/:memberId", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const memberId = c.req.param("memberId");
+    const txHash = c.req.query("tx") ?? undefined;
+    await cli.removeAgentFromGroup(groupId, memberId, txHash);
+    return c.json({ revoked: true, groupId, memberId });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+app.patch("/groups/:id/agents/:memberId/scope", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const memberId = c.req.param("memberId");
+    const body = await c.req.json<{ scopedRules: unknown }>();
+    if (!body.scopedRules)
+      return c.json({ error: "scopedRules is required" }, 400);
+    const scopedRulesJson =
+      typeof body.scopedRules === "string"
+        ? body.scopedRules
+        : JSON.stringify(body.scopedRules);
+    await cli.updateAgentScope(groupId, memberId, scopedRulesJson);
+    return c.json({ updated: true, groupId, memberId });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+app.post("/groups/:id/agents/:memberId/installed", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const memberId = c.req.param("memberId");
+    const body = await c.req.json<{
+      txHash: string;
+      validatorAddress?: string;
+    }>();
+    if (!body.txHash) return c.json({ error: "txHash is required" }, 400);
+    return c.json(
+      await cli.markAgentInstalled(
+        groupId,
+        memberId,
+        body.txHash,
+        body.validatorAddress,
+      ),
+    );
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
 // --- Start ---
 
 console.log(`Bastion REST API starting on http://127.0.0.1:${PORT}`);
