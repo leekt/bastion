@@ -224,6 +224,60 @@ app.patch("/groups/:id/agents/:memberId/scope", async (c) => {
   }
 });
 
+app.post("/groups/:id/agents/:memberId/install-on-chain", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const memberId = c.req.param("memberId");
+    const body = await c.req.json<{
+      chainId: number;
+      submit?: boolean;
+      projectId?: string;
+      waitForReceiptSeconds?: number;
+    }>();
+    if (typeof body.chainId !== "number")
+      return c.json({ error: "chainId is required" }, 400);
+    return c.json(
+      await cli.installAgentOnChain({
+        groupId,
+        memberId,
+        chainId: body.chainId,
+        submit: body.submit,
+        projectId: body.projectId,
+        waitForReceiptSeconds: body.waitForReceiptSeconds,
+      }),
+    );
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
+app.post("/groups/:id/agents/:memberId/uninstall-on-chain", async (c) => {
+  try {
+    const groupId = c.req.param("id");
+    const memberId = c.req.param("memberId");
+    const body = await c.req.json<{
+      chainId: number;
+      submit?: boolean;
+      projectId?: string;
+      waitForReceiptSeconds?: number;
+    }>();
+    if (typeof body.chainId !== "number")
+      return c.json({ error: "chainId is required" }, 400);
+    return c.json(
+      await cli.uninstallAgentOnChain({
+        groupId,
+        memberId,
+        chainId: body.chainId,
+        submit: body.submit,
+        projectId: body.projectId,
+        waitForReceiptSeconds: body.waitForReceiptSeconds,
+      }),
+    );
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 500);
+  }
+});
+
 app.post("/groups/:id/agents/:memberId/installed", async (c) => {
   try {
     const groupId = c.req.param("id");

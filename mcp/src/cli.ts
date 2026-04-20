@@ -281,4 +281,68 @@ export async function markAgentInstalled(
   return parseJson(r.stdout);
 }
 
+export interface WalletGroupChainResult {
+  groupId: string;
+  memberId: string;
+  chainId: number;
+  userOp: unknown;
+  userOpHash?: string;
+  txHash?: string;
+  membership?: AgentMembershipInfo;
+}
+
+export interface InstallAgentOnChainOptions {
+  groupId: string;
+  memberId: string;
+  chainId: number;
+  submit?: boolean;
+  projectId?: string;
+  waitForReceiptSeconds?: number;
+}
+
+export async function installAgentOnChain(
+  opts: InstallAgentOnChainOptions,
+): Promise<WalletGroupChainResult> {
+  const args: string[] = [
+    "groups",
+    "install-agent",
+    opts.groupId,
+    opts.memberId,
+    "--chain",
+    String(opts.chainId),
+  ];
+  if (opts.submit) args.push("--submit");
+  if (opts.projectId) args.push("--project-id", opts.projectId);
+  if (opts.waitForReceiptSeconds !== undefined) {
+    args.push("--wait-seconds", String(opts.waitForReceiptSeconds));
+  }
+  // Generous client-side timeout — server-side polling is bounded by waitForReceiptSeconds.
+  const timeoutMs = Math.max(120_000, ((opts.waitForReceiptSeconds ?? 30) + 60) * 1000);
+  const r = await run(args, timeoutMs);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "install agent on-chain failed");
+  return parseJson(r.stdout);
+}
+
+export async function uninstallAgentOnChain(
+  opts: InstallAgentOnChainOptions,
+): Promise<WalletGroupChainResult> {
+  const args: string[] = [
+    "groups",
+    "uninstall-agent",
+    opts.groupId,
+    opts.memberId,
+    "--chain",
+    String(opts.chainId),
+  ];
+  if (opts.submit) args.push("--submit");
+  if (opts.projectId) args.push("--project-id", opts.projectId);
+  if (opts.waitForReceiptSeconds !== undefined) {
+    args.push("--wait-seconds", String(opts.waitForReceiptSeconds));
+  }
+  const timeoutMs = Math.max(120_000, ((opts.waitForReceiptSeconds ?? 30) + 60) * 1000);
+  const r = await run(args, timeoutMs);
+  if (r.exitCode !== 0) throw new Error(r.stderr || "uninstall agent on-chain failed");
+  return parseJson(r.stdout);
+}
+
 export { CLI as cliPath };

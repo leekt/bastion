@@ -433,6 +433,84 @@ server.tool(
   },
 );
 
+// --- Phase 2 on-chain install tools ---
+
+server.tool(
+  "bastion_install_agent_on_chain",
+  "Phase 2: build and optionally submit the owner-signed UserOp that installs an agent's validator module on the group's Kernel smart account via ERC-7579 installModule. Set submit=true to send it via ZeroDev and poll for a receipt. Requires owner biometric auth.",
+  {
+    groupId: z.string().describe("Wallet group id"),
+    memberId: z.string().describe("Agent membership id"),
+    chainId: z.number().int().describe("Target chain id (must have a bundler + RPC configured)"),
+    submit: z
+      .boolean()
+      .optional()
+      .describe("If true, submit the signed UserOp via ZeroDev. Default false — returns the signed UserOp for the caller to submit."),
+    projectId: z
+      .string()
+      .optional()
+      .describe("ZeroDev project id override (falls back to Bastion's configured default)"),
+    waitForReceiptSeconds: z
+      .number()
+      .int()
+      .optional()
+      .describe("How long to poll for a UserOp receipt. 0 = don't wait. Default 30s."),
+  },
+  async ({ groupId, memberId, chainId, submit, projectId, waitForReceiptSeconds }) => {
+    try {
+      const result = await cli.installAgentOnChain({
+        groupId,
+        memberId,
+        chainId,
+        submit,
+        projectId,
+        waitForReceiptSeconds,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text", text: `Error: ${(e as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  "bastion_uninstall_agent_on_chain",
+  "Phase 2: inverse of bastion_install_agent_on_chain. Submits ERC-7579 uninstallModule for the agent's validator. Requires owner biometric auth.",
+  {
+    groupId: z.string().describe("Wallet group id"),
+    memberId: z.string().describe("Agent membership id"),
+    chainId: z.number().int().describe("Target chain id"),
+    submit: z.boolean().optional(),
+    projectId: z.string().optional(),
+    waitForReceiptSeconds: z.number().int().optional(),
+  },
+  async ({ groupId, memberId, chainId, submit, projectId, waitForReceiptSeconds }) => {
+    try {
+      const result = await cli.uninstallAgentOnChain({
+        groupId,
+        memberId,
+        chainId,
+        submit,
+        projectId,
+        waitForReceiptSeconds,
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text", text: `Error: ${(e as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // --- Start ---
 
 async function main() {
