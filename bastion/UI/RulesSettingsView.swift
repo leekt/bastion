@@ -2335,7 +2335,9 @@ struct AuditHistoryView: View {
             switch latestType {
             case .signDenied, .ruleViolation, .authFailed, .userOpSendFailed, .userOpReceiptFailed, .userOpReceiptTimeout:
                 return true
-            case .signPending, .signSuccess, .userOpSubmitted, .userOpReceiptSuccess, .preflightCompleted, .keyReset:
+            case .signPending, .signSuccess, .userOpSubmitted, .userOpReceiptSuccess, .preflightCompleted, .keyReset,
+                 .walletGroupCreated, .walletGroupAgentAdded, .walletGroupAgentRemoved,
+                 .walletGroupAgentScopeUpdated, .walletGroupAgentInstalled:
                 return false
             }
         }.count
@@ -2715,6 +2717,12 @@ struct AuditHistoryView: View {
             return Color(red: 0.28, green: 0.38, blue: 0.56)
         case .keyReset?:
             return Color(red: 0.72, green: 0.43, blue: 0.11)
+        case .walletGroupCreated?, .walletGroupAgentAdded?, .walletGroupAgentInstalled?:
+            return Color(red: 0.28, green: 0.38, blue: 0.56)
+        case .walletGroupAgentScopeUpdated?:
+            return Color(red: 0.45, green: 0.45, blue: 0.18)
+        case .walletGroupAgentRemoved?:
+            return Color(red: 0.62, green: 0.23, blue: 0.18)
         case nil:
             return .secondary
         }
@@ -2746,6 +2754,16 @@ struct AuditHistoryView: View {
             return "shield.lefthalf.filled"
         case .keyReset?:
             return "key.slash"
+        case .walletGroupCreated?:
+            return "person.3.sequence.fill"
+        case .walletGroupAgentAdded?:
+            return "person.badge.plus"
+        case .walletGroupAgentRemoved?:
+            return "person.badge.minus"
+        case .walletGroupAgentScopeUpdated?:
+            return "person.badge.shield.checkmark"
+        case .walletGroupAgentInstalled?:
+            return "checkmark.shield.fill"
         case nil:
             return "clock"
         }

@@ -138,6 +138,11 @@ struct MenuBarContentView: View {
         case .userOpReceiptTimeout: return "clock.badge.exclamationmark"
         case .preflightCompleted: return "shield.lefthalf.filled"
         case .keyReset: return "key.slash"
+        case .walletGroupCreated: return "person.3.sequence"
+        case .walletGroupAgentAdded: return "person.badge.plus"
+        case .walletGroupAgentRemoved: return "person.badge.minus"
+        case .walletGroupAgentScopeUpdated: return "person.badge.shield.checkmark"
+        case .walletGroupAgentInstalled: return "checkmark.shield"
         }
     }
 }
