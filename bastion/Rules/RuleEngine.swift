@@ -662,7 +662,15 @@ final class RuleEngine {
         rules: RuleConfig,
         reasons: inout [String]
     ) {
-        guard let allowedClients = rules.allowedClients, !allowedClients.isEmpty else {
+        // nil = no allowlist configured (allow). Present-but-empty = explicit
+        // deny-all. Previously we collapsed both into "no restriction" which
+        // let an empty allowlist (e.g. emitted by future merge logic) silently
+        // permit every caller.
+        guard let allowedClients = rules.allowedClients else {
+            return
+        }
+        guard !allowedClients.isEmpty else {
+            reasons.append("Client allowlist is empty — no clients permitted")
             return
         }
 
@@ -761,7 +769,15 @@ final class RuleEngine {
         reasons: inout [String]
     ) {
         let chainKey = String(chainId)
-        guard let chainTargets = allowedTargets[chainKey], !chainTargets.isEmpty else {
+        // Distinguish "key absent" (no restriction for this chain) from "key
+        // present but empty" (deny-all). The merge logic emits an empty
+        // sentinel array for impossible intersections — treating that as
+        // "no restriction" was the prior bug.
+        guard let chainTargets = allowedTargets[chainKey] else {
+            return
+        }
+        guard !chainTargets.isEmpty else {
+            reasons.append("No targets allowed for chain \(chainId)")
             return
         }
 
@@ -1133,6 +1149,22 @@ final class RuleEngine {
         return cloned
     }
 
+    /// Forces fresh UUIDs for any rate-limit or spending-limit rule. Used when
+    /// accepting a `RuleConfig` from an external caller (e.g. CLI / MCP) to
+    /// guarantee that two agents in the same wallet group cannot share a
+    /// counter key in `StateStore`. State counters are keyed by rule.id, so
+    /// duplicate IDs would let one agent's spend exhaust another's budget.
+    nonisolated func regeneratedScopedRuleIDs(_ rules: RuleConfig) -> RuleConfig {
+        var out = rules
+        out.rateLimits = rules.rateLimits.map {
+            RateLimitRule(id: UUID().uuidString, maxRequests: $0.maxRequests, windowSeconds: $0.windowSeconds)
+        }
+        out.spendingLimits = rules.spendingLimits.map {
+            SpendingLimitRule(id: UUID().uuidString, token: $0.token, allowance: $0.allowance, windowSeconds: $0.windowSeconds)
+        }
+        return out
+    }
+
     private func normalizedBundleId(_ bundleId: String?) -> String? {
         guard let bundleId else {
             return nil
@@ -1262,12 +1294,16 @@ final class RuleEngine {
         let keyTag = WalletGroup.makeAgentKeyTag(groupId: groupId, memberId: memberId)
         _ = try SecureEnclaveManager.shared.loadOrCreateSigningKey(keyTag: keyTag)
 
+        // Regenerate counter IDs so this membership's spending and rate-limit
+        // rules cannot collide with another member's counters in StateStore.
+        let isolatedScope = regeneratedScopedRuleIDs(scopedRules)
+
         let membership = AgentMembership(
             id: memberId,
             clientProfileId: clientProfileId,
             label: label,
             keyTag: keyTag,
-            scopedRules: scopedRules,
+            scopedRules: isolatedScope,
             installStatus: .pending
         )
 
@@ -1361,7 +1397,11 @@ final class RuleEngine {
             throw BastionError.invalidInput
         }
 
-        config.walletGroups[groupIdx].members[memberIdx].scopedRules = scopedRules
+        // Reissue counter IDs on every scope update so a caller cannot
+        // (intentionally or accidentally) reuse another member's rule.id and
+        // share a StateStore counter with them.
+        config.walletGroups[groupIdx].members[memberIdx].scopedRules =
+            regeneratedScopedRuleIDs(scopedRules)
         try saveConfig(config)
 
         auditLog.record(AuditEvent(
