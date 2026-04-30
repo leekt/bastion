@@ -3,22 +3,25 @@
 ## Trust Boundary
 
 ```
-┌─────────────────────────────────────────────┐
-│  TRUSTED (Bastion.app process)              │
-│  ├── macOS Keychain (com.bastion)           │
-│  └── Secure Enclave (Key B)                 │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  TRUSTED (Bastion.app process)                       │
+│  ├── macOS Keychain (com.bastion)                    │
+│  └── Secure Enclave                                  │
+│      ├── Per-client signing keys                     │
+│      └── Per-group owner + per-agent keys            │
+└──────────────────────────────────────────────────────┘
          ▲ XPC (team ID verified)
          │
-┌─────────────────────────────────────────────┐
-│  UNTRUSTED                                  │
-│  ├── bastion-cli (no secrets, no Keychain)  │
-│  ├── AI agents (subprocess callers)         │
-│  └── Filesystem (~Library/App Support/)     │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  UNTRUSTED                                           │
+│  ├── bastion-cli (no secrets, no Keychain)           │
+│  ├── MCP server / REST API (wraps CLI; same rules)   │
+│  ├── AI agents (subprocess + MCP + REST callers)     │
+│  └── Filesystem (~Library/App Support/)              │
+└──────────────────────────────────────────────────────┘
 ```
 
-Bastion.app is the **single trust boundary**. Everything outside it is untrusted by design.
+Bastion.app is the **single trust boundary**. Everything outside it is untrusted by design — the MCP server and REST API are deliberately on the untrusted side because they hold no secrets and forward every request through the same rule engine the CLI uses.
 
 ## Trust Assumptions
 
@@ -108,6 +111,22 @@ The rule engine decodes UserOp calldata before validation:
 1. **Target check**: validates decoded inner-call targets (not just the UserOp `sender`), catching delegatecalls and batch operations
 2. **Spending limits**: extracts actual transfer amounts from ERC-20 `transfer`/`transferFrom`/`approve` calls in the decoded calldata
 3. **Approval popup**: shows human-readable decoded calldata (target, function, token amount) instead of raw hex
+
+### Wallet Groups (sudo owner + scoped agents)
+
+A wallet group is a single smart account shared between an owner and multiple scoped agents. Each agent has its own Secure Enclave key, its own ERC-7579 validator (installed on-chain via `installModule`), and its own scoped policy. Two security properties matter here:
+
+- **Counter isolation**: scoped rules accepted from external callers (CLI / MCP / REST) get fresh UUIDs on add and on every update. `StateStore` keys counters by `rule.id`, so duplicate IDs across agents would otherwise let one agent's spend exhaust another's budget. The team explicitly regenerates IDs to make this impossible.
+- **Allowlist nil vs empty**: a `nil` allowlist means "no restriction"; an empty array means "deny all". Earlier code collapsed both into "no restriction", which would have let merge logic emitting an empty sentinel array silently permit every caller. The current rule engine treats empty as a hard deny.
+
+### Agent Integration Surface (MCP + REST)
+
+`mcp/` exposes Bastion to non-CLI callers through:
+
+- **MCP stdio server** — for Claude Code / Cursor agents
+- **REST API on `127.0.0.1`** — bearer-token auth on every route (including `/health`), origin-header CSRF guard, 1 MiB body cap, all string/JSON/hex inputs length- and shape-validated, generated session tokens printed on stderr only
+
+Neither component holds Keychain access or Secure Enclave handles. They are thin shells over `bastion-cli`, which means every signing request still funnels through the same XPC + rule-engine path as a manual CLI call.
 
 ### On-chain: P256Validator
 
