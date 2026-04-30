@@ -73,6 +73,7 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 - **Read rules** (`bastion rules`) — always allowed
 - **Read state** (`bastion state`) — check remaining quota per rate limit window
 - **Check status** (`bastion status`) — health check
+- **Manage wallet groups** (`bastion groups …`) — owner-authenticated commands to create shared wallet groups and add agents with scoped policies (see [Wallet Groups](#wallet-groups))
 
 ### What agents cannot do
 
@@ -90,6 +91,8 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 |---|---|---|
 | Default profile | `com.bastion.signingkey.default` | Used before a dedicated client profile exists |
 | Client profile | `com.bastion.signingkey.client.<uuid>` | Each client gets its own Secure Enclave key and derived account address |
+| Wallet group owner | `com.bastion.walletgroup.<groupId>.owner` | Sudo owner key for a shared wallet group; can install/uninstall agent validators on-chain |
+| Wallet group agent | `com.bastion.walletgroup.<groupId>.agent.<memberId>` | Per-agent SE key inside a shared wallet group; signs against the group's smart account via its own ERC-7579 validator |
 | Legacy fallback | `com.bastion.signingkey` | Older builds may have created this tag; `bastion reset-keys` removes it too |
 
 ### Key feature: silent per-client keys with app-layer owner auth
@@ -331,6 +334,16 @@ bastion eth userOp --op 0x0000000000000000000000000000000000000001,0,0x
 bastion eth userOp --send --op 0x0000000000000000000000000000000000000001,0,0x
 bastion eth userOp --json-file /tmp/userop.json
 bastion eth userOp --send --json-file /tmp/userop.json
+
+# Wallet groups (shared wallet, sudo owner + scoped agents)
+bastion groups create --label "Shared Trading Wallet"
+bastion groups list
+bastion groups show <groupId>
+bastion groups add-agent <groupId> --label "researcher"
+bastion groups update-scope <groupId> <memberId> --json-file /tmp/scope.json
+bastion groups install-agent <groupId> <memberId>      # build + sign + send installModule UserOp
+bastion groups uninstall-agent <groupId> <memberId>    # build + sign + send uninstallModule UserOp
+bastion groups remove-agent <groupId> <memberId>
 ```
 
 All output is JSON on stdout. Errors go to stderr with exit code 1.
@@ -416,6 +429,27 @@ bastion reset-keys
 If you need to inspect them manually, search Keychain Access for `com.bastion.signingkey`.
 
 ---
+
+## Wallet groups
+
+A wallet group is a **single smart account shared between a sudo owner and one or more scoped agents**. Each agent gets its own per-agent Secure Enclave key, its own ERC-7579 validator, and its own scoped policy (rate limits, spending limits, target allowlists). The owner can install or uninstall agent validators on-chain at any time.
+
+- **Owner key** (`com.bastion.walletgroup.<groupId>.owner`) — sudo, signs install/uninstall UserOps, gated by owner authentication
+- **Agent key** (`com.bastion.walletgroup.<groupId>.agent.<memberId>`) — scoped, signs only operations permitted by the agent's policy
+- **On-chain installation** uses ERC-7579 `installModule(VALIDATOR, agentValidator, agentPubkey)` against the group's smart account; uninstall uses `uninstallModule`
+- **Counter isolation** — every agent's rate-limit and spending-limit rules get freshly generated rule IDs on creation/update so two agents in the same group cannot share `StateStore` counters
+- **Allowlist semantics** — `nil` allowlist means *no restriction*; an *empty* allowlist is *deny-all* (use this for hard-locked scopes)
+
+Architecture and migration notes: `~/Documents/Obsidian/projects/bastion/architecture/shared-wallet-architecture.md` (config schema v8).
+
+## Agent integration: MCP server & REST API
+
+For tools and agents that don't shell out, Bastion ships an MCP server and a localhost REST API in [`mcp/`](mcp/). Both wrap the same `bastion-cli` binary, so they enforce the exact same rule engine and Secure Enclave path.
+
+- **MCP server** (stdio) — drop into Claude Code / Cursor as an MCP server; exposes signing tools and wallet-group management as `bastion_*` tools
+- **REST API** (Hono on `127.0.0.1:9587`) — bearer-token auth on every route (including `/health`), CSRF/origin guard, 1 MiB body cap, generated tokens printed on stderr only
+
+See [`mcp/README.md`](mcp/README.md) for the full tool/endpoint matrix and security notes.
 
 ## On-chain component
 
