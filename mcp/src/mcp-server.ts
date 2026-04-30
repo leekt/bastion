@@ -94,7 +94,7 @@ server.tool(
 server.tool(
   "bastion_sign_message",
   "Sign an EIP-191 personal message. Returns P-256 signature (r, s) and public key.",
-  { message: z.string().describe("The message text to sign") },
+  { message: z.string().max(64 * 1024).describe("The message text to sign") },
   async ({ message }) => {
     try {
       const sig = await cli.signMessage(message);
@@ -116,6 +116,7 @@ server.tool(
   {
     typedData: z
       .string()
+      .max(512 * 1024)
       .describe("Full EIP-712 typed data JSON string"),
   },
   async ({ typedData }) => {
@@ -139,6 +140,7 @@ server.tool(
   {
     data: z
       .string()
+      .regex(/^(0x)?[0-9a-fA-F]{64}$/, "data must be 32 bytes of hex (64 chars, optional 0x prefix)")
       .describe("32-byte hex hash to sign (64 hex chars, no 0x prefix)"),
   },
   async ({ data }) => {
@@ -156,14 +158,24 @@ server.tool(
   },
 );
 
+const HEX_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const HEX_BYTES_RE = /^0x([0-9a-fA-F]{2})*$/;
+const UINT_RE = /^([0-9]+|0x[0-9a-fA-F]+)$/;
+
 const userOpActionSchema = z.object({
-  target: z.string().describe("Target contract address (0x...)"),
+  target: z
+    .string()
+    .regex(HEX_ADDRESS_RE, "target must be a 0x-prefixed 20-byte hex address")
+    .describe("Target contract address (0x...)"),
   value: z
     .string()
+    .regex(UINT_RE, "value must be a decimal or 0x-hex non-negative integer")
     .default("0")
     .describe("ETH value in wei (decimal or 0x hex)"),
   data: z
     .string()
+    .regex(HEX_BYTES_RE, "data must be 0x-prefixed hex bytes")
+    .refine((s) => !s.includes(","), "data must not contain commas")
     .default("0x")
     .describe("Calldata (0x-prefixed hex, or 0x for empty)"),
 });
@@ -217,6 +229,7 @@ server.tool(
   {
     userOpJson: z
       .string()
+      .max(512 * 1024)
       .describe("Full UserOperation JSON string"),
   },
   async ({ userOpJson }) => {

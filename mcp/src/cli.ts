@@ -3,21 +3,40 @@
  * Uses Bun.spawn (execFile-style) to prevent shell injection.
  */
 
+import { existsSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
+
 const DEFAULT_CLI_PATHS = [
   "/usr/local/bin/bastion",
   `${process.env.HOME}/Applications/Bastion Dev.app/Contents/MacOS/bastion-cli`,
   "/Applications/Bastion.app/Contents/MacOS/bastion-cli",
 ];
 
+function assertSafeCliPath(p: string): string {
+  if (!isAbsolute(p)) {
+    throw new Error(`BASTION_CLI_PATH must be absolute: ${p}`);
+  }
+  if (!existsSync(p)) {
+    throw new Error(`BASTION_CLI_PATH does not exist: ${p}`);
+  }
+  const st = statSync(p);
+  if (!st.isFile()) {
+    throw new Error(`BASTION_CLI_PATH is not a regular file: ${p}`);
+  }
+  // Reject world-writable binaries — defense in depth against env-redirection
+  // attacks where a hostile process plants a binary at a writable location.
+  if ((st.mode & 0o002) !== 0) {
+    throw new Error(`BASTION_CLI_PATH is world-writable, refusing to use: ${p}`);
+  }
+  return p;
+}
+
 function resolveCliPath(): string {
-  if (process.env.BASTION_CLI_PATH) return process.env.BASTION_CLI_PATH;
+  if (process.env.BASTION_CLI_PATH) {
+    return assertSafeCliPath(process.env.BASTION_CLI_PATH);
+  }
   for (const p of DEFAULT_CLI_PATHS) {
-    try {
-      const stat = Bun.file(p);
-      if (stat.size > 0) return p;
-    } catch {
-      continue;
-    }
+    if (existsSync(p) && statSync(p).isFile()) return p;
   }
   throw new Error(
     "bastion-cli not found. Set BASTION_CLI_PATH or install Bastion.",
@@ -25,6 +44,58 @@ function resolveCliPath(): string {
 }
 
 const CLI = resolveCliPath();
+
+// --- Input validation helpers ---
+
+const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const HEX_BYTES = /^0x([0-9a-fA-F]{2})*$/;
+const HEX_32 = /^[0-9a-fA-F]{64}$/;
+const DECIMAL = /^[0-9]+$/;
+const HEX_UINT = /^0x[0-9a-fA-F]+$/;
+
+const MAX_MESSAGE_BYTES = 64 * 1024;
+const MAX_JSON_BYTES = 512 * 1024;
+const MAX_DATA_BYTES = 256 * 1024; // 0x-prefixed hex string upper bound
+
+function validateAddress(label: string, value: string): string {
+  if (!HEX_ADDRESS.test(value)) {
+    throw new Error(`${label} must be a 0x-prefixed 20-byte hex address`);
+  }
+  return value;
+}
+
+function validateUintString(label: string, value: string): string {
+  const v = value.trim();
+  if (DECIMAL.test(v) || HEX_UINT.test(v)) return v;
+  throw new Error(`${label} must be a decimal or 0x-hex non-negative integer`);
+}
+
+function validateHexBytes(label: string, value: string, maxBytes = MAX_DATA_BYTES): string {
+  if (value.length > maxBytes) {
+    throw new Error(`${label} exceeds maximum size`);
+  }
+  if (!HEX_BYTES.test(value)) {
+    throw new Error(`${label} must be 0x-prefixed hex bytes`);
+  }
+  return value;
+}
+
+function validateRaw32(value: string): string {
+  const hex = value.startsWith("0x") ? value.slice(2) : value;
+  if (!HEX_32.test(hex)) {
+    throw new Error("data must be 32 bytes of hex (64 hex chars, with or without 0x prefix)");
+  }
+  return hex;
+}
+
+function validateString(label: string, value: string, maxBytes: number): string {
+  // Byte length, not char length — UTF-8 expansion matters for argv limits.
+  const byteLen = Buffer.byteLength(value, "utf8");
+  if (byteLen > maxBytes) {
+    throw new Error(`${label} exceeds maximum size of ${maxBytes} bytes`);
+  }
+  return value;
+}
 
 /**
  * Execute bastion-cli with arguments. Uses Bun.spawn (no shell) to prevent injection.
@@ -127,22 +198,41 @@ export async function state(): Promise<unknown> {
 }
 
 export async function signMessage(message: string): Promise<SignResponse> {
+  validateString("message", message, MAX_MESSAGE_BYTES);
   const r = await run(["eth", "message", message]);
   if (r.exitCode !== 0) throw new Error(r.stderr || "sign message failed");
   return parseJson(r.stdout);
 }
 
 export async function signTypedData(json: string): Promise<SignResponse> {
+  validateString("typedData", json, MAX_JSON_BYTES);
+  // Surface malformed JSON early instead of forwarding it to the CLI.
+  try { JSON.parse(json); } catch {
+    throw new Error("typedData must be valid JSON");
+  }
   const r = await run(["eth", "typedData", "--json", json]);
   if (r.exitCode !== 0) throw new Error(r.stderr || "sign typed data failed");
   return parseJson(r.stdout);
 }
 
 export async function signRawBytes(hexData: string): Promise<SignResponse> {
-  const hex = hexData.startsWith("0x") ? hexData.slice(2) : hexData;
+  const hex = validateRaw32(hexData);
   const r = await run(["sign", "--data", hex]);
   if (r.exitCode !== 0) throw new Error(r.stderr || "sign raw bytes failed");
   return parseJson(r.stdout);
+}
+
+function validateUserOpAction(a: UserOpAction, idx: number): UserOpAction {
+  validateAddress(`actions[${idx}].target`, a.target);
+  validateUintString(`actions[${idx}].value`, a.value);
+  // Reject any comma in data to prevent argument-tuple smuggling at the
+  // CLI's CSV --op parser. The hex regex already excludes commas, but be
+  // explicit about the threat.
+  if (a.data.includes(",")) {
+    throw new Error(`actions[${idx}].data must not contain commas`);
+  }
+  validateHexBytes(`actions[${idx}].data`, a.data);
+  return a;
 }
 
 export async function sendUserOp(
@@ -152,6 +242,7 @@ export async function sendUserOp(
   if (opts.send) args.push("--send");
   if (opts.chainId) args.push("--chain-id", String(opts.chainId));
   if (opts.projectId) args.push("--project-id", opts.projectId);
+  opts.actions.forEach((a, i) => validateUserOpAction(a, i));
   for (const a of opts.actions) {
     args.push("--op", `${a.target},${a.value},${a.data}`);
   }
@@ -161,6 +252,10 @@ export async function sendUserOp(
 }
 
 export async function signUserOpJson(json: string): Promise<SignResponse> {
+  validateString("userOpJson", json, MAX_JSON_BYTES);
+  try { JSON.parse(json); } catch {
+    throw new Error("userOpJson must be valid JSON");
+  }
   const r = await run(["eth", "userOp", "--json", json]);
   if (r.exitCode !== 0) throw new Error(r.stderr || "sign userOp failed");
   return parseJson(r.stdout);

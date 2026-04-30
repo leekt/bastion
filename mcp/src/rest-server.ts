@@ -5,6 +5,7 @@
 
 import { Hono } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
+import { bodyLimit } from "hono/body-limit";
 import * as cli from "./cli.js";
 import { randomBytes } from "crypto";
 
@@ -13,20 +14,36 @@ const app = new Hono();
 // Generate session token on startup
 const SESSION_TOKEN =
   process.env.BASTION_API_TOKEN || randomBytes(32).toString("hex");
+const TOKEN_PROVIDED_BY_ENV = !!process.env.BASTION_API_TOKEN;
 const PORT = parseInt(process.env.BASTION_API_PORT || "9587", 10);
+const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MiB — generous for any signing payload.
 
-// Auth middleware — all routes except /health
+// Reject browser-origin requests outright. The only legitimate callers of
+// this loopback signing API are local processes; an Origin header is sent
+// by browsers and absent on curl/programmatic clients, so its mere
+// presence is sufficient signal to deny — protecting against CSRF from
+// any malicious page on the user's machine that learns the token.
 app.use("/*", async (c, next) => {
-  if (c.req.path === "/health") return next();
+  const origin = c.req.header("origin");
+  if (origin) {
+    return c.json({ error: "Cross-origin requests are not allowed" }, 403);
+  }
+  return next();
+});
+
+// Bound request bodies before parsing/auth runs.
+app.use("/*", bodyLimit({ maxSize: MAX_BODY_BYTES }));
+
+// Auth middleware — all routes including /health.
+app.use("/*", async (c, next) => {
   const middleware = bearerAuth({ token: SESSION_TOKEN });
   return middleware(c, next);
 });
 
 // --- Health ---
 
-app.get("/health", (c) =>
-  c.json({ status: "ok", server: "bastion", version: "0.1.0" }),
-);
+// Authenticated and minimal — does not leak server identity or version.
+app.get("/health", (c) => c.json({ status: "ok" }));
 
 // --- Read endpoints ---
 
@@ -303,8 +320,14 @@ app.post("/groups/:id/agents/:memberId/installed", async (c) => {
 // --- Start ---
 
 console.log(`Bastion REST API starting on http://127.0.0.1:${PORT}`);
-console.log(`Session token: ${SESSION_TOKEN}`);
-console.log(`CLI path: ${cli.cliPath}`);
+if (!TOKEN_PROVIDED_BY_ENV) {
+  // Token was generated this run — surface it once on stderr so the
+  // operator can capture it out-of-band. Never log it to stdout, since
+  // stdout commonly ends up in process logs / shell history.
+  console.error(
+    `Generated session token (set BASTION_API_TOKEN to override): ${SESSION_TOKEN}`,
+  );
+}
 
 export default {
   port: PORT,
