@@ -102,7 +102,7 @@ extension RuleEngine {
         // Build the execution: account.installModule(VALIDATOR, agentValidatorAddr, agentPubkey).
         let agentPubkey = try loadPubkeyData(keyTag: member.keyTag)
         let agentValidatorAddress = member.validatorAddress ?? ValidatorAddress.p256Validator
-        let execution = KernelModule.installModuleExecution(
+        let execution = try KernelModule.installModuleExecution(
             accountAddress: accountAddress,
             type: .validator,
             module: agentValidatorAddress,
@@ -179,7 +179,7 @@ extension RuleEngine {
         }
 
         let agentValidatorAddress = member.validatorAddress ?? ValidatorAddress.p256Validator
-        let execution = KernelModule.uninstallModuleExecution(
+        let execution = try KernelModule.uninstallModuleExecution(
             accountAddress: accountAddress,
             type: .validator,
             module: agentValidatorAddress,

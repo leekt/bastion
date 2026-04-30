@@ -23,9 +23,9 @@ struct KernelModuleTests {
     /// encodeFunctionData({abi: installModule(uint256,address,bytes), args:
     ///   [1, 0x9906AB44fF795883C5a725687A2705BE4118B0f3, 64 * 0xaa]})
     @Test("installModuleCalldata matches viem reference bytes")
-    func installModuleMatchesViem() {
+    func installModuleMatchesViem() throws {
         let agentPubkey = Data(repeating: 0xAA, count: 64)
-        let encoded = KernelModule.installModuleCalldata(
+        let encoded = try KernelModule.installModuleCalldata(
             type: .validator,
             module: ValidatorAddress.p256Validator,
             initData: agentPubkey
@@ -45,8 +45,8 @@ struct KernelModuleTests {
     }
 
     @Test("uninstallModuleCalldata with empty deInitData matches viem reference bytes")
-    func uninstallModuleMatchesViem() {
-        let encoded = KernelModule.uninstallModuleCalldata(
+    func uninstallModuleMatchesViem() throws {
+        let encoded = try KernelModule.uninstallModuleCalldata(
             type: .validator,
             module: ValidatorAddress.p256Validator,
             deInitData: Data()
@@ -66,10 +66,10 @@ struct KernelModuleTests {
     // MARK: - Structural properties
 
     @Test("installModuleExecution targets the smart account with 0 value")
-    func installExecutionShape() {
+    func installExecutionShape() throws {
         let accountAddress = "0x1234567890abcdef1234567890abcdef12345678"
         let pubkey = Data(repeating: 0xBB, count: 64)
-        let execution = KernelModule.installModuleExecution(
+        let execution = try KernelModule.installModuleExecution(
             accountAddress: accountAddress,
             type: .validator,
             module: ValidatorAddress.p256Validator,
@@ -83,13 +83,13 @@ struct KernelModuleTests {
     }
 
     @Test("round-trip: encoded pubkey appears verbatim in the calldata bytes")
-    func roundTripEmbedsPubkey() {
+    func roundTripEmbedsPubkey() throws {
         var pubkey = Data()
         // Unique byte pattern so we can easily substring-search for it.
         for i in 0..<64 {
             pubkey.append(UInt8(0x10 | (i & 0x0F)))
         }
-        let encoded = KernelModule.installModuleCalldata(
+        let encoded = try KernelModule.installModuleCalldata(
             type: .validator,
             module: ValidatorAddress.p256Validator,
             initData: pubkey
@@ -101,10 +101,10 @@ struct KernelModuleTests {
     }
 
     @Test("non-multiple-of-32 payload is zero-padded to nearest 32-byte boundary")
-    func oddPayloadPadding() {
+    func oddPayloadPadding() throws {
         // 20-byte payload → padded to 32, expect last 12 bytes of output to be zero.
         let payload = Data(repeating: 0xEF, count: 20)
-        let encoded = KernelModule.installModuleCalldata(
+        let encoded = try KernelModule.installModuleCalldata(
             type: .validator,
             module: ValidatorAddress.p256Validator,
             initData: payload
@@ -119,8 +119,8 @@ struct KernelModuleTests {
     }
 
     @Test("module address encoding is lowercase-insensitive and left-padded")
-    func moduleAddressLeftPadded() {
-        let encoded = KernelModule.installModuleCalldata(
+    func moduleAddressLeftPadded() throws {
+        let encoded = try KernelModule.installModuleCalldata(
             type: .validator,
             module: "0x9906AB44fF795883C5a725687A2705BE4118B0f3",
             initData: Data()

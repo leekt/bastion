@@ -17,6 +17,19 @@ import Foundation
 
 nonisolated enum KernelModule {
 
+    // MARK: - Errors
+
+    enum EncodingError: Error, CustomStringConvertible {
+        case invalidModuleAddress(String)
+
+        var description: String {
+            switch self {
+            case .invalidModuleAddress(let hex):
+                return "installModule/uninstallModule received an invalid module address: \(hex)"
+            }
+        }
+    }
+
     // MARK: - Module Type Constants
 
     enum ModuleType: UInt64 {
@@ -48,8 +61,8 @@ nonisolated enum KernelModule {
         type: ModuleType,
         module: String,
         initData: Data
-    ) -> Data {
-        encode(
+    ) throws -> Data {
+        try encode(
             selector: installModuleSelector,
             type: type,
             module: module,
@@ -66,8 +79,8 @@ nonisolated enum KernelModule {
         type: ModuleType,
         module: String,
         deInitData: Data = Data()
-    ) -> Data {
-        encode(
+    ) throws -> Data {
+        try encode(
             selector: uninstallModuleSelector,
             type: type,
             module: module,
@@ -85,11 +98,11 @@ nonisolated enum KernelModule {
         type: ModuleType,
         module: String,
         initData: Data
-    ) -> KernelEncoding.Execution {
+    ) throws -> KernelEncoding.Execution {
         KernelEncoding.Execution(
             to: accountAddress,
             value: 0,
-            data: installModuleCalldata(type: type, module: module, initData: initData)
+            data: try installModuleCalldata(type: type, module: module, initData: initData)
         )
     }
 
@@ -98,11 +111,11 @@ nonisolated enum KernelModule {
         type: ModuleType,
         module: String,
         deInitData: Data = Data()
-    ) -> KernelEncoding.Execution {
+    ) throws -> KernelEncoding.Execution {
         KernelEncoding.Execution(
             to: accountAddress,
             value: 0,
-            data: uninstallModuleCalldata(type: type, module: module, deInitData: deInitData)
+            data: try uninstallModuleCalldata(type: type, module: module, deInitData: deInitData)
         )
     }
 
@@ -116,12 +129,14 @@ nonisolated enum KernelModule {
         type: ModuleType,
         module: String,
         payload: Data
-    ) -> Data {
+    ) throws -> Data {
         var params = Data()
         // moduleTypeId : uint256
         params += uint256(type.rawValue)
-        // module : address (left-padded to 32)
-        let moduleBytes = addressBytes(module)
+        // module : address (left-padded to 32). Throws on malformed input
+        // rather than silently encoding address(0) — a zero target on an
+        // install/uninstall would be both confusing and dangerous.
+        let moduleBytes = try addressBytes(module)
         params += Data(repeating: 0, count: 32 - moduleBytes.count) + moduleBytes
         // offset to bytes payload (always 0x60 = 96 — three static slots precede it)
         params += uint256(96)
@@ -136,9 +151,9 @@ nonisolated enum KernelModule {
         return selector + params
     }
 
-    private static func addressBytes(_ hex: String) -> Data {
+    private static func addressBytes(_ hex: String) throws -> Data {
         guard let data = Data(hexString: hex), data.count == 20 else {
-            return Data(repeating: 0, count: 20)
+            throw EncodingError.invalidModuleAddress(hex)
         }
         return data
     }
