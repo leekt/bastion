@@ -253,10 +253,15 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             }
 
             let storedConfig = ruleEngine.loadConfig()
-            let keyTags = [
+            var keyTags: [String] = [
                 SecureEnclaveManager.defaultSigningKeyIdentifier,
                 SecureEnclaveManager.legacySigningKeyIdentifier
-            ] + storedConfig.clientProfiles.map(\.keyTag)
+            ]
+            keyTags.append(contentsOf: storedConfig.clientProfiles.map(\.keyTag))
+            // Wallet group keys — owner sudo keys + all non-revoked agent
+            // validators. Revoked agents already had their SE keys deleted
+            // during removeAgentFromGroup.
+            keyTags.append(contentsOf: ruleEngine.walletGroupKeyTags())
 
             let deleted = SecureEnclaveManager.shared.deleteSigningKeys(keyTags: keyTags)
             let result = ResetSigningKeysResponse(
@@ -636,5 +641,264 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                 reply(nil, Self.bridgedError(error))
             }
         }
+    }
+
+    // MARK: - Wallet Group Handlers
+
+    nonisolated func createWalletGroup(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(CreateWalletGroupRequest.self, from: requestData)
+                let group = try await self.ruleEngine.createWalletGroup(
+                    label: request.label,
+                    chainIds: request.chainIds,
+                    sharedRules: request.sharedRules ?? .default
+                )
+                let info = WalletGroupHandlerCodec.info(for: group)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func listWalletGroups(
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let groups = self.ruleEngine.listWalletGroups().map(WalletGroupHandlerCodec.info(for:))
+                let response = WalletGroupListResponse(groups: groups)
+                let data = try JSONEncoder().encode(response)
+                reply(data, nil)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func getWalletGroup(
+        groupId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            guard let group = self.ruleEngine.walletGroup(id: groupId) else {
+                reply(nil, BastionError.invalidInput.nsError)
+                return
+            }
+            do {
+                let info = WalletGroupHandlerCodec.info(for: group)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func addAgentToGroup(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(AddAgentRequest.self, from: requestData)
+                let member = try await self.ruleEngine.addAgentToGroup(
+                    groupId: request.groupId,
+                    label: request.label,
+                    clientProfileId: request.clientProfileId,
+                    scopedRules: request.scopedRules ?? .default
+                )
+                let info = WalletGroupHandlerCodec.info(for: member)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func removeAgentFromGroup(
+        groupId: String,
+        memberId: String,
+        txHash: String?,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                try await self.ruleEngine.removeAgentFromGroup(
+                    groupId: groupId,
+                    memberId: memberId,
+                    txHash: txHash
+                )
+                reply(Data(), nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func updateAgentScope(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(UpdateAgentScopeRequest.self, from: requestData)
+                try await self.ruleEngine.updateAgentScope(
+                    groupId: request.groupId,
+                    memberId: request.memberId,
+                    scopedRules: request.scopedRules
+                )
+                reply(Data(), nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func markAgentInstalled(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(MarkInstalledRequest.self, from: requestData)
+                let member = try await self.ruleEngine.markAgentInstalled(
+                    groupId: request.groupId,
+                    memberId: request.memberId,
+                    txHash: request.txHash,
+                    validatorAddress: request.validatorAddress
+                )
+                let info = WalletGroupHandlerCodec.info(for: member)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    // MARK: - Phase 2 Handlers
+
+    nonisolated func installAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(InstallAgentOnChainRequest.self, from: requestData)
+                let result = try await self.ruleEngine.installAgentOnChain(
+                    groupId: request.groupId,
+                    memberId: request.memberId,
+                    chainId: request.chainId,
+                    projectId: request.projectId,
+                    submit: request.submit,
+                    waitForReceiptSeconds: request.waitForReceiptSeconds ?? 30
+                )
+                let info = WalletGroupHandlerCodec.info(for: result)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func uninstallAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let request = try JSONDecoder().decode(UninstallAgentOnChainRequest.self, from: requestData)
+                let result = try await self.ruleEngine.uninstallAgentOnChain(
+                    groupId: request.groupId,
+                    memberId: request.memberId,
+                    chainId: request.chainId,
+                    projectId: request.projectId,
+                    submit: request.submit,
+                    waitForReceiptSeconds: request.waitForReceiptSeconds ?? 30
+                )
+                let info = WalletGroupHandlerCodec.info(for: result)
+                let data = try JSONEncoder().encode(info)
+                reply(data, nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+}
+
+// MARK: - Wallet Group Codec
+
+/// Converts internal WalletGroup/AgentMembership to the XPC-safe Info types.
+/// Centralized so both XPC handlers and tests produce consistent output.
+private enum WalletGroupHandlerCodec {
+    static func info(for group: WalletGroup) -> WalletGroupInfo {
+        let members = group.members.map(info(for:))
+        let activeCount = group.members.filter { !$0.installStatus.isRevoked }.count
+        return WalletGroupInfo(
+            id: group.id,
+            label: group.label,
+            ownerKeyTag: group.ownerKeyTag,
+            accountAddress: group.accountAddress,
+            chainIds: group.chainIds,
+            sharedRules: group.sharedRules,
+            members: members,
+            createdAt: iso8601(group.createdAt),
+            memberCount: group.members.count,
+            activeMemberCount: activeCount
+        )
+    }
+
+    static func info(for result: RuleEngine.WalletGroupChainResult) -> WalletGroupChainResultInfo {
+        WalletGroupChainResultInfo(
+            groupId: result.groupId,
+            memberId: result.memberId,
+            chainId: result.chainId,
+            userOp: result.userOpRPC,
+            userOpHash: result.userOpHash,
+            txHash: result.txHash,
+            membership: result.membership.map(info(for:))
+        )
+    }
+
+    static func info(for member: AgentMembership) -> AgentMembershipInfo {
+        AgentMembershipInfo(
+            id: member.id,
+            label: member.label,
+            keyTag: member.keyTag,
+            clientProfileId: member.clientProfileId,
+            scopedRules: member.scopedRules,
+            validatorAddress: member.validatorAddress,
+            installStatus: member.installStatus,
+            installedAt: member.installedAt.map(iso8601),
+            revokedAt: member.revokedAt.map(iso8601)
+        )
+    }
+
+    private static func iso8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
     }
 }

@@ -45,6 +45,75 @@ import Foundation
         requestID: String,
         withReply reply: @escaping (Data?, Error?) -> Void
     )
+
+    // MARK: - Wallet Groups
+
+    /// requestData = `CreateWalletGroupRequest` JSON → returns `WalletGroupInfo`.
+    /// Requires owner biometric/passcode auth.
+    func createWalletGroup(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// Returns `WalletGroupListResponse` JSON with all groups and members.
+    func listWalletGroups(
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// Returns `WalletGroupInfo` JSON for a single group.
+    func getWalletGroup(
+        groupId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// requestData = `AddAgentRequest` JSON → returns `AgentMembershipInfo`.
+    /// Requires owner biometric/passcode auth.
+    func addAgentToGroup(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// Revokes an agent; deletes its SE key and unbinds its ClientProfile.
+    /// Requires owner biometric/passcode auth.
+    func removeAgentFromGroup(
+        groupId: String,
+        memberId: String,
+        txHash: String?,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// requestData = `UpdateAgentScopeRequest` JSON.
+    /// Requires owner biometric/passcode auth.
+    func updateAgentScope(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// requestData = `MarkInstalledRequest` JSON → returns updated
+    /// `AgentMembershipInfo`. Phase 1: owner calls this after manually
+    /// submitting the on-chain install UserOp.
+    func markAgentInstalled(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    // MARK: - Phase 2: On-Chain Validator Install
+
+    /// requestData = `InstallAgentOnChainRequest` JSON → returns
+    /// `WalletGroupChainResultInfo`. Owner-signed UserOp that installs the
+    /// agent's validator module on the group's smart account; optionally
+    /// submitted via ZeroDev.
+    func installAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// requestData = `UninstallAgentOnChainRequest` JSON → returns
+    /// `WalletGroupChainResultInfo`. Inverse of `installAgentOnChain`.
+    func uninstallAgentOnChain(
+        requestData: Data,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
 }
 
 let xpcServiceName = "com.bastion.xpc"

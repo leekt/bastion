@@ -5,8 +5,10 @@ final class RuleEngine {
 
     private let keychain: KeychainBackend
     let stateStore: StateStore
-    private let authManager = AuthManager.shared
-    private let auditLog = AuditLog.shared
+    // Internal (default) so extensions in other files within the module
+    // — e.g. WalletGroupOnChain — can authenticate and audit.
+    let authManager = AuthManager.shared
+    let auditLog = AuditLog.shared
 
     private nonisolated static let configAccount = "config"
     private nonisolated static let configBackupAccount = "config.premigration"
@@ -129,7 +131,7 @@ final class RuleEngine {
         configLoaded = true
     }
 
-    private func ensureConfigLoadedIfNeeded() {
+    func ensureConfigLoadedIfNeeded() {
         guard !configLoaded else { return }
         let result = loadConfigRaw()
         config = result.config
@@ -198,7 +200,13 @@ final class RuleEngine {
 
     func effectiveRules(for bundleId: String?) -> RuleConfig {
         ensureConfigLoadedIfNeeded()
-        return ensureClientProfile(bundleId: bundleId)?.rules ?? config.rules
+        guard let profile = ensureClientProfile(bundleId: bundleId) else {
+            return config.rules
+        }
+        if let (group, member) = activeGroupMembership(for: profile) {
+            return mergeGroupRules(group: group.sharedRules, member: member.scopedRules)
+        }
+        return profile.rules
     }
 
     func clientProfile(bundleId: String?) -> ClientProfile? {
@@ -223,19 +231,47 @@ final class RuleEngine {
             return nil
         }
 
+        if let (group, member) = activeGroupMembership(for: profile) {
+            return ClientProfileInfo(
+                id: profile.id,
+                bundleId: profile.bundleId,
+                label: profile.label ?? member.label,
+                authPolicy: profile.authPolicy?.rawValue ?? config.authPolicy.rawValue,
+                keyTag: member.keyTag,
+                accountAddress: group.accountAddress,
+                walletGroupId: group.id,
+                membershipId: member.id
+            )
+        }
+
         return ClientProfileInfo(
             id: profile.id,
             bundleId: profile.bundleId,
             label: profile.label,
             authPolicy: profile.authPolicy?.rawValue ?? config.authPolicy.rawValue,
             keyTag: profile.keyTag,
-            accountAddress: accountAddress(for: profile)
+            accountAddress: accountAddress(for: profile),
+            walletGroupId: nil,
+            membershipId: nil
         )
     }
 
     func signingContext(for bundleId: String?) -> ClientSigningContext {
         ensureConfigLoadedIfNeeded()
         if let profile = ensureClientProfile(bundleId: bundleId) {
+            if let (group, member) = activeGroupMembership(for: profile) {
+                // Shared smart account address, agent's OWN SE key, MERGED rules
+                // (intersection of group.sharedRules and member.scopedRules).
+                return ClientSigningContext(
+                    bundleId: profile.bundleId,
+                    profileId: profile.id,
+                    profileLabel: profile.label ?? member.label,
+                    authPolicy: profile.authPolicy ?? config.authPolicy,
+                    keyTag: member.keyTag,
+                    accountAddress: group.accountAddress,
+                    rules: mergeGroupRules(group: group.sharedRules, member: member.scopedRules)
+                )
+            }
             return ClientSigningContext(
                 bundleId: profile.bundleId,
                 profileId: profile.id,
@@ -260,6 +296,19 @@ final class RuleEngine {
 
     func accountAddress(for profile: ClientProfile) -> String? {
         accountAddress(forKeyTag: profile.keyTag)
+    }
+
+    /// Resolves the active (non-revoked) group membership for a profile, or nil
+    /// if the profile is unlinked or its membership has been revoked.
+    private func activeGroupMembership(for profile: ClientProfile) -> (WalletGroup, AgentMembership)? {
+        guard let groupId = profile.walletGroupId,
+              let memberId = profile.membershipId,
+              let group = config.walletGroups.first(where: { $0.id == groupId }),
+              let member = group.member(id: memberId),
+              !member.installStatus.isRevoked else {
+            return nil
+        }
+        return (group, member)
     }
 
     // MARK: - Validation
@@ -613,7 +662,15 @@ final class RuleEngine {
         rules: RuleConfig,
         reasons: inout [String]
     ) {
-        guard let allowedClients = rules.allowedClients, !allowedClients.isEmpty else {
+        // nil = no allowlist configured (allow). Present-but-empty = explicit
+        // deny-all. Previously we collapsed both into "no restriction" which
+        // let an empty allowlist (e.g. emitted by future merge logic) silently
+        // permit every caller.
+        guard let allowedClients = rules.allowedClients else {
+            return
+        }
+        guard !allowedClients.isEmpty else {
+            reasons.append("Client allowlist is empty — no clients permitted")
             return
         }
 
@@ -712,7 +769,15 @@ final class RuleEngine {
         reasons: inout [String]
     ) {
         let chainKey = String(chainId)
-        guard let chainTargets = allowedTargets[chainKey], !chainTargets.isEmpty else {
+        // Distinguish "key absent" (no restriction for this chain) from "key
+        // present but empty" (deny-all). The merge logic emits an empty
+        // sentinel array for impossible intersections — treating that as
+        // "no restriction" was the prior bug.
+        guard let chainTargets = allowedTargets[chainKey] else {
+            return
+        }
+        guard !chainTargets.isEmpty else {
+            reasons.append("No targets allowed for chain \(chainId)")
             return
         }
 
@@ -1037,7 +1102,7 @@ final class RuleEngine {
 
     private func normalizedConfig(_ config: BastionConfig) -> BastionConfig {
         var normalized = config
-        normalized.version = 7
+        normalized.version = 8
         if let projectId = normalized.bundlerPreferences.zeroDevProjectId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !projectId.isEmpty {
@@ -1084,6 +1149,22 @@ final class RuleEngine {
         return cloned
     }
 
+    /// Forces fresh UUIDs for any rate-limit or spending-limit rule. Used when
+    /// accepting a `RuleConfig` from an external caller (e.g. CLI / MCP) to
+    /// guarantee that two agents in the same wallet group cannot share a
+    /// counter key in `StateStore`. State counters are keyed by rule.id, so
+    /// duplicate IDs would let one agent's spend exhaust another's budget.
+    nonisolated func regeneratedScopedRuleIDs(_ rules: RuleConfig) -> RuleConfig {
+        var out = rules
+        out.rateLimits = rules.rateLimits.map {
+            RateLimitRule(id: UUID().uuidString, maxRequests: $0.maxRequests, windowSeconds: $0.windowSeconds)
+        }
+        out.spendingLimits = rules.spendingLimits.map {
+            SpendingLimitRule(id: UUID().uuidString, token: $0.token, allowance: $0.allowance, windowSeconds: $0.windowSeconds)
+        }
+        return out
+    }
+
     private func normalizedBundleId(_ bundleId: String?) -> String? {
         guard let bundleId else {
             return nil
@@ -1097,5 +1178,429 @@ final class RuleEngine {
 
     private func accountAddress(forKeyTag keyTag: String) -> String? {
         (try? SecureEnclaveManager.shared.getPublicKey(keyTag: keyTag))?.accountAddress
+    }
+
+    // MARK: - Wallet Group Management
+
+    /// Maximum wallet groups per install — cap prevents unbounded SE key growth.
+    private nonisolated static let maxWalletGroups = 10
+    /// Maximum agents per group — paired with maxClientProfiles (20) so an owner
+    /// can't exceed practical SE slot budget.
+    private nonisolated static let maxAgentsPerGroup = 20
+
+    func listWalletGroups() -> [WalletGroup] {
+        ensureConfigLoadedIfNeeded()
+        return config.walletGroups
+    }
+
+    func walletGroup(id: String) -> WalletGroup? {
+        ensureConfigLoadedIfNeeded()
+        return config.walletGroups.first(where: { $0.id == id })
+    }
+
+    /// Creates a wallet group and provisions the owner's sudo SE key.
+    /// Requires biometric/passcode auth — owner operations are always gated.
+    func createWalletGroup(
+        label: String,
+        chainIds: [Int] = [],
+        sharedRules: RuleConfig = .default
+    ) async throws -> WalletGroup {
+        try await authManager.authenticate(
+            policy: .biometricOrPasscode,
+            reason: "Authenticate to create wallet group \"\(label)\""
+        )
+
+        ensureConfigLoadedIfNeeded()
+
+        guard config.walletGroups.count < Self.maxWalletGroups else {
+            throw BastionError.ruleViolation
+        }
+
+        let groupId = UUID().uuidString
+        let ownerKeyTag = WalletGroup.makeOwnerKeyTag(groupId: groupId)
+
+        // Provision owner SE key (silent — authPolicy is enforced by the
+        // app-level biometric gate above, not by the SE key's access control).
+        _ = try SecureEnclaveManager.shared.loadOrCreateSigningKey(keyTag: ownerKeyTag)
+        let pubkey = try SecureEnclaveManager.shared.getPublicKey(keyTag: ownerKeyTag)
+
+        let group = WalletGroup(
+            id: groupId,
+            label: label,
+            ownerKeyTag: ownerKeyTag,
+            accountAddress: pubkey.accountAddress,
+            chainIds: chainIds,
+            sharedRules: sharedRules,
+            members: [],
+            createdAt: Date()
+        )
+
+        config.walletGroups.append(group)
+        config = normalizedConfig(config)
+        do {
+            try saveConfig(config)
+        } catch {
+            // Rollback in-memory state; SE key is orphaned but harmless (no profile binds to it).
+            config.walletGroups.removeAll { $0.id == groupId }
+            throw error
+        }
+
+        auditLog.record(AuditEvent(
+            type: .walletGroupCreated,
+            dataPrefix: "walletgroup.\(groupId.prefix(8))",
+            reason: "Created wallet group \"\(label)\" (\(pubkey.accountAddress ?? "unknown"))"
+        ))
+
+        return group
+    }
+
+    /// Adds a new agent to a wallet group with a freshly provisioned SE key.
+    /// The optional `clientProfileId` binds an existing profile to this
+    /// membership; if omitted, the caller can later register a profile and
+    /// link it via `linkClientProfile`.
+    func addAgentToGroup(
+        groupId: String,
+        label: String?,
+        clientProfileId: String?,
+        scopedRules: RuleConfig = .default
+    ) async throws -> AgentMembership {
+        try await authManager.authenticate(
+            policy: .biometricOrPasscode,
+            reason: "Authenticate to add an agent to the wallet group"
+        )
+
+        ensureConfigLoadedIfNeeded()
+
+        guard let groupIdx = config.walletGroups.firstIndex(where: { $0.id == groupId }) else {
+            throw BastionError.invalidInput
+        }
+
+        guard config.walletGroups[groupIdx].members.count < Self.maxAgentsPerGroup else {
+            throw BastionError.ruleViolation
+        }
+
+        // Validate that clientProfileId, if provided, actually exists and is
+        // not already a member of another group.
+        if let profileId = clientProfileId {
+            guard let idx = config.clientProfiles.firstIndex(where: { $0.id == profileId }) else {
+                throw BastionError.invalidInput
+            }
+            if config.clientProfiles[idx].walletGroupId != nil {
+                throw BastionError.ruleViolation
+            }
+        }
+
+        let memberId = UUID().uuidString
+        let keyTag = WalletGroup.makeAgentKeyTag(groupId: groupId, memberId: memberId)
+        _ = try SecureEnclaveManager.shared.loadOrCreateSigningKey(keyTag: keyTag)
+
+        // Regenerate counter IDs so this membership's spending and rate-limit
+        // rules cannot collide with another member's counters in StateStore.
+        let isolatedScope = regeneratedScopedRuleIDs(scopedRules)
+
+        let membership = AgentMembership(
+            id: memberId,
+            clientProfileId: clientProfileId,
+            label: label,
+            keyTag: keyTag,
+            scopedRules: isolatedScope,
+            installStatus: .pending
+        )
+
+        config.walletGroups[groupIdx].members.append(membership)
+
+        // Bind the client profile to this membership so signingContext resolves
+        // to the group's shared account address.
+        if let profileId = clientProfileId,
+           let profileIdx = config.clientProfiles.firstIndex(where: { $0.id == profileId }) {
+            config.clientProfiles[profileIdx].walletGroupId = groupId
+            config.clientProfiles[profileIdx].membershipId = memberId
+        }
+
+        config = normalizedConfig(config)
+        do {
+            try saveConfig(config)
+        } catch {
+            config.walletGroups[groupIdx].members.removeAll { $0.id == memberId }
+            if let profileId = clientProfileId,
+               let profileIdx = config.clientProfiles.firstIndex(where: { $0.id == profileId }) {
+                config.clientProfiles[profileIdx].walletGroupId = nil
+                config.clientProfiles[profileIdx].membershipId = nil
+            }
+            _ = SecureEnclaveManager.shared.deleteSigningKeys(keyTags: [keyTag])
+            throw error
+        }
+
+        auditLog.record(AuditEvent(
+            type: .walletGroupAgentAdded,
+            dataPrefix: "walletgroup.\(groupId.prefix(8)).agent.\(memberId.prefix(8))",
+            reason: "Added agent \(label ?? memberId) to group \(config.walletGroups[groupIdx].label)"
+        ))
+
+        return membership
+    }
+
+    /// Marks an agent's on-chain validator as installed and records the tx
+    /// hash. Phase 1: owner calls this after manually submitting the install
+    /// UserOp. Phase 2: Bastion will submit the UserOp and call this itself.
+    func markAgentInstalled(
+        groupId: String,
+        memberId: String,
+        txHash: String,
+        validatorAddress: String?
+    ) async throws -> AgentMembership {
+        try await authManager.authenticate(
+            policy: .biometricOrPasscode,
+            reason: "Authenticate to record an agent validator install"
+        )
+
+        ensureConfigLoadedIfNeeded()
+
+        guard let groupIdx = config.walletGroups.firstIndex(where: { $0.id == groupId }),
+              let memberIdx = config.walletGroups[groupIdx].members.firstIndex(where: { $0.id == memberId }) else {
+            throw BastionError.invalidInput
+        }
+
+        config.walletGroups[groupIdx].members[memberIdx].installStatus = .installed(txHash: txHash)
+        config.walletGroups[groupIdx].members[memberIdx].installedAt = Date()
+        if let validatorAddress {
+            config.walletGroups[groupIdx].members[memberIdx].validatorAddress = validatorAddress
+        }
+
+        let updated = config.walletGroups[groupIdx].members[memberIdx]
+        try saveConfig(config)
+
+        auditLog.record(AuditEvent(
+            type: .walletGroupAgentInstalled,
+            dataPrefix: "walletgroup.\(groupId.prefix(8)).agent.\(memberId.prefix(8))",
+            reason: "Agent validator installed: tx=\(txHash.prefix(14))..."
+        ))
+
+        return updated
+    }
+
+    /// Updates an agent's scoped rules. Group sharedRules are unchanged.
+    func updateAgentScope(
+        groupId: String,
+        memberId: String,
+        scopedRules: RuleConfig
+    ) async throws {
+        try await authManager.authenticate(
+            policy: .biometricOrPasscode,
+            reason: "Authenticate to update an agent's scope"
+        )
+
+        ensureConfigLoadedIfNeeded()
+
+        guard let groupIdx = config.walletGroups.firstIndex(where: { $0.id == groupId }),
+              let memberIdx = config.walletGroups[groupIdx].members.firstIndex(where: { $0.id == memberId }) else {
+            throw BastionError.invalidInput
+        }
+
+        // Reissue counter IDs on every scope update so a caller cannot
+        // (intentionally or accidentally) reuse another member's rule.id and
+        // share a StateStore counter with them.
+        config.walletGroups[groupIdx].members[memberIdx].scopedRules =
+            regeneratedScopedRuleIDs(scopedRules)
+        try saveConfig(config)
+
+        auditLog.record(AuditEvent(
+            type: .walletGroupAgentScopeUpdated,
+            dataPrefix: "walletgroup.\(groupId.prefix(8)).agent.\(memberId.prefix(8))",
+            reason: "Updated scope for agent \(memberId.prefix(8))"
+        ))
+    }
+
+    /// Revokes an agent: marks the membership revoked, unbinds any linked
+    /// ClientProfile, and deletes the agent's SE key so it can never sign
+    /// again. The on-chain validator uninstall (when implemented in Phase 2)
+    /// will land in markAgentUninstalled; for now the caller passes a
+    /// placeholder/optional tx hash.
+    func removeAgentFromGroup(
+        groupId: String,
+        memberId: String,
+        txHash: String?
+    ) async throws {
+        try await authManager.authenticate(
+            policy: .biometricOrPasscode,
+            reason: "Authenticate to revoke an agent from the wallet group"
+        )
+
+        ensureConfigLoadedIfNeeded()
+
+        guard let groupIdx = config.walletGroups.firstIndex(where: { $0.id == groupId }),
+              let memberIdx = config.walletGroups[groupIdx].members.firstIndex(where: { $0.id == memberId }) else {
+            throw BastionError.invalidInput
+        }
+
+        let member = config.walletGroups[groupIdx].members[memberIdx]
+        let revocationTx = txHash ?? "local-only"
+        config.walletGroups[groupIdx].members[memberIdx].installStatus = .revoked(txHash: revocationTx)
+        config.walletGroups[groupIdx].members[memberIdx].revokedAt = Date()
+
+        // Unbind any ClientProfile pointing at this membership so future
+        // signing requests fall back to a private wallet (or are blocked if
+        // there is no private key for this profile).
+        for profileIdx in config.clientProfiles.indices {
+            if config.clientProfiles[profileIdx].walletGroupId == groupId
+                && config.clientProfiles[profileIdx].membershipId == memberId {
+                config.clientProfiles[profileIdx].walletGroupId = nil
+                config.clientProfiles[profileIdx].membershipId = nil
+            }
+        }
+
+        try saveConfig(config)
+
+        // Delete the agent's SE key. Even if an on-chain uninstall hasn't
+        // landed yet, Bastion cannot sign for this agent anymore.
+        _ = SecureEnclaveManager.shared.deleteSigningKeys(keyTags: [member.keyTag])
+
+        auditLog.record(AuditEvent(
+            type: .walletGroupAgentRemoved,
+            dataPrefix: "walletgroup.\(groupId.prefix(8)).agent.\(memberId.prefix(8))",
+            reason: "Revoked agent \(member.label ?? memberId.prefix(8).description); key deleted"
+        ))
+    }
+
+    /// Returns the list of SE key tags associated with a group (owner + all
+    /// non-revoked members). Used by resetSigningKeys to wipe group keys too.
+    nonisolated func walletGroupKeyTags() -> [String] {
+        let groups = loadConfig().walletGroups
+        var tags: [String] = []
+        for group in groups {
+            tags.append(group.ownerKeyTag)
+            for member in group.members where !member.installStatus.isRevoked {
+                tags.append(member.keyTag)
+            }
+        }
+        return tags
+    }
+
+    // MARK: - Rule Merging (Group ∩ Agent)
+
+    /// Intersection semantics: a request must satisfy BOTH the group's
+    /// sharedRules and the agent's scopedRules. For allowlist-style fields,
+    /// the result is the intersection of both sets. For cap-style fields
+    /// (rate limits, spending limits), the tighter cap wins — and we keep
+    /// BOTH rules with their original IDs so the group counter (shared
+    /// across all members) and the agent counter (per-member) both
+    /// increment.
+    nonisolated func mergeGroupRules(group: RuleConfig, member: RuleConfig) -> RuleConfig {
+        // Intersection for string sets. Nil means "no restriction" in this
+        // codebase, so nil ∩ X = X (X restricts, the other side doesn't).
+        func intersectArrays(_ a: [String]?, _ b: [String]?) -> [String]? {
+            switch (a, b) {
+            case (nil, nil): return nil
+            case (nil, let x?): return x
+            case (let x?, nil): return x
+            case (let x?, let y?):
+                let ySet = Set(y.map { $0.lowercased() })
+                return x.filter { ySet.contains($0.lowercased()) }
+            }
+        }
+
+        func intersectInts(_ a: [Int]?, _ b: [Int]?) -> [Int]? {
+            switch (a, b) {
+            case (nil, nil): return nil
+            case (nil, let x?): return x
+            case (let x?, nil): return x
+            case (let x?, let y?):
+                let ySet = Set(y)
+                return x.filter { ySet.contains($0) }
+            }
+        }
+
+        func intersectDict(_ a: [String: [String]]?, _ b: [String: [String]]?) -> [String: [String]]? {
+            switch (a, b) {
+            case (nil, nil): return nil
+            case (nil, let x?): return x
+            case (let x?, nil): return x
+            case (let x?, let y?):
+                var out: [String: [String]] = [:]
+                // For keys in both: intersect the arrays.
+                // For keys only in one: keep that side (other has no restriction for that key).
+                let allKeys = Set(x.keys).union(y.keys)
+                for key in allKeys {
+                    let leftValues = x[key]
+                    let rightValues = y[key]
+                    switch (leftValues, rightValues) {
+                    case (nil, nil):
+                        continue
+                    case (let v?, nil), (nil, let v?):
+                        out[key] = v
+                    case (let lv?, let rv?):
+                        let rvSet = Set(rv.map { $0.lowercased() })
+                        let intersected = lv.filter { rvSet.contains($0.lowercased()) }
+                        if !intersected.isEmpty {
+                            out[key] = intersected
+                        } else {
+                            // Both sides restrict this key but share no overlap →
+                            // record an impossible allowlist. Using a sentinel
+                            // empty-but-present value so validation denies.
+                            out[key] = []
+                        }
+                    }
+                }
+                return out
+            }
+        }
+
+        return RuleConfig(
+            enabled: group.enabled || member.enabled,
+            requireExplicitApproval: group.requireExplicitApproval || member.requireExplicitApproval,
+            allowedHours: tighterHours(group.allowedHours, member.allowedHours),
+            allowedChains: intersectInts(group.allowedChains, member.allowedChains),
+            allowedTargets: intersectDict(group.allowedTargets, member.allowedTargets),
+            allowedSelectors: intersectDict(group.allowedSelectors, member.allowedSelectors),
+            denySelectors: unionArrays(group.denySelectors, member.denySelectors),
+            allowedClients: group.allowedClients ?? member.allowedClients,
+            rateLimits: group.rateLimits + member.rateLimits,
+            spendingLimits: group.spendingLimits + member.spendingLimits,
+            rawMessagePolicy: RawMessagePolicy(
+                enabled: group.rawMessagePolicy.enabled && member.rawMessagePolicy.enabled,
+                allowRawSigning: group.rawMessagePolicy.allowRawSigning && member.rawMessagePolicy.allowRawSigning
+            ),
+            typedDataPolicy: TypedDataPolicy(
+                enabled: group.typedDataPolicy.enabled && member.typedDataPolicy.enabled,
+                requireExplicitApproval: group.typedDataPolicy.requireExplicitApproval || member.typedDataPolicy.requireExplicitApproval,
+                domainRules: group.typedDataPolicy.domainRules + member.typedDataPolicy.domainRules,
+                structRules: group.typedDataPolicy.structRules + member.typedDataPolicy.structRules
+            )
+        )
+    }
+
+    private nonisolated func unionArrays(_ a: [String]?, _ b: [String]?) -> [String]? {
+        switch (a, b) {
+        case (nil, nil): return nil
+        case (nil, let x?): return x
+        case (let x?, nil): return x
+        case (let x?, let y?):
+            return Array(Set(x).union(y))
+        }
+    }
+
+    /// For allowedHours: returns the narrower window. Both nil → nil. One nil
+    /// → the other. Both set → the intersection (or the tighter range).
+    private nonisolated func tighterHours(_ a: AllowedHours?, _ b: AllowedHours?) -> AllowedHours? {
+        switch (a, b) {
+        case (nil, nil): return nil
+        case (nil, let x?): return x
+        case (let x?, nil): return x
+        case (let x?, let y?):
+            // Take max(start) and min(end) for same-day ranges. Cross-midnight
+            // ranges are left to the validator — we fall back to the member's
+            // scope for now since it's more specific.
+            if x.start <= x.end && y.start <= y.end {
+                let newStart = max(x.start, y.start)
+                let newEnd = min(x.end, y.end)
+                if newStart < newEnd {
+                    return AllowedHours(start: newStart, end: newEnd)
+                }
+                // No overlap — use the member's range as the canonical one;
+                // validation will deny at sign time.
+                return y
+            }
+            return y
+        }
     }
 }

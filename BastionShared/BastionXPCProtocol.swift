@@ -17,6 +17,22 @@ import Foundation
         requestID: String,
         withReply reply: @escaping (Data?, Error?) -> Void
     )
+
+    // Wallet groups — see app target's BastionXPCProtocol.swift for docs.
+    func createWalletGroup(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func listWalletGroups(withReply reply: @escaping (Data?, Error?) -> Void)
+    func getWalletGroup(groupId: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func addAgentToGroup(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func removeAgentFromGroup(
+        groupId: String,
+        memberId: String,
+        txHash: String?,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+    func updateAgentScope(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func markAgentInstalled(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func installAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func uninstallAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
 let xpcServiceName = "com.bastion.xpc"

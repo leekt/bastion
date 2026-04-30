@@ -56,6 +56,12 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         case userOpReceiptTimeout = "user_op_receipt_timeout"
         /// All signing keys were deleted via resetSigningKeys.
         case keyReset = "key_reset"
+        /// Wallet group lifecycle — owner-privileged operations.
+        case walletGroupCreated = "wallet_group_created"
+        case walletGroupAgentAdded = "wallet_group_agent_added"
+        case walletGroupAgentRemoved = "wallet_group_agent_removed"
+        case walletGroupAgentScopeUpdated = "wallet_group_agent_scope_updated"
+        case walletGroupAgentInstalled = "wallet_group_agent_installed"
     }
 
     nonisolated enum ApprovalMode: String, Codable, Sendable {
@@ -154,6 +160,16 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
             return "UserOp Receipt Failed"
         case .userOpReceiptTimeout:
             return "UserOp Receipt Pending"
+        case .walletGroupCreated:
+            return "Wallet Group Created"
+        case .walletGroupAgentAdded:
+            return "Agent Added to Wallet Group"
+        case .walletGroupAgentRemoved:
+            return "Agent Removed from Wallet Group"
+        case .walletGroupAgentScopeUpdated:
+            return "Agent Scope Updated"
+        case .walletGroupAgentInstalled:
+            return "Agent Validator Installed"
         case .signPending, .signSuccess, .signDenied, .ruleViolation, .authFailed, .preflightCompleted, .keyReset:
             break
         }
@@ -191,6 +207,16 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
             return "Preflight"
         case .keyReset:
             return "Keys Reset"
+        case .walletGroupCreated:
+            return "Group Created"
+        case .walletGroupAgentAdded:
+            return "Agent Added"
+        case .walletGroupAgentRemoved:
+            return "Agent Removed"
+        case .walletGroupAgentScopeUpdated:
+            return "Scope Updated"
+        case .walletGroupAgentInstalled:
+            return "Validator Installed"
         }
     }
 

@@ -12,6 +12,15 @@ import Foundation
     func getServiceInfo(withReply reply: @escaping (Data?, Error?) -> Void)
     func resetSigningKeys(withReply reply: @escaping (Data?, Error?) -> Void)
     func signStructured(operationType: String, operationData: Data, requestID: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func createWalletGroup(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func listWalletGroups(withReply reply: @escaping (Data?, Error?) -> Void)
+    func getWalletGroup(groupId: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func addAgentToGroup(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func removeAgentFromGroup(groupId: String, memberId: String, txHash: String?, withReply reply: @escaping (Data?, Error?) -> Void)
+    func updateAgentScope(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func markAgentInstalled(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func installAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func uninstallAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
 private let userOpFieldHelp = """
@@ -43,6 +52,27 @@ Usage:
   bastion rules                                 # Get current rules
   bastion state                                 # Get signing state
   bastion reset-keys                            # Delete Bastion signing keys
+
+Wallet groups (owner sudo + scoped agent validators):
+  bastion groups create --label <name> [--chain <id>] [--chain <id>]
+                                                # Create a shared wallet (requires biometric auth)
+  bastion groups list                           # List all wallet groups
+  bastion groups show <groupId>                 # Show a group and its members
+  bastion groups add-agent <groupId> [--label <name>] [--profile-id <id>]
+                                                [--scope-json-file <path>]
+                                                # Add an agent with scoped signing power
+  bastion groups remove-agent <groupId> <memberId> [--tx <hash>]
+                                                # Revoke an agent (deletes its SE key)
+  bastion groups mark-installed <groupId> <memberId> --tx <hash> [--validator <addr>]
+                                                # Record on-chain validator install (Phase 1 manual)
+  bastion groups install-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>]
+                                                [--wait-seconds <n>]
+                                                # Phase 2: build (and optionally submit) the owner-
+                                                # signed UserOp that installs the agent's validator.
+  bastion groups uninstall-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>]
+                                                # Phase 2: inverse of install-agent.
+  bastion groups update-scope <groupId> <memberId> --scope-json-file <path>
+                                                # Tighten/relax an agent's scope
 
 UserOp JSON fields (all byte fields hex-encoded with 0x prefix):
   sender, nonce, callData, verificationGasLimit, callGasLimit,
@@ -612,6 +642,302 @@ func cmdResetKeys() {
     printJSON(decodeJSON(ResetSigningKeysResponse.self, from: responseData))
 }
 
+// MARK: - Wallet Group Commands
+
+/// Server-pretty JSON is sufficient — the CLI does not need to decode into
+/// typed structs because the rule-config payloads are deeply nested.
+private func printRawServerJSON(_ data: Data) {
+    if data.isEmpty {
+        print("{}")
+        return
+    }
+    if let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+       let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+       let text = String(data: pretty, encoding: .utf8) {
+        print(text)
+        return
+    }
+    print(String(data: data, encoding: .utf8) ?? "")
+}
+
+private func readScopeJSON(from args: ArraySlice<String>) -> Data? {
+    var i = args.startIndex
+    while i < args.endIndex {
+        let arg = args[i]
+        if arg == "--scope-json-file" {
+            let next = args.index(after: i)
+            guard next < args.endIndex else {
+                exitWithError("--scope-json-file requires a path argument")
+            }
+            let path = args[next]
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+                exitWithError("Failed to read scope JSON from \(path)")
+            }
+            // Validate it's valid JSON before forwarding.
+            guard (try? JSONSerialization.jsonObject(with: data)) != nil else {
+                exitWithError("Scope file at \(path) is not valid JSON")
+            }
+            return data
+        }
+        if arg == "--scope-json" {
+            let next = args.index(after: i)
+            guard next < args.endIndex else {
+                exitWithError("--scope-json requires a JSON string argument")
+            }
+            let inline = args[next].data(using: .utf8) ?? Data()
+            guard (try? JSONSerialization.jsonObject(with: inline)) != nil else {
+                exitWithError("--scope-json value is not valid JSON")
+            }
+            return inline
+        }
+        i = args.index(after: i)
+    }
+    return nil
+}
+
+private func optionValue(_ args: ArraySlice<String>, flag: String) -> String? {
+    var i = args.startIndex
+    while i < args.endIndex {
+        if args[i] == flag {
+            let next = args.index(after: i)
+            if next < args.endIndex {
+                return args[next]
+            }
+            exitWithError("\(flag) requires a value")
+        }
+        i = args.index(after: i)
+    }
+    return nil
+}
+
+private func optionValues(_ args: ArraySlice<String>, flag: String) -> [String] {
+    var out: [String] = []
+    var i = args.startIndex
+    while i < args.endIndex {
+        if args[i] == flag {
+            let next = args.index(after: i)
+            if next < args.endIndex {
+                out.append(args[next])
+            }
+        }
+        i = args.index(after: i)
+    }
+    return out
+}
+
+func cmdGroupsCreate(_ args: ArraySlice<String>) {
+    guard let label = optionValue(args, flag: "--label") else {
+        exitWithError("Usage: bastion groups create --label <name> [--chain <id>]")
+    }
+    let chains = optionValues(args, flag: "--chain").compactMap { Int($0) }
+
+    var body: [String: Any] = ["label": label, "chainIds": chains]
+    if let scopeData = readScopeJSON(from: args),
+       let scope = try? JSONSerialization.jsonObject(with: scopeData) {
+        body["sharedRules"] = scope
+    }
+
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize create-group request")
+    }
+
+    let response = performDataRequest(timeoutSeconds: 30, timeoutMessage: "Create wallet group timed out") { proxy, reply in
+        proxy.createWalletGroup(requestData: requestData, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
+func cmdGroupsList() {
+    let response = performDataRequest(timeoutSeconds: 10) { proxy, reply in
+        proxy.listWalletGroups(withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
+func cmdGroupsShow(_ args: ArraySlice<String>) {
+    guard let groupId = args.first else {
+        exitWithError("Usage: bastion groups show <groupId>")
+    }
+    let response = performDataRequest(timeoutSeconds: 10) { proxy, reply in
+        proxy.getWalletGroup(groupId: groupId, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
+func cmdGroupsAddAgent(_ args: ArraySlice<String>) {
+    guard let groupId = args.first else {
+        exitWithError("Usage: bastion groups add-agent <groupId> [--label <n>] [--profile-id <id>] [--scope-json-file <path>]")
+    }
+    let rest = args.dropFirst()
+    let label = optionValue(rest, flag: "--label")
+    let profileId = optionValue(rest, flag: "--profile-id")
+
+    var body: [String: Any] = ["groupId": groupId]
+    if let label { body["label"] = label }
+    if let profileId { body["clientProfileId"] = profileId }
+    if let scopeData = readScopeJSON(from: rest),
+       let scope = try? JSONSerialization.jsonObject(with: scopeData) {
+        body["scopedRules"] = scope
+    }
+
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize add-agent request")
+    }
+
+    let response = performDataRequest(timeoutSeconds: 30, timeoutMessage: "Add agent timed out") { proxy, reply in
+        proxy.addAgentToGroup(requestData: requestData, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
+func cmdGroupsRemoveAgent(_ args: ArraySlice<String>) {
+    guard args.count >= 2 else {
+        exitWithError("Usage: bastion groups remove-agent <groupId> <memberId> [--tx <hash>]")
+    }
+    let groupId = args[args.startIndex]
+    let memberId = args[args.index(after: args.startIndex)]
+    let rest = args.dropFirst(2)
+    let txHash = optionValue(rest, flag: "--tx")
+
+    let response = performDataRequest(timeoutSeconds: 30, timeoutMessage: "Remove agent timed out") { proxy, reply in
+        proxy.removeAgentFromGroup(
+            groupId: groupId,
+            memberId: memberId,
+            txHash: txHash,
+            withReply: reply
+        )
+    }
+    printRawServerJSON(response)
+    print("Agent \(memberId) revoked from group \(groupId). SE key deleted.")
+}
+
+func cmdGroupsUpdateScope(_ args: ArraySlice<String>) {
+    guard args.count >= 2 else {
+        exitWithError("Usage: bastion groups update-scope <groupId> <memberId> --scope-json-file <path>")
+    }
+    let groupId = args[args.startIndex]
+    let memberId = args[args.index(after: args.startIndex)]
+    let rest = args.dropFirst(2)
+    guard let scopeData = readScopeJSON(from: rest),
+          let scope = try? JSONSerialization.jsonObject(with: scopeData) else {
+        exitWithError("--scope-json-file or --scope-json is required")
+    }
+
+    let body: [String: Any] = [
+        "groupId": groupId,
+        "memberId": memberId,
+        "scopedRules": scope
+    ]
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize update-scope request")
+    }
+
+    _ = performDataRequest(timeoutSeconds: 30, timeoutMessage: "Update scope timed out") { proxy, reply in
+        proxy.updateAgentScope(requestData: requestData, withReply: reply)
+    }
+    print("Scope updated for agent \(memberId) in group \(groupId).")
+}
+
+func cmdGroupsInstallAgentOnChain(_ args: ArraySlice<String>) {
+    guard args.count >= 2 else {
+        exitWithError("Usage: bastion groups install-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>] [--wait-seconds <n>]")
+    }
+    let groupId = args[args.startIndex]
+    let memberId = args[args.index(after: args.startIndex)]
+    let rest = args.dropFirst(2)
+    guard let chainIdStr = optionValue(rest, flag: "--chain"),
+          let chainId = Int(chainIdStr) else {
+        exitWithError("--chain <id> is required")
+    }
+    let projectId = optionValue(rest, flag: "--project-id")
+    let submit = rest.contains("--submit")
+    let wait = optionValue(rest, flag: "--wait-seconds").flatMap(Int.init)
+
+    var body: [String: Any] = [
+        "groupId": groupId,
+        "memberId": memberId,
+        "chainId": chainId,
+        "submit": submit
+    ]
+    if let projectId { body["projectId"] = projectId }
+    if let wait { body["waitForReceiptSeconds"] = wait }
+
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize install-agent request")
+    }
+
+    // Install flows can take a while (bundler + receipt polling). Generous timeout.
+    let timeout = max(45, (wait ?? 30) + 15)
+    let response = performDataRequest(timeoutSeconds: timeout, timeoutMessage: "On-chain install timed out") { proxy, reply in
+        proxy.installAgentOnChain(requestData: requestData, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
+func cmdGroupsUninstallAgentOnChain(_ args: ArraySlice<String>) {
+    guard args.count >= 2 else {
+        exitWithError("Usage: bastion groups uninstall-agent <groupId> <memberId> --chain <id> [--submit] [--project-id <id>] [--wait-seconds <n>]")
+    }
+    let groupId = args[args.startIndex]
+    let memberId = args[args.index(after: args.startIndex)]
+    let rest = args.dropFirst(2)
+    guard let chainIdStr = optionValue(rest, flag: "--chain"),
+          let chainId = Int(chainIdStr) else {
+        exitWithError("--chain <id> is required")
+    }
+    let projectId = optionValue(rest, flag: "--project-id")
+    let submit = rest.contains("--submit")
+    let wait = optionValue(rest, flag: "--wait-seconds").flatMap(Int.init)
+
+    var body: [String: Any] = [
+        "groupId": groupId,
+        "memberId": memberId,
+        "chainId": chainId,
+        "submit": submit
+    ]
+    if let projectId { body["projectId"] = projectId }
+    if let wait { body["waitForReceiptSeconds"] = wait }
+
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize uninstall-agent request")
+    }
+
+    let timeout = max(45, (wait ?? 30) + 15)
+    let response = performDataRequest(timeoutSeconds: timeout, timeoutMessage: "On-chain uninstall timed out") { proxy, reply in
+        proxy.uninstallAgentOnChain(requestData: requestData, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
+func cmdGroupsMarkInstalled(_ args: ArraySlice<String>) {
+    guard args.count >= 2 else {
+        exitWithError("Usage: bastion groups mark-installed <groupId> <memberId> --tx <hash> [--validator <addr>]")
+    }
+    let groupId = args[args.startIndex]
+    let memberId = args[args.index(after: args.startIndex)]
+    let rest = args.dropFirst(2)
+    guard let txHash = optionValue(rest, flag: "--tx") else {
+        exitWithError("--tx <hash> is required")
+    }
+    let validatorAddress = optionValue(rest, flag: "--validator")
+
+    var body: [String: Any] = [
+        "groupId": groupId,
+        "memberId": memberId,
+        "txHash": txHash
+    ]
+    if let validatorAddress { body["validatorAddress"] = validatorAddress }
+
+    guard let requestData = try? JSONSerialization.data(withJSONObject: body) else {
+        exitWithError("Failed to serialize mark-installed request")
+    }
+
+    let response = performDataRequest(timeoutSeconds: 30, timeoutMessage: "Mark installed timed out") { proxy, reply in
+        proxy.markAgentInstalled(requestData: requestData, withReply: reply)
+    }
+    printRawServerJSON(response)
+}
+
 // MARK: - Response Types (duplicated for CLI target)
 
 struct SignResponse: Codable {
@@ -713,6 +1039,33 @@ case "state":
 
 case "reset-keys":
     cmdResetKeys()
+
+case "groups":
+    guard args.count >= 3 else {
+        exitWithError("Usage: bastion groups <create|list|show|add-agent|remove-agent|update-scope|mark-installed> ...")
+    }
+    switch args[2] {
+    case "create":
+        cmdGroupsCreate(args[3...])
+    case "list":
+        cmdGroupsList()
+    case "show":
+        cmdGroupsShow(args[3...])
+    case "add-agent":
+        cmdGroupsAddAgent(args[3...])
+    case "remove-agent":
+        cmdGroupsRemoveAgent(args[3...])
+    case "update-scope":
+        cmdGroupsUpdateScope(args[3...])
+    case "mark-installed":
+        cmdGroupsMarkInstalled(args[3...])
+    case "install-agent":
+        cmdGroupsInstallAgentOnChain(args[3...])
+    case "uninstall-agent":
+        cmdGroupsUninstallAgentOnChain(args[3...])
+    default:
+        exitWithError("Unknown groups subcommand: \(args[2]). Use: create, list, show, add-agent, remove-agent, update-scope, mark-installed, install-agent, uninstall-agent")
+    }
 
 default:
     exitWithError("Unknown command: \(args[1])")

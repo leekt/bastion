@@ -218,6 +218,13 @@ nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
     var authPolicy: AuthPolicy?
     var keyTag: String
     var rules: RuleConfig
+    /// When set, this client is a member of a wallet group and signs for the
+    /// shared smart account via `membershipId`'s scoped validator key.
+    /// When nil, the client uses its own `keyTag` (private wallet — default).
+    var walletGroupId: String?
+    /// Points to `AgentMembership.id` inside the referenced wallet group.
+    /// Required whenever `walletGroupId` is set.
+    var membershipId: String?
 
     init(
         id: String = UUID().uuidString,
@@ -225,7 +232,9 @@ nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
         label: String? = nil,
         authPolicy: AuthPolicy? = nil,
         keyTag: String = ClientProfile.makeKeyTag(),
-        rules: RuleConfig
+        rules: RuleConfig,
+        walletGroupId: String? = nil,
+        membershipId: String? = nil
     ) {
         self.id = id
         self.bundleId = bundleId
@@ -233,6 +242,8 @@ nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
         self.authPolicy = authPolicy
         self.keyTag = keyTag
         self.rules = rules
+        self.walletGroupId = walletGroupId
+        self.membershipId = membershipId
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -242,6 +253,8 @@ nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
         case authPolicy
         case keyTag
         case rules
+        case walletGroupId
+        case membershipId
     }
 
     init(from decoder: Decoder) throws {
@@ -252,6 +265,8 @@ nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
         authPolicy = try container.decodeIfPresent(AuthPolicy.self, forKey: .authPolicy)
         keyTag = try container.decodeIfPresent(String.self, forKey: .keyTag) ?? Self.makeKeyTag()
         rules = try container.decodeIfPresent(RuleConfig.self, forKey: .rules) ?? .default
+        walletGroupId = try container.decodeIfPresent(String.self, forKey: .walletGroupId)
+        membershipId = try container.decodeIfPresent(String.self, forKey: .membershipId)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -262,6 +277,8 @@ nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
         try container.encodeIfPresent(authPolicy, forKey: .authPolicy)
         try container.encode(keyTag, forKey: .keyTag)
         try container.encode(rules, forKey: .rules)
+        try container.encodeIfPresent(walletGroupId, forKey: .walletGroupId)
+        try container.encodeIfPresent(membershipId, forKey: .membershipId)
     }
 
     static func makeKeyTag() -> String {
@@ -270,6 +287,234 @@ nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
 
     var displayDescription: String {
         label ?? bundleId
+    }
+
+    /// True when this profile is a member of a wallet group.
+    var isGroupMember: Bool {
+        walletGroupId != nil && membershipId != nil
+    }
+}
+
+// MARK: - Wallet Group
+
+/// A shared smart account. The owner holds a sudo Secure Enclave key that
+/// can install and revoke per-agent scoped validators. Every agent member
+/// gets its OWN SE key — cryptographic isolation is preserved. The shared
+/// quantity is the on-chain smart account address, not the signing key.
+nonisolated struct WalletGroup: Codable, Sendable, Identifiable {
+    let id: String
+    var label: String
+    /// Tag of the owner's SE key. Format:
+    /// `com.bastion.walletgroup.<groupId>.owner`
+    var ownerKeyTag: String
+    /// Shared on-chain smart account address (derived from the owner
+    /// validator's public key). Computed once at group creation.
+    var accountAddress: String?
+    /// Chains where this wallet is deployed / has installed validators.
+    var chainIds: [Int]
+    /// Rules that apply to every agent member in addition to their own
+    /// scoped rules. Intersection semantics: both the group's rules and
+    /// the agent's rules must pass. Spending limits defined here share a
+    /// counter across all members because the rule ID is the same.
+    var sharedRules: RuleConfig
+    var members: [AgentMembership]
+    var createdAt: Date
+
+    init(
+        id: String = UUID().uuidString,
+        label: String,
+        ownerKeyTag: String? = nil,
+        accountAddress: String? = nil,
+        chainIds: [Int] = [],
+        sharedRules: RuleConfig = .default,
+        members: [AgentMembership] = [],
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.label = label
+        self.ownerKeyTag = ownerKeyTag ?? Self.makeOwnerKeyTag(groupId: id)
+        self.accountAddress = accountAddress
+        self.chainIds = chainIds
+        self.sharedRules = sharedRules
+        self.members = members
+        self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case ownerKeyTag
+        case accountAddress
+        case chainIds
+        case sharedRules
+        case members
+        case createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedId = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        id = decodedId
+        label = try container.decode(String.self, forKey: .label)
+        ownerKeyTag = try container.decodeIfPresent(String.self, forKey: .ownerKeyTag)
+            ?? Self.makeOwnerKeyTag(groupId: decodedId)
+        accountAddress = try container.decodeIfPresent(String.self, forKey: .accountAddress)
+        chainIds = try container.decodeIfPresent([Int].self, forKey: .chainIds) ?? []
+        sharedRules = try container.decodeIfPresent(RuleConfig.self, forKey: .sharedRules) ?? .default
+        members = try container.decodeIfPresent([AgentMembership].self, forKey: .members) ?? []
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
+
+    static func makeOwnerKeyTag(groupId: String) -> String {
+        "com.bastion.walletgroup.\(groupId.lowercased()).owner"
+    }
+
+    static func makeAgentKeyTag(groupId: String, memberId: String) -> String {
+        "com.bastion.walletgroup.\(groupId.lowercased()).agent.\(memberId.lowercased())"
+    }
+
+    func member(id memberId: String) -> AgentMembership? {
+        members.first(where: { $0.id == memberId })
+    }
+
+    /// Members that are currently allowed to sign (not revoked).
+    var activeMembers: [AgentMembership] {
+        members.filter { !$0.installStatus.isRevoked }
+    }
+}
+
+/// A single agent's scoped access to a wallet group. Each membership has
+/// its own Secure Enclave key; the owner installs this key on-chain as a
+/// permissioned validator module.
+nonisolated struct AgentMembership: Codable, Sendable, Identifiable {
+    let id: String
+    var clientProfileId: String?
+    var label: String?
+    var keyTag: String
+    /// Rules scoped to this single agent. Combined with the group's
+    /// `sharedRules` via intersection — both must pass.
+    var scopedRules: RuleConfig
+    /// Address of the on-chain validator module bound to this membership,
+    /// once installed. Nil while status is `.pending`.
+    var validatorAddress: String?
+    var installStatus: ValidatorInstallStatus
+    var installedAt: Date?
+    var revokedAt: Date?
+    var createdAt: Date
+
+    init(
+        id: String = UUID().uuidString,
+        clientProfileId: String? = nil,
+        label: String? = nil,
+        keyTag: String,
+        scopedRules: RuleConfig = .default,
+        validatorAddress: String? = nil,
+        installStatus: ValidatorInstallStatus = .pending,
+        installedAt: Date? = nil,
+        revokedAt: Date? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.clientProfileId = clientProfileId
+        self.label = label
+        self.keyTag = keyTag
+        self.scopedRules = scopedRules
+        self.validatorAddress = validatorAddress
+        self.installStatus = installStatus
+        self.installedAt = installedAt
+        self.revokedAt = revokedAt
+        self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case clientProfileId
+        case label
+        case keyTag
+        case scopedRules
+        case validatorAddress
+        case installStatus
+        case installedAt
+        case revokedAt
+        case createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        clientProfileId = try container.decodeIfPresent(String.self, forKey: .clientProfileId)
+        label = try container.decodeIfPresent(String.self, forKey: .label)
+        keyTag = try container.decode(String.self, forKey: .keyTag)
+        scopedRules = try container.decodeIfPresent(RuleConfig.self, forKey: .scopedRules) ?? .default
+        validatorAddress = try container.decodeIfPresent(String.self, forKey: .validatorAddress)
+        installStatus = try container.decodeIfPresent(ValidatorInstallStatus.self, forKey: .installStatus) ?? .pending
+        installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt)
+        revokedAt = try container.decodeIfPresent(Date.self, forKey: .revokedAt)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
+
+    var displayDescription: String {
+        label ?? keyTag
+    }
+}
+
+/// Lifecycle of an agent's validator module relative to the on-chain
+/// smart account. Bastion refuses to sign for agents in `.revoked` status
+/// and signs for `.pending` only when the group is explicitly marked
+/// off-chain-only (Phase 1 manual-install mode).
+nonisolated enum ValidatorInstallStatus: Codable, Sendable, Equatable {
+    case pending
+    case installed(txHash: String)
+    case revoked(txHash: String)
+
+    var isRevoked: Bool {
+        if case .revoked = self { return true }
+        return false
+    }
+
+    var isInstalled: Bool {
+        if case .installed = self { return true }
+        return false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case txHash
+    }
+
+    private enum State: String, Codable {
+        case pending
+        case installed
+        case revoked
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let state = try container.decode(State.self, forKey: .state)
+        switch state {
+        case .pending:
+            self = .pending
+        case .installed:
+            let hash = try container.decode(String.self, forKey: .txHash)
+            self = .installed(txHash: hash)
+        case .revoked:
+            let hash = try container.decode(String.self, forKey: .txHash)
+            self = .revoked(txHash: hash)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .pending:
+            try container.encode(State.pending, forKey: .state)
+        case .installed(let hash):
+            try container.encode(State.installed, forKey: .state)
+            try container.encode(hash, forKey: .txHash)
+        case .revoked(let hash):
+            try container.encode(State.revoked, forKey: .state)
+            try container.encode(hash, forKey: .txHash)
+        }
     }
 }
 
@@ -280,10 +525,146 @@ nonisolated struct ClientProfileInfo: Codable, Sendable, Identifiable {
     let authPolicy: String
     let keyTag: String
     let accountAddress: String?
+    let walletGroupId: String?
+    let membershipId: String?
+
+    init(
+        id: String,
+        bundleId: String,
+        label: String?,
+        authPolicy: String,
+        keyTag: String,
+        accountAddress: String?,
+        walletGroupId: String? = nil,
+        membershipId: String? = nil
+    ) {
+        self.id = id
+        self.bundleId = bundleId
+        self.label = label
+        self.authPolicy = authPolicy
+        self.keyTag = keyTag
+        self.accountAddress = accountAddress
+        self.walletGroupId = walletGroupId
+        self.membershipId = membershipId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, bundleId, label, authPolicy, keyTag, accountAddress, walletGroupId, membershipId
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        bundleId = try c.decode(String.self, forKey: .bundleId)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        authPolicy = try c.decode(String.self, forKey: .authPolicy)
+        keyTag = try c.decode(String.self, forKey: .keyTag)
+        accountAddress = try c.decodeIfPresent(String.self, forKey: .accountAddress)
+        walletGroupId = try c.decodeIfPresent(String.self, forKey: .walletGroupId)
+        membershipId = try c.decodeIfPresent(String.self, forKey: .membershipId)
+    }
 
     var displayDescription: String {
         label ?? bundleId
     }
+
+    var isGroupMember: Bool {
+        walletGroupId != nil && membershipId != nil
+    }
+}
+
+// MARK: - Wallet Group XPC Requests/Responses
+
+nonisolated struct CreateWalletGroupRequest: Codable, Sendable {
+    let label: String
+    let chainIds: [Int]
+    let sharedRules: RuleConfig?
+}
+
+nonisolated struct AddAgentRequest: Codable, Sendable {
+    let groupId: String
+    let label: String?
+    /// Optional pre-existing ClientProfile to bind this membership to.
+    /// If nil, the caller is expected to call register afterwards.
+    let clientProfileId: String?
+    let scopedRules: RuleConfig?
+}
+
+nonisolated struct UpdateAgentScopeRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let scopedRules: RuleConfig
+}
+
+nonisolated struct MarkInstalledRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let txHash: String
+    let validatorAddress: String?
+}
+
+nonisolated struct WalletGroupInfo: Codable, Sendable, Identifiable {
+    let id: String
+    let label: String
+    let ownerKeyTag: String
+    let accountAddress: String?
+    let chainIds: [Int]
+    let sharedRules: RuleConfig
+    let members: [AgentMembershipInfo]
+    let createdAt: String
+    let memberCount: Int
+    let activeMemberCount: Int
+}
+
+nonisolated struct AgentMembershipInfo: Codable, Sendable, Identifiable {
+    let id: String
+    let label: String?
+    let keyTag: String
+    let clientProfileId: String?
+    let scopedRules: RuleConfig
+    let validatorAddress: String?
+    let installStatus: ValidatorInstallStatus
+    let installedAt: String?
+    let revokedAt: String?
+}
+
+nonisolated struct WalletGroupListResponse: Codable, Sendable {
+    let groups: [WalletGroupInfo]
+}
+
+// MARK: - Phase 2 — On-Chain Install Requests
+
+nonisolated struct InstallAgentOnChainRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let projectId: String?
+    /// If true, Bastion submits the UserOp via ZeroDev and waits for a
+    /// receipt. If false, the signed UserOp is returned for the caller to
+    /// submit elsewhere.
+    let submit: Bool
+    /// How long to poll for a UserOp receipt, in seconds. 0 = no poll.
+    let waitForReceiptSeconds: Int?
+}
+
+nonisolated struct UninstallAgentOnChainRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let projectId: String?
+    let submit: Bool
+    let waitForReceiptSeconds: Int?
+}
+
+/// XPC-safe serialization of `RuleEngine.WalletGroupChainResult`.
+nonisolated struct WalletGroupChainResultInfo: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let userOp: UserOperationRPC
+    let userOpHash: String?
+    let txHash: String?
+    let membership: AgentMembershipInfo?
 }
 
 nonisolated struct AllowedHours: Codable, Sendable {
@@ -481,11 +862,12 @@ nonisolated enum AuditRedactionLevel: String, Codable, CaseIterable, Sendable {
 }
 
 nonisolated struct BastionConfig: Codable, Sendable {
-    var version: Int = 7
+    var version: Int = 8
     var authPolicy: AuthPolicy
     var rules: RuleConfig
     var bundlerPreferences: BundlerPreferences
     var clientProfiles: [ClientProfile]
+    var walletGroups: [WalletGroup]
     var auditRedactionLevel: AuditRedactionLevel
 
     // M-04: Default to biometricOrPasscode for production safety.
@@ -495,15 +877,17 @@ nonisolated struct BastionConfig: Codable, Sendable {
         rules: .default,
         bundlerPreferences: .default,
         clientProfiles: [],
+        walletGroups: [],
         auditRedactionLevel: .none
     )
 
     init(
-        version: Int = 7,
+        version: Int = 8,
         authPolicy: AuthPolicy,
         rules: RuleConfig,
         bundlerPreferences: BundlerPreferences = .default,
         clientProfiles: [ClientProfile] = [],
+        walletGroups: [WalletGroup] = [],
         auditRedactionLevel: AuditRedactionLevel = .none
     ) {
         self.version = version
@@ -511,6 +895,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
         self.rules = rules
         self.bundlerPreferences = bundlerPreferences
         self.clientProfiles = clientProfiles
+        self.walletGroups = walletGroups
         self.auditRedactionLevel = auditRedactionLevel
     }
 
@@ -520,6 +905,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
         case rules
         case bundlerPreferences
         case clientProfiles
+        case walletGroups
         case auditRedactionLevel
     }
 
@@ -533,6 +919,8 @@ nonisolated struct BastionConfig: Codable, Sendable {
         rules = try container.decodeIfPresent(RuleConfig.self, forKey: .rules) ?? .default
         bundlerPreferences = try container.decodeIfPresent(BundlerPreferences.self, forKey: .bundlerPreferences) ?? .default
         clientProfiles = try container.decodeIfPresent([ClientProfile].self, forKey: .clientProfiles) ?? []
+        // v7 → v8 migration: older configs simply have no walletGroups.
+        walletGroups = try container.decodeIfPresent([WalletGroup].self, forKey: .walletGroups) ?? []
         auditRedactionLevel = try container.decodeIfPresent(AuditRedactionLevel.self, forKey: .auditRedactionLevel) ?? .none
     }
 
@@ -543,6 +931,7 @@ nonisolated struct BastionConfig: Codable, Sendable {
         try container.encode(rules, forKey: .rules)
         try container.encode(bundlerPreferences, forKey: .bundlerPreferences)
         try container.encode(clientProfiles, forKey: .clientProfiles)
+        try container.encode(walletGroups, forKey: .walletGroups)
         try container.encode(auditRedactionLevel, forKey: .auditRedactionLevel)
     }
 }
