@@ -8,20 +8,22 @@ import SwiftUI
 struct MenuBarPanelView: View {
     @Environment(\.openSettings) private var openSettings
 
-    @State private var refreshTick = 0
-    @State private var showGrantSheet = false
-    @Bindable private var sessionStore = SessionStore.shared
-    private var refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+    // Cache the snapshot in @State so body doesn't perform I/O (audit log
+    // reads) or mutate Observable state on every redraw. Refresh happens
+    // exclusively via the .task loop below — this keeps the panel snappy
+    // and avoids the layout-animation feedback loop that made the popover
+    // slide out continuously.
+    @State private var snapshot: Snapshot = .empty
+    @State private var activeSessions: [AgentSession] = []
+    @State private var pauseStateCached: PauseState = .default
 
     var body: some View {
-        let snapshot = currentSnapshot()
-        let pauseState = RuleEngine.shared.config.pauseState
         VStack(spacing: 0) {
-            if pauseState.lockedDown {
-                lockdownState(snapshot: snapshot, reason: pauseState.reason)
+            if pauseStateCached.lockedDown {
+                lockdownState(snapshot: snapshot, reason: pauseStateCached.reason)
                 BastionDivider()
                 footer
-            } else if pauseState.paused {
+            } else if pauseStateCached.paused {
                 pausedState(snapshot: snapshot)
                 BastionDivider()
                 footer
@@ -37,7 +39,7 @@ struct MenuBarPanelView: View {
                 }
                 BastionDivider()
                 statsGrid(snapshot: snapshot)
-                if !sessionStore.active().isEmpty {
+                if !activeSessions.isEmpty {
                     BastionDivider()
                     activeSessionsBlock
                 }
@@ -48,35 +50,31 @@ struct MenuBarPanelView: View {
             }
         }
         .frame(width: 340)
-        .background(
-            RoundedRectangle(cornerRadius: BastionTokens.radiusLarge)
-                .fill(Color.paper)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: BastionTokens.radiusLarge)
-                .strokeBorder(Color.ink150, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: BastionTokens.radiusLarge))
-        .onReceive(refreshTimer) { _ in refreshTick &+= 1 }
-        .popover(isPresented: $showGrantSheet, arrowEdge: .leading) {
-            let options = RuleEngine.shared.config.clientProfiles.map {
-                GrantSessionSheet.ClientOption(
-                    id: $0.id,
-                    label: $0.label ?? $0.bundleId,
-                    bundleId: $0.bundleId
-                )
+        // Note: the surrounding rounded background / clipShape were dropped
+        // intentionally — MenuBarExtra(.window) already paints its own
+        // popover chrome and the inner clipShape was causing AppKit to
+        // animate every frame as it tried to reconcile two clip layers.
+        .task {
+            // Initial paint, then refresh on a slow cadence. SwiftUI cancels
+            // this task automatically when the panel closes.
+            refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                refresh()
             }
-            GrantSessionSheet(
-                initialClient: options.first,
-                availableClients: options,
-                onClose: { showGrantSheet = false },
-                onGrant: { session in
-                    sessionStore.grant(session)
-                    showGrantSheet = false
-                }
-            )
         }
     }
+
+    private func refresh() {
+        snapshot = Self.computeSnapshot()
+        // Filter expired sessions WITHOUT mutating the store from inside
+        // body. Cleanup happens lazily on grant/revoke; here we just hide
+        // expired entries from the UI so render is purely read-only.
+        let now = Date()
+        activeSessions = SessionStore.shared.sessions.filter { $0.expiresAt > now }
+        pauseStateCached = RuleEngine.shared.config.pauseState
+    }
+
 
     // MARK: - Header
 
@@ -94,11 +92,12 @@ struct MenuBarPanelView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .kerning(-0.13)
                 HStack(spacing: 5) {
-                    if snapshot.armed {
-                        PulseDot(color: .bastionOk)
-                    } else {
-                        Circle().fill(Color.ink300).frame(width: 6, height: 6)
-                    }
+                    // Static dot only — PulseDot's repeatForever animation
+                    // told AppKit the popover was still in motion, which
+                    // caused the dropdown to slide endlessly.
+                    Circle()
+                        .fill(snapshot.armed ? Color.bastionOk : Color.ink300)
+                        .frame(width: 6, height: 6)
                     Text(snapshot.armedSubtitle)
                         .font(.system(size: 11))
                         .foregroundStyle(Color.ink500)
@@ -107,12 +106,12 @@ struct MenuBarPanelView: View {
             Spacer()
             Button {
                 Task { @MainActor in
-                    let isPausedNow = RuleEngine.shared.config.pauseState.paused
+                    let isPausedNow = pauseStateCached.paused
                     await LockdownManager.shared.setPaused(!isPausedNow)
-                    refreshTick &+= 1
+                    refresh()
                 }
             } label: {
-                Text(RuleEngine.shared.config.pauseState.paused ? "Resume" : "Pause")
+                Text(pauseStateCached.paused ? "Resume" : "Pause")
                     .font(.system(size: 11))
                     .padding(.horizontal, 8).padding(.vertical, 4)
             }
@@ -178,7 +177,7 @@ struct MenuBarPanelView: View {
                 Button {
                     Task { @MainActor in
                         await LockdownManager.shared.setPaused(false)
-                        refreshTick &+= 1
+                        refresh()
                     }
                 } label: {
                     Text("Resume signing").frame(maxWidth: .infinity)
@@ -208,7 +207,7 @@ struct MenuBarPanelView: View {
                 Button {
                     Task { @MainActor in
                         await LockdownManager.shared.leaveLockdown()
-                        refreshTick &+= 1
+                        refresh()
                     }
                 } label: {
                     Text("Leave lockdown").frame(maxWidth: .infinity)
@@ -334,15 +333,18 @@ struct MenuBarPanelView: View {
                 LabelXS(text: "Active sessions")
                 Spacer()
                 Button {
-                    showGrantSheet = true
+                    GrantSessionWindowManager.shared.showWindow()
                 } label: {
                     Text("Grant…").font(.system(size: 10))
                         .padding(.horizontal, 6).padding(.vertical, 2)
                 }
                 .bastionButton(.ghost, size: .small)
             }
-            ForEach(sessionStore.active()) { session in
-                ActiveSessionRow(store: sessionStore, session: session)
+            // Use the @State-cached list — calling sessionStore.active()
+            // here would mutate Observable state during render, which is
+            // what produced the slide-out feedback loop.
+            ForEach(activeSessions) { session in
+                ActiveSessionRow(store: SessionStore.shared, session: session)
             }
         }
         .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
@@ -354,12 +356,12 @@ struct MenuBarPanelView: View {
     private var footer: some View {
         VStack(spacing: 1) {
             MenuRow(label: "Grant temporary session…", shortcut: nil) {
-                showGrantSheet = true
+                GrantSessionWindowManager.shared.showWindow()
             }
             MenuRow(label: "Emergency lockdown", shortcut: "⌘⇧L") {
                 Task { @MainActor in
                     await LockdownManager.shared.enterLockdown(reason: "Emergency lockdown triggered from menu bar")
-                    refreshTick &+= 1
+                    refresh()
                 }
             }
             MenuRow(label: "Settings…", shortcut: "⌘,") {
@@ -419,10 +421,19 @@ struct MenuBarPanelView: View {
         var silentToday: Int
         var overridesToday: Int
         var recent: [RecentRowModel]
+
+        static let empty = Snapshot(
+            armed: true,
+            armedSubtitle: "",
+            activeClients: 0,
+            totalToday: 0,
+            silentToday: 0,
+            overridesToday: 0,
+            recent: []
+        )
     }
 
-    private func currentSnapshot() -> Snapshot {
-        _ = refreshTick
+    private static func computeSnapshot() -> Snapshot {
         let activeClients = RuleEngine.shared.config.clientProfiles.count
         let totalToday = AuditLog.shared.totalCountToday(type: .signSuccess)
         let recent = Array(AuditLog.shared.recentRequestRecords(limit: 3).map(RecentRowModel.init))
