@@ -138,6 +138,27 @@ nonisolated final class SecureEnclaveManager: Sendable {
         )
     }
 
+    /// Like `getPublicKey(keyTag:)` but returns nil instead of materialising
+    /// a new Secure Enclave key when none exists for the tag. Use this from
+    /// settings/menu-bar render paths where lazily creating an SE key would
+    /// pop a biometric prompt every time SwiftUI redraws the view.
+    nonisolated func getPublicKeyIfExists(keyTag: String) -> PublicKeyResponse? {
+        guard let tag = keyTag.data(using: .utf8) else { return nil }
+        guard let privateKey = try? loadKey(tag: tag, context: silentContext()) else {
+            return nil
+        }
+        guard let publicKey = SecKeyCopyPublicKey(privateKey),
+              let pubData = SecKeyCopyExternalRepresentation(publicKey, nil) as Data?,
+              pubData.count >= 65 else {
+            return nil
+        }
+        return PublicKeyResponse(
+            x: pubData.subdata(in: 1..<33).hex,
+            y: pubData.subdata(in: 33..<65).hex,
+            accountAddress: accountAddress(for: pubData)
+        )
+    }
+
     nonisolated func deleteSigningKeys(keyTags: [String]) -> [String] {
         let uniqueTags = Array(Set(keyTags))
         return uniqueTags.filter { deleteSigningKey(keyTag: $0) }

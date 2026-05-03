@@ -951,7 +951,11 @@ private struct ProfilePanel: View {
     }
 
     private func accountAddressForProfile(_ profile: ClientProfile) -> String? {
-        try? SecureEnclaveManager.shared.getPublicKey(keyTag: profile.keyTag).accountAddress
+        // Non-creating lookup: if the SE key doesn't exist yet (fresh
+        // profile, never signed) we return nil instead of triggering a
+        // biometric prompt to materialise one. The header just hides the
+        // address until the first real sign creates the key.
+        SecureEnclaveManager.shared.getPublicKeyIfExists(keyTag: profile.keyTag)?.accountAddress
     }
 
     private func spendingLimit(for token: TokenIdentifier) -> SpendingLimitRule? {

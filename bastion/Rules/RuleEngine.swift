@@ -1395,7 +1395,13 @@ final class RuleEngine {
     }
 
     private func accountAddress(forKeyTag keyTag: String) -> String? {
-        (try? SecureEnclaveManager.shared.getPublicKey(keyTag: keyTag))?.accountAddress
+        // Non-creating lookup. The previous getPublicKey path lazily
+        // materialised an SE key when none existed — fine on the signing
+        // hot path, but render-path callers (settings header, menu bar
+        // snapshot, ClientProfileInfo bridging) would prompt biometric on
+        // every redraw. Returning nil for "no key yet" lets the UI hide
+        // the address until the first real sign creates the key.
+        SecureEnclaveManager.shared.getPublicKeyIfExists(keyTag: keyTag)?.accountAddress
     }
 
     // MARK: - Wallet Group Management
