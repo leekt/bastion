@@ -1,0 +1,64 @@
+import SwiftUI
+
+// Bastion design tokens — calm, technical, native-mac feel.
+// Mirrors tokens.css from the design bundle. All colors track system appearance.
+
+enum BastionTokens {
+    // Window / surface radii
+    static let radiusSmall: CGFloat = 6
+    static let radiusMedium: CGFloat = 8
+    static let radiusLarge: CGFloat = 12
+    static let radiusXL: CGFloat = 16
+    static let windowRadius: CGFloat = 14
+
+    static let monoFont = Font.system(.body, design: .monospaced)
+}
+
+// MARK: - Adaptive color helpers
+
+private func adaptive(_ light: Color, _ dark: Color) -> Color {
+    Color(NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua]) != nil
+        return NSColor(isDark ? dark : light)
+    })
+}
+
+private func hex(_ rgb: UInt32, alpha: Double = 1.0) -> Color {
+    let r = Double((rgb >> 16) & 0xff) / 255
+    let g = Double((rgb >> 8) & 0xff) / 255
+    let b = Double(rgb & 0xff) / 255
+    return Color(red: r, green: g, blue: b, opacity: alpha)
+}
+
+extension Color {
+    // Ink scale — body text → backgrounds. Inverts for dark mode.
+    static let ink900 = adaptive(hex(0x0b0d10), hex(0xf4f5f7))
+    static let ink800 = adaptive(hex(0x16191e), hex(0xe4e6ea))
+    static let ink700 = adaptive(hex(0x22262d), hex(0xc8ccd2))
+    static let ink600 = adaptive(hex(0x353a43), hex(0x9aa0aa))
+    static let ink500 = adaptive(hex(0x555b65), hex(0x777e88))
+    static let ink400 = adaptive(hex(0x7a818c), hex(0x565c66))
+    static let ink300 = adaptive(hex(0xa3a9b3), hex(0x3c424b))
+    static let ink200 = adaptive(hex(0xcdd1d8), hex(0x2a2f37))
+    static let ink150 = adaptive(hex(0xe2e5ea), hex(0x20242b))
+    static let ink100 = adaptive(hex(0xeef0f3), hex(0x181b21))
+    static let ink50  = adaptive(hex(0xf6f7f9), hex(0x14171c))
+    static let paper  = adaptive(hex(0xffffff), hex(0x1c1f25))
+
+    // Single accent — quiet indigo for "armed/active"
+    static let bastionAccent     = adaptive(hex(0x4d6bff), hex(0x4d6bff))
+    static let bastionAccentSoft = adaptive(hex(0xe7ecff), hex(0x1e2547))
+    static let bastionAccentDeep = adaptive(hex(0x2c46d6), hex(0x9bb0ff))
+
+    // Status — restrained, not saturated
+    static let bastionOk        = adaptive(hex(0x2c8a5a), hex(0x4cb37e))
+    static let bastionOkSoft    = adaptive(hex(0xe3f3eb), hex(0x163525))
+    static let bastionWarn      = adaptive(hex(0xb06a00), hex(0xd99a3d))
+    static let bastionWarnSoft  = adaptive(hex(0xfbeed3), hex(0x3a2a0c))
+    static let bastionBad       = adaptive(hex(0xb03a2e), hex(0xe07065))
+    static let bastionBadSoft   = adaptive(hex(0xf7e3df), hex(0x3a1e1a))
+
+    // Desktop / window background gradient
+    static let bastionDesktopTop    = adaptive(hex(0xe8edf4), hex(0x14181f))
+    static let bastionDesktopBottom = adaptive(hex(0xd6dde7), hex(0x20252e))
+}
