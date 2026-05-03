@@ -277,6 +277,26 @@ final class SigningManager {
                 subtitle: clientContext.displayName,
                 body: request.operation.displayDescription
             )
+
+            // v9: in-app quiet receipt toast for silent signs. Only shown for
+            // userOperations (where there's a meaningful action to summarise).
+            if case .userOperation(let op) = request.operation {
+                let decoded = CalldataDecoder.decode(op)
+                let leaves = decoded.executions.flatMap(\.allLeafExecutions)
+                let title: String
+                if let token = leaves.compactMap(\.tokenOperation).first,
+                   let counterparty = token.counterparty {
+                    title = "Signed: \(token.kind.rawValue.capitalized) \(token.amount) to \(counterparty.prefix(8))…"
+                } else {
+                    title = "Signed: Contract call"
+                }
+                Task { @MainActor in
+                    SilentBannerManager.shared.show(
+                        title: title,
+                        subtitle: "\(clientContext.displayName) · silent · just now"
+                    )
+                }
+            }
         }
 
         let submission = await submitUserOperationIfRequested(

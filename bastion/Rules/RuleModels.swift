@@ -603,6 +603,35 @@ nonisolated struct MarkInstalledRequest: Codable, Sendable {
     let validatorAddress: String?
 }
 
+// MARK: - Pairing handshake (XPC wire)
+
+/// Returned from the XPC `startPairing` endpoint. The CLI prints the
+/// `pairingCode` to the operator's terminal and then polls `pollPairing`
+/// with the same `requestId` until it sees a terminal state.
+nonisolated struct PairingHandshakeResponse: Codable, Sendable {
+    let requestId: String
+    let pairingCode: String
+    let expiresAt: Date
+}
+
+/// State of a pending pairing handshake.
+nonisolated enum PairingPollState: String, Codable, Sendable {
+    case pending
+    case accepted
+    case rejected
+    case expired
+}
+
+nonisolated struct PairingPollResponse: Codable, Sendable {
+    let state: PairingPollState
+    /// Populated only when `state == .accepted` so the CLI can persist the
+    /// minted profile id (used to disambiguate later signing requests).
+    let profile: ClientProfileInfo?
+    /// Optional human-readable reason — typically populated for rejected /
+    /// expired states.
+    let reason: String?
+}
+
 nonisolated struct WalletGroupInfo: Codable, Sendable, Identifiable {
     let id: String
     let label: String
@@ -793,11 +822,55 @@ nonisolated struct SpendingLimitRule: Codable, Sendable, Identifiable {
     let token: TokenIdentifier
     let allowance: String       // smallest unit (wei for ETH, 6 decimals for USDC)
     let windowSeconds: Int?     // nil = lifetime, 86400 = daily reset
+    /// v9: optional per-target scope. When non-nil, this allowance only
+    /// applies to spends that send the token to this address. Multiple rules
+    /// can stack: a global cap (targetAddress=nil) plus a per-target cap.
+    /// The tightest applicable cap wins. Stored lower-cased.
+    let targetAddress: String?
 
     var displayDescription: String {
         let amount = formatAmount()
         let window = windowSeconds.map { RateLimitRule.formatWindow($0) } ?? "lifetime"
+        if let target = targetAddress {
+            return "\(amount) \(token.displayName) per \(window) to \(target.prefix(10))…"
+        }
         return "\(amount) \(token.displayName) per \(window)"
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        token: TokenIdentifier,
+        allowance: String,
+        windowSeconds: Int?,
+        targetAddress: String? = nil
+    ) {
+        self.id = id
+        self.token = token
+        self.allowance = allowance
+        self.windowSeconds = windowSeconds
+        if let target = targetAddress, !target.isEmpty {
+            self.targetAddress = target.lowercased()
+        } else {
+            self.targetAddress = nil
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        token = try c.decode(TokenIdentifier.self, forKey: .token)
+        allowance = try c.decode(String.self, forKey: .allowance)
+        windowSeconds = try c.decodeIfPresent(Int.self, forKey: .windowSeconds)
+        // v9 migration: legacy rules have no targetAddress key — treat as global.
+        if let raw = try c.decodeIfPresent(String.self, forKey: .targetAddress), !raw.isEmpty {
+            targetAddress = raw.lowercased()
+        } else {
+            targetAddress = nil
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, token, allowance, windowSeconds, targetAddress
     }
 
     private func formatAmount() -> String {
@@ -861,14 +934,121 @@ nonisolated enum AuditRedactionLevel: String, Codable, CaseIterable, Sendable {
     case redactAll
 }
 
+// MARK: - Address book entry (v9)
+
+/// A user-defined label for an address. Surfaces in approvals, audit, and
+/// settings. Pure metadata — never affects rule decisions on its own.
+nonisolated struct AddressBookEntry: Codable, Sendable, Identifiable, Hashable {
+    let id: String
+    var address: String
+    var label: String
+    /// Optional chain scope. Nil means the label applies on every chain.
+    var chainId: Int?
+    var note: String?
+
+    init(id: String = UUID().uuidString, address: String, label: String, chainId: Int? = nil, note: String? = nil) {
+        self.id = id
+        self.address = address
+        self.label = label
+        self.chainId = chainId
+        self.note = note
+    }
+}
+
+// MARK: - Rule template (v9)
+
+/// First-class reusable starting points for new clients. Owners can pick a
+/// template at pairing time, or apply one to an existing profile.
+nonisolated struct RuleTemplate: Codable, Sendable, Identifiable {
+    let id: String
+    var label: String
+    var hint: String
+    var rules: RuleConfig
+    var authPolicy: AuthPolicy
+    /// Built-in templates use stable string ids ("conservative", "readonly", "treasury").
+    /// User-created templates use UUIDs.
+    var isBuiltin: Bool
+
+    static let conservative = RuleTemplate(
+        id: "conservative",
+        label: "Conservative DeFi",
+        hint: "Allow-list of audited targets, modest spending caps, biometric on review.",
+        rules: .default,
+        authPolicy: .biometric,
+        isBuiltin: true
+    )
+    static let readonly = RuleTemplate(
+        id: "readonly",
+        label: "Read-only signer",
+        hint: "EIP-712 typed data only. No transfers. Useful for session keys + auth flows.",
+        rules: .default,
+        authPolicy: .open,
+        isBuiltin: true
+    )
+    static let treasury = RuleTemplate(
+        id: "treasury",
+        label: "Treasury custodian",
+        hint: "Single counterparty, high cap, every signature requires owner approval.",
+        rules: .default,
+        authPolicy: .biometricOrPasscode,
+        isBuiltin: true
+    )
+
+    static let builtins: [RuleTemplate] = [.conservative, .readonly, .treasury]
+}
+
+// MARK: - High-value rule (v9)
+
+/// Optional friction layer for high-value transfers. When the USD-equivalent of a
+/// userOp's spend exceeds `thresholdUsd`, the approval popup requires the owner
+/// to type `confirmationPhrase` before the Approve button enables.
+///
+/// Backed by the high-value typed-confirm UI in SigningRequestView; rule engine
+/// integration lands when a USD price oracle is wired up.
+nonisolated struct HighValueRule: Codable, Sendable, Hashable {
+    var enabled: Bool
+    var thresholdUsd: Double
+    var confirmationPhrase: String
+
+    static let `default` = HighValueRule(
+        enabled: false,
+        thresholdUsd: 10_000,
+        confirmationPhrase: "TRANSFER"
+    )
+}
+
+// MARK: - Pause/Lockdown state (v9)
+
+/// Soft-lockdown flag. When `paused` is true, the rule engine denies every
+/// signing request until the owner resumes. `lockedDown` upgrades the state:
+/// it adds a banner enumerating residual on-chain attack surface (validators
+/// not yet uninstalled, sessions still valid, etc.).
+nonisolated struct PauseState: Codable, Sendable, Hashable {
+    var paused: Bool
+    var lockedDown: Bool
+    var pausedAt: Date?
+    var reason: String?
+
+    static let `default` = PauseState(paused: false, lockedDown: false, pausedAt: nil, reason: nil)
+}
+
 nonisolated struct BastionConfig: Codable, Sendable {
-    var version: Int = 8
+    var version: Int = 9
     var authPolicy: AuthPolicy
     var rules: RuleConfig
     var bundlerPreferences: BundlerPreferences
     var clientProfiles: [ClientProfile]
     var walletGroups: [WalletGroup]
     var auditRedactionLevel: AuditRedactionLevel
+
+    /// User-defined labels for addresses. v9.
+    var addressBook: [AddressBookEntry]
+    /// User-defined and built-in rule templates. v9.
+    var ruleTemplates: [RuleTemplate]
+    /// Owner-controlled high-value friction. v9.
+    var highValue: HighValueRule
+    /// Pause/lockdown state. v9.
+    var pauseState: PauseState
 
     // M-04: Default to biometricOrPasscode for production safety.
     // Prevents new installs from running with no auth.
@@ -878,17 +1058,25 @@ nonisolated struct BastionConfig: Codable, Sendable {
         bundlerPreferences: .default,
         clientProfiles: [],
         walletGroups: [],
-        auditRedactionLevel: .none
+        auditRedactionLevel: .none,
+        addressBook: [],
+        ruleTemplates: RuleTemplate.builtins,
+        highValue: .default,
+        pauseState: .default
     )
 
     init(
-        version: Int = 8,
+        version: Int = 9,
         authPolicy: AuthPolicy,
         rules: RuleConfig,
         bundlerPreferences: BundlerPreferences = .default,
         clientProfiles: [ClientProfile] = [],
         walletGroups: [WalletGroup] = [],
-        auditRedactionLevel: AuditRedactionLevel = .none
+        auditRedactionLevel: AuditRedactionLevel = .none,
+        addressBook: [AddressBookEntry] = [],
+        ruleTemplates: [RuleTemplate] = RuleTemplate.builtins,
+        highValue: HighValueRule = .default,
+        pauseState: PauseState = .default
     ) {
         self.version = version
         self.authPolicy = authPolicy
@@ -897,6 +1085,10 @@ nonisolated struct BastionConfig: Codable, Sendable {
         self.clientProfiles = clientProfiles
         self.walletGroups = walletGroups
         self.auditRedactionLevel = auditRedactionLevel
+        self.addressBook = addressBook
+        self.ruleTemplates = ruleTemplates
+        self.highValue = highValue
+        self.pauseState = pauseState
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -907,14 +1099,16 @@ nonisolated struct BastionConfig: Codable, Sendable {
         case clientProfiles
         case walletGroups
         case auditRedactionLevel
+        case addressBook
+        case ruleTemplates
+        case highValue
+        case pauseState
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 4
         // H-01: Default to biometricOrPasscode when the key is missing from stored JSON.
-        // The previous default of .open silently downgraded security for configs saved
-        // before authPolicy was introduced.
         authPolicy = try container.decodeIfPresent(AuthPolicy.self, forKey: .authPolicy) ?? .biometricOrPasscode
         rules = try container.decodeIfPresent(RuleConfig.self, forKey: .rules) ?? .default
         bundlerPreferences = try container.decodeIfPresent(BundlerPreferences.self, forKey: .bundlerPreferences) ?? .default
@@ -922,6 +1116,11 @@ nonisolated struct BastionConfig: Codable, Sendable {
         // v7 → v8 migration: older configs simply have no walletGroups.
         walletGroups = try container.decodeIfPresent([WalletGroup].self, forKey: .walletGroups) ?? []
         auditRedactionLevel = try container.decodeIfPresent(AuditRedactionLevel.self, forKey: .auditRedactionLevel) ?? .none
+        // v8 → v9 migration: address book / rule templates / high-value / pause state default to empty.
+        addressBook = try container.decodeIfPresent([AddressBookEntry].self, forKey: .addressBook) ?? []
+        ruleTemplates = try container.decodeIfPresent([RuleTemplate].self, forKey: .ruleTemplates) ?? RuleTemplate.builtins
+        highValue = try container.decodeIfPresent(HighValueRule.self, forKey: .highValue) ?? .default
+        pauseState = try container.decodeIfPresent(PauseState.self, forKey: .pauseState) ?? .default
     }
 
     func encode(to encoder: Encoder) throws {
@@ -933,6 +1132,22 @@ nonisolated struct BastionConfig: Codable, Sendable {
         try container.encode(clientProfiles, forKey: .clientProfiles)
         try container.encode(walletGroups, forKey: .walletGroups)
         try container.encode(auditRedactionLevel, forKey: .auditRedactionLevel)
+        try container.encode(addressBook, forKey: .addressBook)
+        try container.encode(ruleTemplates, forKey: .ruleTemplates)
+        try container.encode(highValue, forKey: .highValue)
+        try container.encode(pauseState, forKey: .pauseState)
+    }
+
+    /// Looks up the user-assigned label for an address. Returns nil when no
+    /// entry matches (possibly scoped to a specific chain).
+    func label(for address: String, chainId: Int? = nil) -> String? {
+        let normalized = address.lowercased()
+        for entry in addressBook {
+            guard entry.address.lowercased() == normalized else { continue }
+            if let entryChain = entry.chainId, let requestChain = chainId, entryChain != requestChain { continue }
+            return entry.label
+        }
+        return nil
     }
 }
 
@@ -944,19 +1159,29 @@ nonisolated struct SignRequest: Sendable {
     let timestamp: Date
     let clientBundleId: String?  // bundle ID of the XPC client, nil if unknown
     let userOperationSubmission: UserOperationSubmissionRequest?
+    /// v9: optional human-readable reason supplied by the agent. Surfaced in
+    /// approval popups and audit history. Capped to 240 characters at ingestion.
+    let intent: String?
 
     init(
         operation: SigningOperation,
         requestID: String,
         timestamp: Date,
         clientBundleId: String?,
-        userOperationSubmission: UserOperationSubmissionRequest? = nil
+        userOperationSubmission: UserOperationSubmissionRequest? = nil,
+        intent: String? = nil
     ) {
         self.operation = operation
         self.requestID = requestID
         self.timestamp = timestamp
         self.clientBundleId = clientBundleId
         self.userOperationSubmission = userOperationSubmission
+        if let intent {
+            let trimmed = intent.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.intent = trimmed.isEmpty ? nil : String(trimmed.prefix(240))
+        } else {
+            self.intent = nil
+        }
     }
 
     /// The 32-byte hash to be signed by the Secure Enclave.

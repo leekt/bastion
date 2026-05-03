@@ -80,4 +80,31 @@ nonisolated enum ChainConfig: Sendable {
     static func name(for chainId: Int) -> String {
         names[chainId] ?? "Chain \(chainId)"
     }
+
+    /// Block explorer base URLs by chain. Use `explorerURL(chainId:txHash:)` to
+    /// build a full deep link.
+    private static let explorerBases: [Int: String] = [
+        1:        "https://etherscan.io",
+        8453:     "https://basescan.org",
+        42161:    "https://arbiscan.io",
+        10:       "https://optimistic.etherscan.io",
+        137:      "https://polygonscan.com",
+        11155111: "https://sepolia.etherscan.io",
+        84532:    "https://sepolia.basescan.org",
+    ]
+
+    /// Returns a transaction-explorer URL for the given chain + hash, or nil if
+    /// the chain is unknown.
+    static func explorerURL(chainId: Int, txHash: String) -> URL? {
+        guard let base = explorerBases[chainId] else { return nil }
+        let normalized = txHash.hasPrefix("0x") ? txHash : "0x\(txHash)"
+        return URL(string: "\(base)/tx/\(normalized)")
+    }
+
+    /// Address-explorer URL.
+    static func explorerAddressURL(chainId: Int, address: String) -> URL? {
+        guard let base = explorerBases[chainId] else { return nil }
+        let normalized = address.hasPrefix("0x") ? address : "0x\(address)"
+        return URL(string: "\(base)/address/\(normalized)")
+    }
 }
