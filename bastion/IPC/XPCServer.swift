@@ -846,6 +846,97 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             }
         }
     }
+
+    // MARK: - Pairing handshake (XPC entry points)
+
+    nonisolated func startPairing(
+        bundleId: String,
+        processName: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        // Reject obviously malformed inputs early. The bundleId from a
+        // verified XPC client is the real source of truth; this argument
+        // exists so the CLI can echo what it thinks it is, allowing the
+        // owner to spot a mismatch in the menu bar prompt.
+        let bundle = bundleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let process = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundle.isEmpty, bundle.count <= 256, process.count <= 256 else {
+            reply(nil, BastionError.invalidInput.nsError)
+            return
+        }
+        // Only honor the bundleId we cryptographically verified at connection
+        // time. If verification didn't surface a bundleId we fail closed —
+        // never trust the wire-supplied value as identity. Mismatch between
+        // wire and verified is also a reject signal.
+        guard let trustedBundle = self.clientBundleId, !trustedBundle.isEmpty else {
+            reply(nil, BastionError.invalidInput.nsError)
+            return
+        }
+        if trustedBundle.caseInsensitiveCompare(bundle) != .orderedSame {
+            // Surface mismatch as audit (best-effort) and reject. Prevents an
+            // agent from spoofing a different identity in the pairing prompt.
+            AuditLog.shared.record(AuditEvent(
+                type: .ruleViolation,
+                dataPrefix: "pair",
+                reason: "Pairing rejected — wire bundleId \(bundle) ≠ verified \(trustedBundle)"
+            ))
+            reply(nil, BastionError.invalidInput.nsError)
+            return
+        }
+
+        Task { @MainActor in
+            let request = PairingBroker.shared.registerIncoming(
+                bundleId: trustedBundle,
+                processName: process
+            )
+            let response = PairingHandshakeResponse(
+                requestId: request.id.uuidString,
+                pairingCode: request.pairingCode,
+                expiresAt: request.expiresAt
+            )
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(response)
+                reply(data, nil)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func pollPairing(
+        requestId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        guard let uuid = UUID(uuidString: requestId) else {
+            reply(nil, BastionError.invalidInput.nsError)
+            return
+        }
+        Task { @MainActor in
+            let outcome = PairingBroker.shared.poll(requestId: uuid)
+            let payload: PairingPollResponse
+            switch outcome.state {
+            case .pending:
+                payload = PairingPollResponse(state: .pending, profile: nil, reason: nil)
+            case .accepted(let profileId):
+                let info = ruleEngine.clientProfileInfo(forId: profileId)
+                payload = PairingPollResponse(state: .accepted, profile: info, reason: nil)
+            case .rejected:
+                payload = PairingPollResponse(state: .rejected, profile: nil, reason: outcome.reason ?? "Owner rejected pairing")
+            case .expired:
+                payload = PairingPollResponse(state: .expired, profile: nil, reason: outcome.reason ?? "Pairing window elapsed")
+            }
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let data = try encoder.encode(payload)
+                reply(data, nil)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
 }
 
 // MARK: - Wallet Group Codec
