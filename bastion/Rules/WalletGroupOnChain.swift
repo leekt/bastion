@@ -345,14 +345,22 @@ extension RuleEngine {
         )
     }
 
+    /// P2 fix: Bastion's app-configured ZeroDev project ID always wins. The
+    /// explicit argument is kept as a *fallback* — useful when there is no
+    /// configured project (fresh install) — but agents calling owner-signed
+    /// install/uninstall paths can no longer redirect UserOps to an
+    /// attacker-controlled bundler. Mirrors the precedence already used by
+    /// the XPC direct-signing path, so the rule is consistent across every
+    /// signing surface.
     private func resolveZeroDevProjectId(explicit: String?) throws -> String {
-        if let explicit, !explicit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return explicit
-        }
         if let configured = config.bundlerPreferences.zeroDevProjectId?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !configured.isEmpty {
             return configured
+        }
+        if let explicit = explicit?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicit.isEmpty {
+            return explicit
         }
         throw WalletGroupChainError.submissionFailed(
             "ZeroDev project ID is not configured in Bastion settings"

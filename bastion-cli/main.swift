@@ -21,6 +21,8 @@ import Foundation
     func markAgentInstalled(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
     func installAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
     func uninstallAgentOnChain(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
+    func startPairing(bundleId: String, processName: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func pollPairing(requestId: String, withReply reply: @escaping (Data?, Error?) -> Void)
 }
 
 private let userOpFieldHelp = """
@@ -52,6 +54,10 @@ Usage:
   bastion rules                                 # Get current rules
   bastion state                                 # Get signing state
   bastion reset-keys                            # Delete Bastion signing keys
+
+Pairing (first-run handshake):
+  bastion pair [--label <name>] [--bundle-id <id>]
+                                                # Print a pairing code and wait for owner approval
 
 Wallet groups (owner sudo + scoped agent validators):
   bastion groups create --label <name> [--chain <id>] [--chain <id>]
@@ -642,6 +648,118 @@ func cmdResetKeys() {
     printJSON(decodeJSON(ResetSigningKeysResponse.self, from: responseData))
 }
 
+// MARK: - Pairing
+
+private struct PairingHandshakeResponse: Codable {
+    let requestId: String
+    let pairingCode: String
+    let expiresAt: Date
+}
+
+private struct PairingPollResponse: Codable {
+    enum State: String, Codable { case pending, accepted, rejected, expired }
+    let state: State
+    let profile: ClientProfileInfo?
+    let reason: String?
+}
+
+private struct ClientProfileInfo: Codable {
+    let id: String
+    let bundleId: String
+    let label: String?
+    let authPolicy: String?
+    let keyTag: String
+    let accountAddress: String?
+    let walletGroupId: String?
+    let membershipId: String?
+}
+
+func cmdPair(_ args: ArraySlice<String>) {
+    // Optional `--label "Display name"` pre-fills the menu bar label suggestion.
+    // Optional `--bundle-id` lets the operator override the auto-detected bundle id
+    // (mainly for tests). The trusted bundleId is whatever the XPC layer
+    // verifies — wire-supplied values are display only.
+    var label: String? = nil
+    var bundleId = Bundle.main.bundleIdentifier ?? "com.bastion.cli"
+
+    var i = args.startIndex
+    while i < args.endIndex {
+        switch args[i] {
+        case "--label":
+            i = args.index(after: i)
+            guard i < args.endIndex else {
+                exitWithError("--label requires a value")
+            }
+            label = args[i]
+        case "--bundle-id":
+            i = args.index(after: i)
+            guard i < args.endIndex else {
+                exitWithError("--bundle-id requires a value")
+            }
+            bundleId = args[i]
+        default:
+            exitWithError("Unknown pair argument: \(args[i])")
+        }
+        i = args.index(after: i)
+    }
+
+    let processName = ProcessInfo.processInfo.processName
+    let displayName = label ?? processName
+
+    // Step 1 — start the handshake. App returns a pairing code.
+    let startData = performDataRequest(
+        timeoutSeconds: 5,
+        timeoutMessage: "Bastion app is not responding"
+    ) { proxy, reply in
+        proxy.startPairing(bundleId: bundleId, processName: displayName, withReply: reply)
+    }
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    guard let response = try? decoder.decode(PairingHandshakeResponse.self, from: startData) else {
+        exitWithError("Could not parse pairing handshake response")
+    }
+
+    // Print the code prominently. The operator confirms it matches what the
+    // menu bar prompt shows.
+    print("")
+    print("  Pairing code: \(response.pairingCode)")
+    print("")
+    print("  Open Bastion in the menu bar and confirm this pairing code.")
+    print("  Waiting for owner approval (request \(response.requestId.prefix(8)))…")
+    print("")
+
+    // Step 2 — poll until terminal state.
+    let pollIntervalSeconds: UInt32 = 1
+    let maxAttempts = 300 // matches the broker's 5-minute window
+    for _ in 0..<maxAttempts {
+        let pollData = performDataRequest(
+            timeoutSeconds: 5,
+            timeoutMessage: "Bastion app stopped responding mid-pair"
+        ) { proxy, reply in
+            proxy.pollPairing(requestId: response.requestId, withReply: reply)
+        }
+        let outcome = decodeJSON(PairingPollResponse.self, from: pollData)
+        switch outcome.state {
+        case .pending:
+            sleep(pollIntervalSeconds)
+            continue
+        case .accepted:
+            if let profile = outcome.profile {
+                print("Paired. Profile id: \(profile.id)")
+                printJSON(profile)
+            } else {
+                print("Paired.")
+            }
+            return
+        case .rejected:
+            exitWithError("Pairing rejected: \(outcome.reason ?? "owner declined")")
+        case .expired:
+            exitWithError("Pairing expired: \(outcome.reason ?? "no response within window")")
+        }
+    }
+    exitWithError("Pairing timed out — try again")
+}
+
 // MARK: - Wallet Group Commands
 
 /// Server-pretty JSON is sufficient — the CLI does not need to decode into
@@ -1039,6 +1157,9 @@ case "state":
 
 case "reset-keys":
     cmdResetKeys()
+
+case "pair":
+    cmdPair(args[2...])
 
 case "groups":
     guard args.count >= 3 else {

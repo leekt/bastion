@@ -114,6 +114,34 @@ import Foundation
         requestData: Data,
         withReply reply: @escaping (Data?, Error?) -> Void
     )
+
+    // MARK: - Pairing
+
+    /// First-run pairing handshake. CLI calls this with its own bundleId +
+    /// process name; Bastion mints a 6-character pairing code, surfaces a
+    /// pending request to the menu bar / settings flow, and returns the
+    /// code for the CLI to print to the operator's terminal.
+    ///
+    /// Reply payload: JSON-encoded `PairingHandshakeResponse`.
+    /// On success the operator confirms the matching code in the app and
+    /// `pollPairing` resolves with the materialised profile. On reject /
+    /// timeout the CLI sees `pollPairing` return `.rejected` or `.expired`.
+    func startPairing(
+        bundleId: String,
+        processName: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// Polls for the outcome of a pairing handshake. Returns immediately
+    /// with the current state — `.pending`, `.accepted(profileInfo)`,
+    /// `.rejected`, or `.expired`. Callers should poll on a slow interval
+    /// (e.g. 1 second) and stop on any terminal state.
+    ///
+    /// Reply payload: JSON-encoded `PairingPollResponse`.
+    func pollPairing(
+        requestId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
 }
 
 let xpcServiceName = "com.bastion.xpc"

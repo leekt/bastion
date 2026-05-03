@@ -146,9 +146,22 @@ final class RuleEngine {
         )
         let normalized = normalizedConfig(newConfig)
         try saveConfig(normalized)
+        // v9: snapshot for the policy-version log (best-effort).
+        ConfigVersionStore.shared.recordVersion(normalized)
         config = normalized
         configLoaded = true
         configCorrupted = false
+    }
+
+    /// v9: Pause / lockdown writes that intentionally skip biometric. Pause
+    /// must be instant — every paused-state mutation goes through the
+    /// LockdownManager which calls this method. Persisted best-effort.
+    func unsafelyApplyPauseState(_ newState: PauseState) {
+        var updated = config
+        updated.pauseState = newState
+        let normalized = normalizedConfig(updated)
+        try? saveConfig(normalized)
+        config = normalized
     }
 
     // L-05: Maximum number of client profiles to prevent unbounded growth.
@@ -256,6 +269,38 @@ final class RuleEngine {
         )
     }
 
+    /// Direct profile-info lookup by id. Used by the XPC pollPairing handler
+    /// after a fresh pairing accept, where the bundleId path would
+    /// auto-create a duplicate profile.
+    func clientProfileInfo(forId id: String) -> ClientProfileInfo? {
+        ensureConfigLoadedIfNeeded()
+        guard let profile = config.clientProfiles.first(where: { $0.id == id }) else {
+            return nil
+        }
+        if let (group, member) = activeGroupMembership(for: profile) {
+            return ClientProfileInfo(
+                id: profile.id,
+                bundleId: profile.bundleId,
+                label: profile.label ?? member.label,
+                authPolicy: profile.authPolicy?.rawValue ?? config.authPolicy.rawValue,
+                keyTag: member.keyTag,
+                accountAddress: group.accountAddress,
+                walletGroupId: group.id,
+                membershipId: member.id
+            )
+        }
+        return ClientProfileInfo(
+            id: profile.id,
+            bundleId: profile.bundleId,
+            label: profile.label,
+            authPolicy: profile.authPolicy?.rawValue ?? config.authPolicy.rawValue,
+            keyTag: profile.keyTag,
+            accountAddress: accountAddress(for: profile),
+            walletGroupId: nil,
+            membershipId: nil
+        )
+    }
+
     func signingContext(for bundleId: String?) -> ClientSigningContext {
         ensureConfigLoadedIfNeeded()
         if let profile = ensureClientProfile(bundleId: bundleId) {
@@ -332,6 +377,17 @@ final class RuleEngine {
     private struct SpendObservation {
         let token: TokenIdentifier
         let amount: String
+        /// Optional counterparty / decoded recipient. Used for per-target
+        /// scoping of spending limit rules. Nil when the observation came
+        /// from a path that doesn't expose a target (e.g. trace-derived
+        /// totals before counterparty enrichment).
+        let target: String?
+
+        nonisolated init(token: TokenIdentifier, amount: String, target: String? = nil) {
+            self.token = token
+            self.amount = amount
+            self.target = target?.lowercased()
+        }
     }
 
     private enum SpendEvaluation {
@@ -351,6 +407,23 @@ final class RuleEngine {
         traceAnalysis: TraceAnalysis? = nil,
         simulatedSpendObservations: [SimulatedSpendObservation]? = nil
     ) -> ValidationResult {
+        // v9: pause / emergency lockdown rejects everything before we look at
+        // per-operation rules. Lockdown produces a more pointed reason.
+        if config.pauseState.lockedDown {
+            let reason = config.pauseState.reason ?? "Bastion is locked down — owner suspended all signing"
+            return .denied(reasons: [reason])
+        }
+        if config.pauseState.paused {
+            let reason = config.pauseState.reason ?? "Bastion is paused — resume from the menu bar to sign"
+            return .denied(reasons: [reason])
+        }
+
+        // v9: temporary scoped agent sessions tighten the rule check. A session
+        // can only narrow what the profile already allows — never widen it.
+        if let denial = validateActiveSessions(request) {
+            return denial
+        }
+
         guard config.rules.enabled else {
             return .allowed
         }
@@ -373,6 +446,55 @@ final class RuleEngine {
         }
     }
 
+    /// v9 session-scope check. Looks up active sessions for the request's
+    /// client and tightens the check: chain must be in session.chains, target
+    /// must be in session.allowedTargets if non-empty, and the request must
+    /// arrive before session.expiresAt. Returns a denial if any constraint
+    /// fails; nil means sessions don't apply or all session constraints pass.
+    private nonisolated func validateActiveSessions(_ request: SignRequest) -> ValidationResult? {
+        guard SessionSnapshotStore.shared.anyActive() else { return nil }
+
+        // Match by bundleId — the only identity the rule engine has at this
+        // point. SessionStore stores the bundleId at grant-time so we don't
+        // need to dip into MainActor-isolated config here.
+        let sessions = SessionSnapshotStore.shared.activeSessions(
+            forBundleId: request.clientBundleId
+        )
+        guard !sessions.isEmpty else { return nil }
+
+        // Each active session imposes its own scope; the *tightest* applies.
+        // We only deny when *every* session forbids the operation.
+        var anyAllow = false
+        var deniedReasons: [String] = []
+
+        for session in sessions {
+            if let chainId = request.operation.chainId,
+               !session.chains.isEmpty,
+               !session.chains.contains(chainId) {
+                deniedReasons.append("Session for \(session.clientLabel) does not allow chain \(chainId)")
+                continue
+            }
+            // Target check (best-effort for userOps only)
+            if case .userOperation(let op) = request.operation, !session.allowedTargets.isEmpty {
+                let decoded = CalldataDecoder.decode(op)
+                let leaves = decoded.executions.flatMap(\.allLeafExecutions)
+                let targets = leaves.map { $0.to.lowercased() }
+                let allow = Set(session.allowedTargets.map { $0.lowercased() })
+                let outOfScope = targets.first { !allow.contains($0) }
+                if let outOfScope {
+                    deniedReasons.append("Session does not allow target \(outOfScope.prefix(10))…")
+                    continue
+                }
+            }
+            anyAllow = true
+            break
+        }
+
+        if anyAllow { return nil }
+        if !deniedReasons.isEmpty { return .denied(reasons: deniedReasons) }
+        return nil
+    }
+
     nonisolated func requiresExplicitApproval(for request: SignRequest, config: BastionConfig) -> Bool {
         switch request.operation {
         case .message, .rawBytes:
@@ -383,6 +505,12 @@ final class RuleEngine {
             if !config.rules.typedDataPolicy.enabled { return true }
             return config.rules.typedDataPolicy.requireExplicitApproval
         case .userOperation:
+            // P1 fix: when rule-based signing is disabled (config.rules.enabled == false),
+            // validate() short-circuits to .allowed before any rule check runs. Without
+            // forcing approval here, a Silent / Open auth client could sign UserOps
+            // with zero policy enforcement. Mirror the message + typed-data behaviour
+            // and force interactive review whenever the rule engine is disabled.
+            if !config.rules.enabled { return true }
             return config.rules.requireExplicitApproval
         }
     }
@@ -470,16 +598,24 @@ final class RuleEngine {
 
         // 1. Allowed hours
         if let hours = config.rules.allowedHours {
-            let calendar = Calendar.current
-            let hour = calendar.component(.hour, from: request.timestamp)
-            let inRange: Bool
-            if hours.start <= hours.end {
-                inRange = hour >= hours.start && hour < hours.end
+            // P1: an empty window (start == end) is the merge sentinel for
+            // "group ∩ member windows are disjoint" — every hour is denied
+            // and we surface a clearer reason than the standard "outside
+            // hours X:00 - X:00".
+            if hours.start == hours.end {
+                reasons.append("Wallet group and agent allowed-hours have no overlap — no hours permitted")
             } else {
-                inRange = hour >= hours.start || hour < hours.end
-            }
-            if !inRange {
-                reasons.append("Outside allowed hours (\(hours.start):00 - \(hours.end):00)")
+                let calendar = Calendar.current
+                let hour = calendar.component(.hour, from: request.timestamp)
+                let inRange: Bool
+                if hours.start <= hours.end {
+                    inRange = hour >= hours.start && hour < hours.end
+                } else {
+                    inRange = hour >= hours.start || hour < hours.end
+                }
+                if !inRange {
+                    reasons.append("Outside allowed hours (\(hours.start):00 - \(hours.end):00)")
+                }
             }
         }
 
@@ -739,7 +875,12 @@ final class RuleEngine {
         // itself would be inspected and its tokenOperation is nil by design.
         for execution in executions.flatMap(\.allLeafExecutions) {
             if execution.value != "0" {
-                observations.append(SpendObservation(token: .eth, amount: execution.value))
+                // Native ETH transfer — target is the call's `to`.
+                observations.append(SpendObservation(
+                    token: .eth,
+                    amount: execution.value,
+                    target: execution.to
+                ))
             }
 
             // R3-01: Approvals count toward spending limits. Unlimited approvals
@@ -753,7 +894,11 @@ final class RuleEngine {
                 } else {
                     token = .erc20(address: execution.to, chainId: chainId)
                 }
-                observations.append(SpendObservation(token: token, amount: tokenOperation.amount))
+                // For ERC-20 transfer/approve, the per-target scope refers to
+                // the counterparty (token recipient or spender), not the token
+                // contract. Falls back to the contract address when unknown.
+                let target = tokenOperation.counterparty ?? execution.to
+                observations.append(SpendObservation(token: token, amount: tokenOperation.amount, target: target))
             }
         }
 
@@ -978,6 +1123,16 @@ final class RuleEngine {
         var sawMatch = false
 
         for observation in observations where matches(rule.token, observation.token) {
+            // v9: per-target scoping. When the rule is target-scoped, only
+            // observations whose decoded target matches contribute. Trace-only
+            // observations (target == nil) are conservatively counted toward
+            // every per-target rule that *could* apply, rather than silently
+            // skipped, so we never under-count spending.
+            if let ruleTarget = rule.targetAddress {
+                if let observedTarget = observation.target, observedTarget != ruleTarget {
+                    continue
+                }
+            }
             sawMatch = true
             guard let amount = UInt128(observation.amount) else {
                 return .unsupportedAmount
@@ -1553,7 +1708,13 @@ final class RuleEngine {
             allowedTargets: intersectDict(group.allowedTargets, member.allowedTargets),
             allowedSelectors: intersectDict(group.allowedSelectors, member.allowedSelectors),
             denySelectors: unionArrays(group.denySelectors, member.denySelectors),
-            allowedClients: group.allowedClients ?? member.allowedClients,
+            // P1 fix: intersect allowedClients (matched by bundleId, case-
+            // insensitive). Previously a broad group allowlist could mask a
+            // narrow agent allowlist, letting unintended bundles use the
+            // agent membership. Empty-after-intersection produces an empty
+            // (always-deny) list — distinct from nil, which means "no
+            // restriction".
+            allowedClients: intersectAllowedClients(group.allowedClients, member.allowedClients),
             rateLimits: group.rateLimits + member.rateLimits,
             spendingLimits: group.spendingLimits + member.spendingLimits,
             rawMessagePolicy: RawMessagePolicy(
@@ -1569,6 +1730,21 @@ final class RuleEngine {
         )
     }
 
+    /// Intersects two AllowedClient lists by bundleId. Nil means "no
+    /// restriction" so nil ∩ X = X. When both sides restrict, only bundles
+    /// present in BOTH survive. An empty result means "intersection is empty"
+    /// and is preserved (not collapsed to nil) so the rule engine denies.
+    nonisolated func intersectAllowedClients(_ a: [AllowedClient]?, _ b: [AllowedClient]?) -> [AllowedClient]? {
+        switch (a, b) {
+        case (nil, nil): return nil
+        case (nil, let x?): return x
+        case (let x?, nil): return x
+        case (let x?, let y?):
+            let ySet = Set(y.map { $0.bundleId.lowercased() })
+            return x.filter { ySet.contains($0.bundleId.lowercased()) }
+        }
+    }
+
     private nonisolated func unionArrays(_ a: [String]?, _ b: [String]?) -> [String]? {
         switch (a, b) {
         case (nil, nil): return nil
@@ -1581,25 +1757,33 @@ final class RuleEngine {
 
     /// For allowedHours: returns the narrower window. Both nil → nil. One nil
     /// → the other. Both set → the intersection (or the tighter range).
+    ///
+    /// P1 fix: when same-day windows don't overlap (e.g. group 09:00–12:00 vs
+    /// member 14:00–18:00), the previous behaviour returned the member's
+    /// range, which silently bypassed the group constraint. We now collapse
+    /// to an "always-deny" sentinel (start == end == 0) so validation rejects
+    /// every hour. Cross-midnight ranges still fall back to member because
+    /// reasoning about wrapping intersections is messy and the audit trail
+    /// will surface the eventual denial in the rare case of a real conflict.
     private nonisolated func tighterHours(_ a: AllowedHours?, _ b: AllowedHours?) -> AllowedHours? {
         switch (a, b) {
         case (nil, nil): return nil
         case (nil, let x?): return x
         case (let x?, nil): return x
         case (let x?, let y?):
-            // Take max(start) and min(end) for same-day ranges. Cross-midnight
-            // ranges are left to the validator — we fall back to the member's
-            // scope for now since it's more specific.
             if x.start <= x.end && y.start <= y.end {
                 let newStart = max(x.start, y.start)
                 let newEnd = min(x.end, y.end)
                 if newStart < newEnd {
                     return AllowedHours(start: newStart, end: newEnd)
                 }
-                // No overlap — use the member's range as the canonical one;
-                // validation will deny at sign time.
-                return y
+                // No overlap — return an empty window (start == end). The
+                // validator's `hour >= start && hour < end` check is then
+                // always false → every hour is denied.
+                return AllowedHours(start: 0, end: 0)
             }
+            // Cross-midnight case — keep member as canonical. Documented
+            // limitation; safer than silently widening either side.
             return y
         }
     }
