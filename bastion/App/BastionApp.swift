@@ -47,6 +47,12 @@ final class AppState {
         // v9: kick off periodic RPC health probes so the App Preferences panel
         // and menu bar status reflect actual reachability rather than guesses.
         RPCHealthMonitor.shared.startMonitoring()
+
+        // v9: warm the SessionStore at launch so persisted sessions land in
+        // SessionSnapshotStore *before* the first XPC sign request. Without
+        // this, a sign request that arrives between launch and the first
+        // menu bar render would bypass any persisted session scope.
+        _ = SessionStore.shared
     }
 }
 

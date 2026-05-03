@@ -474,15 +474,28 @@ final class RuleEngine {
                 deniedReasons.append("Session for \(session.clientLabel) does not allow chain \(chainId)")
                 continue
             }
-            // Target check (best-effort for userOps only)
-            if case .userOperation(let op) = request.operation, !session.allowedTargets.isEmpty {
+            // Target + spending checks for userOps only — message and
+            // typedData operations don't decode into per-target spends.
+            if case .userOperation(let op) = request.operation {
                 let decoded = CalldataDecoder.decode(op)
                 let leaves = decoded.executions.flatMap(\.allLeafExecutions)
-                let targets = leaves.map { $0.to.lowercased() }
-                let allow = Set(session.allowedTargets.map { $0.lowercased() })
-                let outOfScope = targets.first { !allow.contains($0) }
-                if let outOfScope {
-                    deniedReasons.append("Session does not allow target \(outOfScope.prefix(10))…")
+
+                if !session.allowedTargets.isEmpty {
+                    let targets = leaves.map { $0.to.lowercased() }
+                    let allow = Set(session.allowedTargets.map { $0.lowercased() })
+                    if let outOfScope = targets.first(where: { !allow.contains($0) }) {
+                        deniedReasons.append("Session does not allow target \(outOfScope.prefix(10))…")
+                        continue
+                    }
+                }
+
+                // Per-request spend ceiling. Sessions don't track cumulative
+                // spend across requests yet (would need a separate counter
+                // store keyed by session id) — the cap is enforced as a
+                // single-request maximum, which is conservative: any single
+                // sign that would exceed the session's cap is denied.
+                if let spendDenial = exceedsSessionSpend(session: session, leaves: leaves) {
+                    deniedReasons.append(spendDenial)
                     continue
                 }
             }
@@ -492,6 +505,56 @@ final class RuleEngine {
 
         if anyAllow { return nil }
         if !deniedReasons.isEmpty { return .denied(reasons: deniedReasons) }
+        return nil
+    }
+
+    /// Sums USDC + ETH spends across `leaves` and compares against the
+    /// session's caps. Returns a denial reason if any cap is exceeded; nil
+    /// when the request fits. Treats nil/zero caps as "no cap from this
+    /// session" — distinct from "0 cap" (deny all spends).
+    ///
+    /// Known limitation: this is a per-request ceiling, not a cumulative
+    /// counter across the session window. A session that grants 50 USDC
+    /// today admits unlimited 50-USDC requests until the window closes.
+    /// Cumulative tracking would require a session-spend store keyed by
+    /// session id; tracked separately.
+    private nonisolated func exceedsSessionSpend(
+        session: AgentSession,
+        leaves: [CalldataDecoder.DecodedExecution]
+    ) -> String? {
+        // Native ETH from execution.value (wei). Only summed when an ETH cap
+        // is configured — saves an O(n) walk on every sign.
+        var nativeWei: UInt128 = 0
+        var usdcAmount: UInt128 = 0
+        let knownUsdcAddresses = Set(USDCAddresses.addresses.values.map { $0.lowercased() })
+
+        for leaf in leaves {
+            if leaf.value != "0", let v = UInt128(leaf.value) {
+                let (sum, overflow) = nativeWei.addingReportingOverflow(v)
+                if overflow { return "Session ETH cap evaluation overflowed — denying" }
+                nativeWei = sum
+            }
+            if let tokenOp = leaf.tokenOperation,
+               knownUsdcAddresses.contains(leaf.to.lowercased()),
+               let amt = UInt128(tokenOp.amount) {
+                let (sum, overflow) = usdcAmount.addingReportingOverflow(amt)
+                if overflow { return "Session USDC cap evaluation overflowed — denying" }
+                usdcAmount = sum
+            }
+        }
+
+        if let cap = session.ethLimit, cap > 0 {
+            let capWei = UInt128(cap * 1e18)
+            if nativeWei > capWei {
+                return "Session ETH cap exceeded (\(cap) ETH max)"
+            }
+        }
+        if let cap = session.usdcLimit, cap > 0 {
+            let capBase = UInt128(cap * 1e6)
+            if usdcAmount > capBase {
+                return "Session USDC cap exceeded (\(Int(cap)) USDC max)"
+            }
+        }
         return nil
     }
 

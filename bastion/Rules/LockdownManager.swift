@@ -19,6 +19,7 @@ final class LockdownManager {
     /// instant. Resume requires biometric to mirror updateConfig.
     func setPaused(_ paused: Bool, reason: String? = nil) async {
         var config = RuleEngine.shared.config
+        let was = config.pauseState
         config.pauseState.paused = paused
         if paused {
             config.pauseState.pausedAt = Date()
@@ -31,26 +32,51 @@ final class LockdownManager {
         // For pause we don't want to prompt biometric — write directly through
         // RuleEngine.applyPauseState which skips authentication.
         RuleEngine.shared.unsafelyApplyPauseState(config.pauseState)
+        // Forensics: record the toggle in the audit log so a post-incident
+        // review can see who paused signing and when. Skipped when no real
+        // change occurred (idempotent toggle from same state).
+        guard was.paused != config.pauseState.paused else { return }
+        AuditLog.shared.record(AuditEvent(
+            type: .ruleViolation,
+            dataPrefix: paused ? "pause.on" : "pause.off",
+            reason: paused
+                ? "Owner paused signing — \(config.pauseState.reason ?? "no reason given")"
+                : "Owner resumed signing"
+        ))
     }
 
     /// Escalate to lockdown. Implies pause. Revokes all in-memory sessions.
     func enterLockdown(reason: String) async {
         SessionStore.shared.revokeAll()
+        let was = RuleEngine.shared.config.pauseState.lockedDown
         var pauseState = RuleEngine.shared.config.pauseState
         pauseState.paused = true
         pauseState.lockedDown = true
         pauseState.pausedAt = Date()
         pauseState.reason = reason
         RuleEngine.shared.unsafelyApplyPauseState(pauseState)
+        guard !was else { return }
+        AuditLog.shared.record(AuditEvent(
+            type: .ruleViolation,
+            dataPrefix: "lockdown.enter",
+            reason: "Emergency lockdown engaged — \(reason)"
+        ))
     }
 
     func leaveLockdown() async {
+        let was = RuleEngine.shared.config.pauseState.lockedDown
         var pauseState = RuleEngine.shared.config.pauseState
         pauseState.paused = false
         pauseState.lockedDown = false
         pauseState.pausedAt = nil
         pauseState.reason = nil
         RuleEngine.shared.unsafelyApplyPauseState(pauseState)
+        guard was else { return }
+        AuditLog.shared.record(AuditEvent(
+            type: .ruleViolation,
+            dataPrefix: "lockdown.leave",
+            reason: "Owner left lockdown"
+        ))
     }
 
     /// Snapshot of residual on-chain attack surface, for the lockdown UI.

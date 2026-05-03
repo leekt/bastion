@@ -973,7 +973,21 @@ nonisolated struct RuleTemplate: Codable, Sendable, Identifiable {
         id: "conservative",
         label: "Conservative DeFi",
         hint: "Allow-list of audited targets, modest spending caps, biometric on review.",
-        rules: .default,
+        rules: RuleConfig(
+            enabled: true,
+            requireExplicitApproval: false,
+            allowedHours: nil,
+            allowedChains: [8453, 1],
+            allowedTargets: nil,
+            allowedClients: nil,
+            rateLimits: [
+                RateLimitRule(id: UUID().uuidString, maxRequests: 60, windowSeconds: 3600),
+            ],
+            spendingLimits: [
+                SpendingLimitRule(token: .usdc, allowance: "50000000", windowSeconds: 86400), // 50 USDC/day
+                SpendingLimitRule(token: .eth, allowance: "20000000000000000", windowSeconds: 86400), // 0.02 ETH/day
+            ]
+        ),
         authPolicy: .biometric,
         isBuiltin: true
     )
@@ -981,7 +995,23 @@ nonisolated struct RuleTemplate: Codable, Sendable, Identifiable {
         id: "readonly",
         label: "Read-only signer",
         hint: "EIP-712 typed data only. No transfers. Useful for session keys + auth flows.",
-        rules: .default,
+        rules: RuleConfig(
+            enabled: true,
+            requireExplicitApproval: false,
+            allowedHours: nil,
+            allowedChains: nil,
+            allowedTargets: nil,
+            allowedClients: nil,
+            rateLimits: [
+                RateLimitRule(id: UUID().uuidString, maxRequests: 200, windowSeconds: 3600),
+            ],
+            // Zero-allowance spend rules block all transfers, leaving only
+            // EIP-712 / message signing usable.
+            spendingLimits: [
+                SpendingLimitRule(token: .usdc, allowance: "0", windowSeconds: 86400),
+                SpendingLimitRule(token: .eth, allowance: "0", windowSeconds: 86400),
+            ]
+        ),
         authPolicy: .open,
         isBuiltin: true
     )
@@ -989,7 +1019,21 @@ nonisolated struct RuleTemplate: Codable, Sendable, Identifiable {
         id: "treasury",
         label: "Treasury custodian",
         hint: "Single counterparty, high cap, every signature requires owner approval.",
-        rules: .default,
+        rules: RuleConfig(
+            enabled: true,
+            requireExplicitApproval: true,
+            allowedHours: nil,
+            allowedChains: [8453, 1],
+            allowedTargets: nil,
+            allowedClients: nil,
+            rateLimits: [
+                RateLimitRule(id: UUID().uuidString, maxRequests: 10, windowSeconds: 3600),
+            ],
+            spendingLimits: [
+                SpendingLimitRule(token: .usdc, allowance: "10000000000", windowSeconds: 86400), // 10 000 USDC/day
+                SpendingLimitRule(token: .eth, allowance: "5000000000000000000", windowSeconds: 86400), // 5 ETH/day
+            ]
+        ),
         authPolicy: .biometricOrPasscode,
         isBuiltin: true
     )
