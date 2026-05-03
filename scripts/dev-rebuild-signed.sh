@@ -17,10 +17,15 @@ LAUNCH_AGENT_PLIST="${HOME}/Library/LaunchAgents/${LAUNCH_AGENT_LABEL}.plist"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
 
 echo "==> Building signed Bastion app"
+# -allowProvisioningUpdates lets xcodebuild fetch (or create) the local
+# Mac App Development profile that the project's automatic-signing config
+# expects. Without it, fresh checkouts on machines that haven't built in
+# Xcode.app yet fail with "No profiles for 'taek.bastion' were found".
 xcodebuild \
   -project "${PROJECT_PATH}" \
   -scheme "${SCHEME}" \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
+  -allowProvisioningUpdates \
   ENABLE_USER_SCRIPT_SANDBOXING=NO \
   ENABLE_DEBUG_DYLIB=NO \
   ENABLE_PREVIEWS=NO \
