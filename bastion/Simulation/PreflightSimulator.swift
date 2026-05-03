@@ -128,8 +128,17 @@ nonisolated final class PreflightSimulator: Sendable {
         }
 
         // ─── Bundler simulation ──────────────────────────────────────────────
-        let projectId = submission?.projectId ?? preferences.zeroDevProjectId
-        guard let projectId, !projectId.isEmpty else {
+        // PR1: route through BundlerTrustResolver so simulation uses the
+        // exact project ID submission will use. Pre-cleanup, the wire
+        // value won when both sides supplied — a paranoid agent could
+        // simulate against one bundler and submit through another.
+        let resolvedBundler: ResolvedBundler
+        do {
+            resolvedBundler = try BundlerTrustResolver.resolveZeroDevProjectId(
+                wireSupplied: submission?.projectId,
+                preferences: preferences
+            )
+        } catch {
             // Still run calldata simulation if we have an RPC URL.
             if let rpcURL = chainRPCURL {
                 let calldataWarnings = await calldataSimulation(op, rpcURL: rpcURL)
@@ -142,7 +151,7 @@ nonisolated final class PreflightSimulator: Sendable {
             )
         }
 
-        let api = ZeroDevAPI(projectId: projectId)
+        let api = ZeroDevAPI(projectId: resolvedBundler.projectId)
 
         // ─── Bundler fee sanity via pimlico_getUserOperationGasPrice ────────
         let bundlerFeeWarns = await bundlerFeeWarnings(op: op, api: api)

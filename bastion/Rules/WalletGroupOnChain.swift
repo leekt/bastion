@@ -234,9 +234,14 @@ extension RuleEngine {
         submit: Bool,
         waitForReceiptSeconds: Int
     ) async throws -> RawChainSubmissionResult {
-        // Resolve ZeroDev project ID (explicit argument > app config).
-        let resolvedProjectId = try resolveZeroDevProjectId(explicit: projectId)
-        let bundler = ZeroDevAPI(projectId: resolvedProjectId)
+        // PR1: shared BundlerTrustResolver — same precedence rule as
+        // every other signing/submission path (app-config wins,
+        // wire-supplied is a fallback only).
+        let resolved = try BundlerTrustResolver.resolveZeroDevProjectId(
+            wireSupplied: projectId,
+            config: config
+        )
+        let bundler = ZeroDevAPI(projectId: resolved.projectId)
         let rpc = ownerChainRPC(chainId: chainId, bundler: bundler)
 
         // Build an owner P256Validator whose signing closure uses the owner SE key.
@@ -345,27 +350,10 @@ extension RuleEngine {
         )
     }
 
-    /// P2 fix: Bastion's app-configured ZeroDev project ID always wins. The
-    /// explicit argument is kept as a *fallback* — useful when there is no
-    /// configured project (fresh install) — but agents calling owner-signed
-    /// install/uninstall paths can no longer redirect UserOps to an
-    /// attacker-controlled bundler. Mirrors the precedence already used by
-    /// the XPC direct-signing path, so the rule is consistent across every
-    /// signing surface.
-    private func resolveZeroDevProjectId(explicit: String?) throws -> String {
-        if let configured = config.bundlerPreferences.zeroDevProjectId?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !configured.isEmpty {
-            return configured
-        }
-        if let explicit = explicit?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !explicit.isEmpty {
-            return explicit
-        }
-        throw WalletGroupChainError.submissionFailed(
-            "ZeroDev project ID is not configured in Bastion settings"
-        )
-    }
+    // PR1: removed the file-local resolveZeroDevProjectId helper — every
+    // signing/submission path now goes through BundlerTrustResolver in
+    // bastion/Rules/BundlerTrustResolver.swift so precedence drift can't
+    // recur.
 
     private func ownerChainRPC(chainId: Int, bundler: ZeroDevAPI) -> EthRPC {
         if let endpoint = config.bundlerPreferences.chainRPCs.first(where: { $0.chainId == chainId }),

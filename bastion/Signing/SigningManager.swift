@@ -396,7 +396,19 @@ final class SigningManager {
 
         switch submission.provider {
         case .zeroDev:
-            guard let projectId = submission.projectId, !projectId.isEmpty else {
+            // PR1: every signing/submission path goes through
+            // BundlerTrustResolver. Pre-cleanup, this site trusted whatever
+            // the agent put in submission.projectId — letting an agent
+            // redirect a sponsored UserOp through an attacker-controlled
+            // bundler. Now app-config wins; wire-supplied is a fallback
+            // only when no project is configured.
+            let resolved: ResolvedBundler
+            do {
+                resolved = try BundlerTrustResolver.resolveZeroDevProjectId(
+                    wireSupplied: submission.projectId,
+                    config: ruleEngine.config
+                )
+            } catch {
                 let message = "ZeroDev project ID is not configured."
                 let response = UserOperationSubmissionResponse(
                     provider: submission.provider.rawValue,
@@ -422,7 +434,20 @@ final class SigningManager {
                 return response
             }
 
-            let api = ZeroDevAPI(projectId: projectId)
+            // Surface override decisions in the audit log so a
+            // post-incident review can spot agents probing alternate
+            // bundlers.
+            if resolved.source == .configOverrodeRequest {
+                auditLog.record(AuditEvent(
+                    type: .ruleViolation,
+                    dataPrefix: dataPrefix,
+                    reason: "Bundler override: app-configured ZeroDev project used instead of \(submission.projectId ?? "unset")",
+                    request: request,
+                    clientContext: clientContext
+                ))
+            }
+
+            let api = ZeroDevAPI(projectId: resolved.projectId)
             let rpcOp = UserOperationRPC.from(op, signature: signature)
 
             do {
