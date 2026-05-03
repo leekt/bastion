@@ -9,7 +9,6 @@ struct MenuBarPanelView: View {
     @Environment(\.openSettings) private var openSettings
 
     @State private var refreshTick = 0
-    @State private var isPaused = false
     @State private var showGrantSheet = false
     @Bindable private var sessionStore = SessionStore.shared
     private var refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
@@ -22,7 +21,7 @@ struct MenuBarPanelView: View {
                 lockdownState(snapshot: snapshot, reason: pauseState.reason)
                 BastionDivider()
                 footer
-            } else if pauseState.paused || isPaused {
+            } else if pauseState.paused {
                 pausedState(snapshot: snapshot)
                 BastionDivider()
                 footer
@@ -179,7 +178,6 @@ struct MenuBarPanelView: View {
                 Button {
                     Task { @MainActor in
                         await LockdownManager.shared.setPaused(false)
-                        isPaused = false
                         refreshTick &+= 1
                     }
                 } label: {

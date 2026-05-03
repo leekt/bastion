@@ -1365,16 +1365,28 @@ private struct AddressBookPanel: View {
     }
 
     private func addEntry() {
+        let trimmedAddress = newAddress.trimmingCharacters(in: .whitespaces)
+        let trimmedLabel = newLabel.trimmingCharacters(in: .whitespaces).prefix(64) // bound display length
+        // Validate the address looks like an Ethereum 20-byte hex address
+        // before storing — labels for malformed strings are misleading and
+        // could be used to disguise garbage in the approval popup.
+        guard Self.isValidEthAddress(trimmedAddress) else { return }
         let chain = Int(newChainId.trimmingCharacters(in: .whitespaces))
         let entry = AddressBookEntry(
-            address: newAddress.trimmingCharacters(in: .whitespaces),
-            label: newLabel.trimmingCharacters(in: .whitespaces),
+            address: trimmedAddress.lowercased(),
+            label: String(trimmedLabel),
             chainId: chain
         )
         addressBook.append(entry)
         newAddress = ""
         newLabel = ""
         newChainId = ""
+    }
+
+    private static func isValidEthAddress(_ s: String) -> Bool {
+        let stripped = s.hasPrefix("0x") ? String(s.dropFirst(2)) : s
+        guard stripped.count == 40 else { return false }
+        return stripped.allSatisfy { $0.isHexDigit }
     }
 }
 

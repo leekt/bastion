@@ -58,8 +58,15 @@ final class RPCHealthMonitor {
         }
     }
 
+    /// Reject responses larger than this — a misconfigured or hostile RPC
+    /// must not be able to balloon Bastion's memory through repeated probes.
+    /// 64 KiB is plenty for any sane eth_blockNumber response.
+    private static let maxResponseBytes = 64 * 1024
+
     private func probe(chainId: Int, url: String) async -> RPCHealthSample {
-        guard let endpoint = URL(string: url) else {
+        guard let endpoint = URL(string: url),
+              let scheme = endpoint.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
             return RPCHealthSample(chainId: chainId, status: .bad, latencyMs: nil, error: "Invalid URL", probedAt: Date())
         }
         var req = URLRequest(url: endpoint)
@@ -74,6 +81,12 @@ final class RPCHealthMonitor {
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 return RPCHealthSample(chainId: chainId, status: .bad, latencyMs: latencyMs,
                                        error: "HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)",
+                                       probedAt: Date())
+            }
+            // Bound response size to keep a hostile RPC from filling memory.
+            guard data.count <= Self.maxResponseBytes else {
+                return RPCHealthSample(chainId: chainId, status: .bad, latencyMs: latencyMs,
+                                       error: "Response exceeded \(Self.maxResponseBytes) bytes",
                                        probedAt: Date())
             }
             // Parse a minimal {"jsonrpc":"2.0","id":1,"result":"0x..."}
