@@ -16,9 +16,18 @@ struct MenuBarPanelView: View {
     @State private var snapshot: Snapshot = .empty
     @State private var activeSessions: [AgentSession] = []
     @State private var pauseStateCached: PauseState = .default
+    @State private var pendingPairings: [PendingPairingRequest] = []
 
     var body: some View {
         VStack(spacing: 0) {
+            // Pending pair requests jump to the top — confirming or rejecting
+            // them is time-sensitive (CLI process is blocked polling for the
+            // outcome). Rendered inline rather than a sheet so the menu bar
+            // popover stays snappy.
+            if !pendingPairings.isEmpty {
+                pendingPairingsBlock
+                BastionDivider()
+            }
             if pauseStateCached.lockedDown {
                 lockdownState(snapshot: snapshot, reason: pauseStateCached.reason)
                 BastionDivider()
@@ -56,10 +65,12 @@ struct MenuBarPanelView: View {
         // animate every frame as it tried to reconcile two clip layers.
         .task {
             // Initial paint, then refresh on a slow cadence. SwiftUI cancels
-            // this task automatically when the panel closes.
+            // this task automatically when the panel closes. Pending
+            // pairings refresh on a tighter cadence so a pair request
+            // surfaces within ~1 second of the CLI calling startPairing.
             refresh()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(1))
                 refresh()
             }
         }
@@ -73,6 +84,42 @@ struct MenuBarPanelView: View {
         let now = Date()
         activeSessions = SessionStore.shared.sessions.filter { $0.expiresAt > now }
         pauseStateCached = RuleEngine.shared.config.pauseState
+        pendingPairings = PairingBroker.shared.pending.filter { $0.expiresAt > now }
+    }
+
+    // MARK: - Pending pairings
+
+    @ViewBuilder
+    private var pendingPairingsBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                ShieldGlyph(size: 13, color: .bastionAccentDeep)
+                LabelXS(text: "Incoming pair request")
+            }
+            ForEach(pendingPairings) { request in
+                PendingPairingRow(request: request) {
+                    Task { await accept(request) }
+                } onReject: {
+                    PairingBroker.shared.reject(request)
+                    refresh()
+                }
+            }
+        }
+        .padding(EdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14))
+        .background(Color.bastionAccentSoft.opacity(0.45))
+    }
+
+    private func accept(_ request: PendingPairingRequest) async {
+        // Default to no template / no custom label — that creates a profile
+        // with the global default rules. Future: launch the 4-step flow with
+        // the live request, but inline accept is the fast path that lets the
+        // CLI return without the operator clicking through 4 screens.
+        do {
+            try await PairingBroker.shared.accept(request, label: nil, template: nil)
+        } catch {
+            NSLog("[Bastion] Pair accept failed: %@", String(describing: error))
+        }
+        refresh()
     }
 
 
@@ -471,6 +518,57 @@ struct MenuBarPanelView: View {
 }
 
 // MARK: - Stat tile
+
+private struct PendingPairingRow: View {
+    let request: PendingPairingRequest
+    let onAccept: () -> Void
+    let onReject: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(request.processName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.ink900)
+                        .lineLimit(1)
+                    Text(request.bundleId)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color.ink500)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+            }
+            HStack {
+                Text("Code")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .kerning(0.6)
+                    .foregroundStyle(Color.ink500)
+                Text(request.pairingCode)
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .tracking(1.2)
+                    .foregroundStyle(Color.ink900)
+            }
+            HStack(spacing: 8) {
+                Button("Reject", action: onReject)
+                    .bastionButton(.ghost, size: .small)
+                Spacer()
+                Button("Accept") { onAccept() }
+                    .bastionButton(.primary, size: .small)
+            }
+        }
+        .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.paper)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color.bastionAccent.opacity(0.4), lineWidth: 1)
+                )
+        )
+    }
+}
 
 private struct StatTile: View {
     let value: Int
