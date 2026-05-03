@@ -106,6 +106,67 @@ nonisolated final class SessionSnapshotStore: @unchecked Sendable {
     }
 }
 
+// MARK: - Grant session window
+
+/// Hosts the GrantSessionSheet inside a real NSWindow instead of a popover
+/// attached to MenuBarExtra. Popovers anchored to MenuBarExtra(.window)
+/// triggered an AppKit animation feedback loop where the menu bar dropdown
+/// would slide endlessly. A standalone window is snappy and dismisses
+/// cleanly.
+@MainActor
+final class GrantSessionWindowManager {
+    static let shared = GrantSessionWindowManager()
+    private var window: NSWindow?
+    private init() {}
+
+    func showWindow() {
+        if let window {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let options = RuleEngine.shared.config.clientProfiles.map {
+            GrantSessionSheet.ClientOption(
+                id: $0.id,
+                label: $0.label ?? $0.bundleId,
+                bundleId: $0.bundleId
+            )
+        }
+        let view = GrantSessionSheet(
+            initialClient: options.first,
+            availableClients: options,
+            onClose: { [weak self] in self?.window?.close() },
+            onGrant: { [weak self] session in
+                SessionStore.shared.grant(session)
+                self?.window?.close()
+            }
+        )
+        let host = NSHostingView(rootView: view)
+        let new = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 600),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        new.contentView = host
+        new.title = "Grant temporary session"
+        new.titleVisibility = .hidden
+        new.titlebarAppearsTransparent = true
+        new.isReleasedWhenClosed = false
+        new.center()
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: new,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.window = nil }
+        }
+        window = new
+        NSApp.activate(ignoringOtherApps: true)
+        new.makeKeyAndOrderFront(nil)
+    }
+}
+
 @MainActor
 @Observable
 final class SessionStore {
