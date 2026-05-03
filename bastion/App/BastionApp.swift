@@ -34,6 +34,13 @@ final class AppState {
     private let relayRuntime = BastionRelayRuntime()
 
     init() {
+        // M-08: Migrate any pre-data-protection-keychain items off the
+        // legacy macOS keychain BEFORE anything else touches Keychain.
+        // The legacy keychain bakes a per-item code-signature ACL that
+        // breaks every time we re-sign the dev build, producing the
+        // "wants to use 'com.bastion'" prompt cascade.
+        KeychainStore.migrateLegacyItems()
+
         CLIInstaller.installIfNeeded()
         ServiceRegistration.registerAndExitIfRequested()
         launchMode = BastionLaunchController.resolveLaunchMode()
