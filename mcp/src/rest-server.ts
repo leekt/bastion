@@ -8,6 +8,9 @@ import { bearerAuth } from "hono/bearer-auth";
 import { bodyLimit } from "hono/body-limit";
 import * as cli from "./cli.js";
 import { randomBytes } from "crypto";
+import { chmodSync, mkdirSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { dirname, join } from "path";
 
 const app = new Hono();
 
@@ -321,12 +324,36 @@ app.post("/groups/:id/agents/:memberId/installed", async (c) => {
 
 console.log(`Bastion REST API starting on http://127.0.0.1:${PORT}`);
 if (!TOKEN_PROVIDED_BY_ENV) {
-  // Token was generated this run — surface it once on stderr so the
-  // operator can capture it out-of-band. Never log it to stdout, since
-  // stdout commonly ends up in process logs / shell history.
-  console.error(
-    `Generated session token (set BASTION_API_TOKEN to override): ${SESSION_TOKEN}`,
+  // P3 fix: previously we printed the generated session token to stderr.
+  // Stderr commonly lands in terminal scrollback, supervisor logs, and
+  // launchd console.log buffers — leaking the bearer credential.
+  // Instead: write the token to a 0600-permissioned file under the user's
+  // home dir and tell the operator the *path* (not the token).
+  const tokenPath = join(
+    homedir(),
+    "Library",
+    "Application Support",
+    "Bastion",
+    "rest-token",
   );
+  try {
+    mkdirSync(dirname(tokenPath), { recursive: true, mode: 0o700 });
+    writeFileSync(tokenPath, SESSION_TOKEN, { mode: 0o600 });
+    chmodSync(tokenPath, 0o600);
+    console.error(
+      `Generated session token written to ${tokenPath} (chmod 600). Set BASTION_API_TOKEN to override.`,
+    );
+  } catch (err) {
+    // If we can't write the file, fail closed — refuse to start rather
+    // than fall back to logging the token in plaintext.
+    console.error(
+      `Failed to write session token to ${tokenPath}: ${(err as Error).message}`,
+    );
+    console.error(
+      "Refusing to start without a writable token file. Set BASTION_API_TOKEN to provide one explicitly.",
+    );
+    process.exit(1);
+  }
 }
 
 export default {
