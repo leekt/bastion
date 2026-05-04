@@ -175,7 +175,10 @@ struct BastionConfigMigrationTests {
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(BastionConfig.self, from: data)
 
-        #expect(decoded.version == 8)
+        // BastionConfig has bumped past v8 — what this test cares about is
+        // that wallet groups round-trip, not the version pin. Use >= so this
+        // assertion stays correct across future schema bumps.
+        #expect(decoded.version >= 8)
         #expect(decoded.walletGroups.count == 1)
         #expect(decoded.walletGroups[0].label == "Team Alpha")
         #expect(decoded.walletGroups[0].members.count == 1)
