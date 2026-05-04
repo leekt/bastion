@@ -170,6 +170,14 @@ struct PairingFlowView: View {
         )
     }
 
+    /// Total number of steps in the wizard. Step 5 (`successStep`) was
+    /// added in polish task #50 — without it, clicking Finish on the
+    /// install summary step dismissed the dialog instantly and the
+    /// operator got no positive confirmation that pairing actually
+    /// happened. The new step also tells them what to do next (install
+    /// the validator from Settings).
+    private static let totalSteps = 5
+
     private var header: some View {
         HStack(spacing: 10) {
             ZStack {
@@ -179,10 +187,10 @@ struct PairingFlowView: View {
             .frame(width: 28, height: 28)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Pair new agent")
+                Text(step == Self.totalSteps - 1 ? "Pairing complete" : "Pair new agent")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.ink900)
-                Text("Step \(step + 1) of 4")
+                Text("Step \(step + 1) of \(Self.totalSteps)")
                     .font(.system(size: 11))
                     .foregroundStyle(Color.ink500)
             }
@@ -190,7 +198,7 @@ struct PairingFlowView: View {
             Spacer()
 
             HStack(spacing: 4) {
-                ForEach(0..<4, id: \.self) { index in
+                ForEach(0..<Self.totalSteps, id: \.self) { index in
                     Capsule()
                         .fill(index <= step ? Color.ink900 : Color.ink200)
                         .frame(width: 16, height: 4)
@@ -210,8 +218,10 @@ struct PairingFlowView: View {
             templateStep
         case 2:
             chainsStep
-        default:
+        case 3:
             installStep
+        default:
+            successStep
         }
     }
 
@@ -385,34 +395,27 @@ struct PairingFlowView: View {
 
     private var footer: some View {
         HStack {
-            Button {
-                if step == 0 {
-                    dismiss()
-                } else {
-                    step -= 1
+            // Hide the back/cancel button on the success step — there's
+            // nothing to cancel anymore; pairing already committed.
+            if step < Self.totalSteps - 1 {
+                Button {
+                    if step == 0 {
+                        dismiss()
+                    } else {
+                        step -= 1
+                    }
+                } label: {
+                    Text(step == 0 ? "Cancel" : "Back")
                 }
-            } label: {
-                Text(step == 0 ? "Cancel" : "Back")
+                .bastionButton(.ghost, size: .small)
             }
-            .bastionButton(.ghost, size: .small)
 
             Spacer()
 
             Button {
-                if step < 3 {
-                    step += 1
-                } else {
-                    let result = PairingResult(
-                        displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
-                        bundleId: bundleId.trimmingCharacters(in: .whitespacesAndNewlines),
-                        template: selectedTemplate,
-                        allowedChains: selectedChains.sorted()
-                    )
-                    onFinish(result)
-                    dismiss()
-                }
+                primaryTapped()
             } label: {
-                Text(step < 3 ? "Continue" : "Finish")
+                Text(primaryButtonLabel)
             }
             .bastionButton(.primary)
             .disabled(!canContinue)
@@ -422,10 +425,89 @@ struct PairingFlowView: View {
         .background(Color.ink50)
     }
 
+    private var primaryButtonLabel: String {
+        switch step {
+        case 0..<3: return "Continue"
+        case 3:     return "Pair"           // commits and advances to success
+        default:    return "Done"           // dismisses from success step
+        }
+    }
+
+    private func primaryTapped() {
+        if step < 3 {
+            step += 1
+            return
+        }
+        if step == 3 {
+            // Commit the pairing result, then advance to the success
+            // step. The parent's `onFinish` handler runs synchronously
+            // (it just appends to `draftConfig.clientProfiles`), so by
+            // the time the next render happens, the new profile already
+            // exists and the success step's labels are accurate.
+            let result = PairingResult(
+                displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
+                bundleId: bundleId.trimmingCharacters(in: .whitespacesAndNewlines),
+                template: selectedTemplate,
+                allowedChains: selectedChains.sorted()
+            )
+            onFinish(result)
+            withAnimation(.easeOut(duration: 0.18)) { step += 1 }
+            return
+        }
+        dismiss()
+    }
+
     private var canContinue: Bool {
-        !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !bundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !selectedChains.isEmpty
+        // Success step's primary button is "Done" — always enabled.
+        if step >= Self.totalSteps - 1 { return true }
+        return !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !bundleId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !selectedChains.isEmpty
+    }
+
+    private var successStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle().fill(Color.bastionOk.opacity(0.15))
+                    CheckGlyph(size: 22, color: .bastionOk)
+                }
+                .frame(width: 44, height: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Profile created")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color.ink900)
+                    Text("\(displayName.isEmpty ? bundleId : displayName) is paired locally.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.ink500)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                KVRow(key: "Bundle ID", keyWidth: 110) {
+                    Text(bundleId)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Color.ink700)
+                }
+                KVRow(key: "Template", keyWidth: 110) {
+                    Text(selectedTemplate.title)
+                        .font(.system(size: 13, weight: .medium))
+                }
+                KVRow(key: "Chains", keyWidth: 110) {
+                    Text(selectedChains.sorted().map { ChainConfig.name(for: $0) }.joined(separator: ", "))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.ink700)
+                }
+            }
+            .padding(14)
+            .background(panelBackground)
+
+            // The local profile + SE key existed since we called
+            // `onFinish`. The on-chain validator install is a separate
+            // flow (Settings validator card) — make that explicit so the
+            // operator doesn't think pairing is fully done.
+            pairingNotice("Validator is not yet installed on-chain. Open Settings → this agent → Install validator when you're ready.")
+        }
     }
 
     private var panelBackground: some View {
