@@ -7,7 +7,7 @@ import SwiftUI
 // Mirrors audit-v2.jsx.
 
 struct AuditHistoryView: View {
-    @State private var records: [AuditRequestRecord] = []
+    @State private var records: [AuditRequestRecord] = AuditLog.shared.recentRequestRecords(limit: 200)
     @State private var search: String = ""
     @State private var filters: AuditFilters = .default
     @State private var savedView: SavedView? = nil
@@ -22,11 +22,6 @@ struct AuditHistoryView: View {
                 filterRow
                 BastionDivider()
                 columnHeader
-                // No divider here on purpose — the column header is part
-                // of the data table, not a separate section. A divider
-                // between the header strip and the first row makes the
-                // header look like floating text above the data; without
-                // it the rows hang off the header naturally.
                 rowsList
             }
             .background(Color.paper)
@@ -115,10 +110,11 @@ struct AuditHistoryView: View {
                 onChange: { filters.range = $0 }
             )
             Spacer()
-            if filters != .default {
-                Button("Clear filters") { filters = .default; savedView = nil }
-                    .bastionButton(.ghost, size: .small)
-            }
+            Button("Clear filters") { filters = .default; savedView = nil }
+                .bastionButton(.ghost, size: .small)
+                .opacity(filters != .default ? 1 : 0)
+                .allowsHitTesting(filters != .default)
+                .accessibilityHidden(filters == .default)
             Text("\(filtered.count) of \(records.count)")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.ink500)
@@ -146,6 +142,12 @@ struct AuditHistoryView: View {
 
     // MARK: - Column header
 
+    // No divider between `columnHeader` and `rowsList` on purpose — the
+    // column header is part of the data table, not a separate section. A
+    // divider between the header strip and the first row makes the
+    // header look like floating text above the data; without it the
+    // rows hang off the header naturally.
+
     private var columnHeader: some View {
         HStack(spacing: 12) {
             Text("Time").frame(width: 90, alignment: .leading)
@@ -168,30 +170,38 @@ struct AuditHistoryView: View {
     // MARK: - Rows
 
     private var rowsList: some View {
-        // ScrollView + plain VStack. LazyVStack on macOS inside a custom
-        // ScrollView misbehaves when the dataset is short — the NSScrollView
-        // host applies vertical centering to under-filled lazy content,
-        // which produced the giant empty bands above and below the rows
-        // in the audit screenshot. With a 200-record cap upstream, lazy
-        // initialization buys nothing here, so a regular VStack is the
-        // simplest (and correct) fix.
-        ScrollView {
-            VStack(spacing: 0) {
-                if filtered.isEmpty {
-                    emptyState
-                } else {
+        Group {
+            if filtered.isEmpty {
+                emptyState
+            } else {
+                // `List(.plain)` with row insets, separators, and the
+                // default-min-row-height all zeroed so rows are governed
+                // entirely by `AuditRow`'s own padding. The outer
+                // `.frame(maxHeight: .infinity)` defensive wrap that used
+                // to live here was patching around the .fullSizeContentView
+                // double-inset; now that the window style is plain, the
+                // List honours its container directly.
+                List {
                     ForEach(filtered) { record in
-                        AuditRow(
-                            record: record,
-                            expanded: expandedID == record.id,
-                            onToggle: { expandedID = expandedID == record.id ? nil : record.id }
-                        )
-                        BastionDivider()
+                        VStack(spacing: 0) {
+                            AuditRow(
+                                record: record,
+                                expanded: expandedID == record.id,
+                                onToggle: { expandedID = expandedID == record.id ? nil : record.id }
+                            )
+                            BastionDivider()
+                        }
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                     }
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .environment(\.defaultMinListRowHeight, 1)
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .id(rowsContentIdentity)
     }
 
     private var emptyState: some View {
@@ -222,6 +232,19 @@ struct AuditHistoryView: View {
             if let cutoff = filters.range.cutoff, let ts = r.latestTimestamp, ts < cutoff { return false }
             return true
         }
+    }
+
+    private var rowsContentIdentity: String {
+        let filterKey = [
+            search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            filters.outcome.rawValue,
+            filters.client ?? "",
+            filters.chainId.map(String.init) ?? "",
+            filters.range.rawValue
+        ].joined(separator: "|")
+
+        let recordKey = filtered.map(\.id).joined(separator: "|")
+        return "\(filterKey)#\(recordKey)"
     }
 
     private func recordContainsChain(_ r: AuditRequestRecord, chainId: Int) -> Bool {
