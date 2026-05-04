@@ -13,10 +13,69 @@ struct WalletGroupPanel: View {
             header
             BastionDivider()
             ScrollView {
-                BastionCard {
-                    membersSection
+                VStack(spacing: 16) {
+                    BastionCard {
+                        membersSection
+                    }
+                    unsatisfiabilityBanner
                 }
                 .padding(.bastionPanelContent)
+            }
+        }
+    }
+
+    /// PR3: surface MergedPolicy.unsatisfiabilityReasons when any active
+    /// member's effective rules are unsatisfiable. The owner sees exactly
+    /// which constraints disagree (e.g. "Wallet group and agent allowed-hours
+    /// have no overlap") instead of having to reason about silent denials.
+    @ViewBuilder
+    private var unsatisfiabilityBanner: some View {
+        let reasons = group.members.compactMap { member -> (label: String, reasons: [String])? in
+            // Skip revoked agents — their rules don't apply.
+            if member.installStatus.isRevoked { return nil }
+            let merged = RuleEngine.shared.mergedPolicy(group: group.sharedRules, member: member.scopedRules)
+            guard merged.isUnsatisfiable else { return nil }
+            let label = member.label ?? "Agent"
+            return (label, merged.unsatisfiabilityReasons)
+        }
+        if !reasons.isEmpty {
+            BastionCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.bastionBad)
+                        Text("Unsatisfiable merged policy")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.bastionBad)
+                    }
+                    Text("These members will be denied any signing request because their scoped rules conflict with the group's shared rules.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.ink500)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(reasons.enumerated()), id: \.offset) { _, entry in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(entry.label)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.ink900)
+                            ForEach(Array(entry.reasons.enumerated()), id: \.offset) { _, reason in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("·")
+                                        .foregroundStyle(Color.bastionBad)
+                                    Text(reason)
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(Color.ink700)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6).fill(Color.bastionBadSoft.opacity(0.6))
+                        )
+                    }
+                }
             }
         }
     }
