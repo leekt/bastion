@@ -503,13 +503,13 @@ struct TouchIDGlyph: View {
                 }
                 let strokeStyle = StrokeStyle(lineWidth: 1.2, lineCap: .round)
                 ctx.stroke(arc(.init(x: 2, y: 8), .init(x: 8, y: 2), .init(x: 14, y: 8)),
-                           with: .color(.white), style: strokeStyle)
+                           with: .color(.paper), style: strokeStyle)
                 ctx.stroke(arc(.init(x: 3.5, y: 9.5), .init(x: 8, y: 4), .init(x: 12.5, y: 9.5)),
-                           with: .color(.white), style: strokeStyle)
+                           with: .color(.paper), style: strokeStyle)
                 ctx.stroke(arc(.init(x: 5.5, y: 11), .init(x: 8, y: 6.5), .init(x: 10.5, y: 11)),
-                           with: .color(.white), style: strokeStyle)
+                           with: .color(.paper), style: strokeStyle)
                 ctx.stroke(arc(.init(x: 7, y: 12.5), .init(x: 8, y: 10), .init(x: 9, y: 12.5)),
-                           with: .color(.white), style: strokeStyle)
+                           with: .color(.paper), style: strokeStyle)
             }
         }
         .frame(width: size, height: size)

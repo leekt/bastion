@@ -130,7 +130,11 @@ struct MenuBarPanelView: View {
         HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 7).fill(Color.ink900)
-                ShieldGlyph(size: 15, color: .white)
+                // .paper instead of .white — ink900 inverts to off-white
+                // in dark mode, and a literal-white glyph on a near-white
+                // fill is invisible. paper inverts inversely so contrast
+                // holds in both themes.
+                ShieldGlyph(size: 15, color: .paper)
             }
             .frame(width: 28, height: 28)
 
@@ -303,7 +307,10 @@ struct MenuBarPanelView: View {
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Color.paper)
                 } else {
-                    ShieldGlyph(size: 15, color: .white, filled: true)
+                    // .paper for the same dark-mode reason as the idle
+                    // header above — paused/lockdown branches already use
+                    // Color.paper for consistency.
+                    ShieldGlyph(size: 15, color: .paper, filled: true)
                 }
             }
             .frame(width: 28, height: 28)

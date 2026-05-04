@@ -92,7 +92,12 @@ struct SigningRequestView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 7)
                     .fill(isOverride ? Color.bastionBadSoft : Color.ink900)
-                ShieldGlyph(size: 15, color: isOverride ? Color.bastionBad : .white, filled: !isOverride)
+                // Use Color.paper (not literal .white) so the glyph stays
+                // visible in dark mode, where ink900 inverts to off-white
+                // and the literal-white shield would vanish into the fill.
+                // paper inverts the opposite direction (white in light,
+                // dark gray in dark) so contrast holds in both themes.
+                ShieldGlyph(size: 15, color: isOverride ? Color.bastionBad : .paper, filled: !isOverride)
             }
             .frame(width: 28, height: 28)
 
