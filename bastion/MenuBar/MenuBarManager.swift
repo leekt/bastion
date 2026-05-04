@@ -29,8 +29,16 @@ final class MenuBarManager {
             let currentState = signingManager.state
             switch currentState {
             case .idle:
-                showingRequestID = nil
-                SigningRequestPanelManager.shared.closePanel()
+                // Only close the panel when transitioning out of a request
+                // we owned. The Test Approval / Test Violation buttons (and
+                // any other surface that pushes a panel directly) leave
+                // signingManager.state at .idle the entire time, so an
+                // unconditional closePanel() here used to make those
+                // panels disappear within the 100ms poll tick.
+                if showingRequestID != nil {
+                    showingRequestID = nil
+                    SigningRequestPanelManager.shared.closePanel()
+                }
             case .pendingApproval(let approval):
                 if showingRequestID != approval.request.requestID {
                     showingRequestID = approval.request.requestID
