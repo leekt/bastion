@@ -58,6 +58,9 @@ struct SigningRequestView: View {
             BastionDivider()
             if let intent = request.intent { intentPanel(intent: intent) }
             decodedAction
+            if let classification = permitClassification {
+                permitWarningPanel(classification: classification)
+            }
             if !riskSignals.isEmpty { riskSignalsPanel }
             if isOverride { violationsPanel }
             if hasUnrecognizedCalldata { unknownCalldataPanel }
@@ -457,6 +460,149 @@ struct SigningRequestView: View {
             Spacer(minLength: 0)
         }
         .padding(EdgeInsets(top: 12, leading: 16, bottom: 0, trailing: 16))
+    }
+
+    // MARK: - Permit classifier (PR5)
+
+    /// PR5: detect ERC-2612 / Permit2 / ERC-7702 typed-data shapes that
+    /// grant on-chain spending or execution authority. The result drives
+    /// the loud red panel below the headline so the owner can see
+    /// exactly what they're authorising — most permit-style messages
+    /// look innocuous in raw form but actually unlock unbounded later
+    /// transfers.
+    private var permitClassification: PermitClassification? {
+        guard case .typedData(let typed) = request.operation else { return nil }
+        return PermitClassifier.classify(typed)
+    }
+
+    @ViewBuilder
+    private func permitWarningPanel(classification: PermitClassification) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.bastionBad)
+                Text(classification.label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.bastionBad)
+                Spacer(minLength: 0)
+                if classification.grantsLastingAllowance {
+                    BastionChip(label: "Lasting allowance", style: .bad)
+                }
+            }
+            Text(permitWarningExplanation(for: classification))
+                .font(.system(size: 12))
+                .foregroundStyle(Color.bastionBad)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(permitFieldRows(classification), id: \.key) { row in
+                    KVRow(key: row.key, keyWidth: 70) {
+                        row.value
+                    }
+                }
+            }
+        }
+        .padding(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
+        .background(
+            RoundedRectangle(cornerRadius: BastionTokens.radiusMedium)
+                .fill(Color.bastionBadSoft)
+                .overlay(
+                    RoundedRectangle(cornerRadius: BastionTokens.radiusMedium)
+                        .strokeBorder(Color.bastionBad.opacity(0.3), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 16).padding(.bottom, 14)
+    }
+
+    private func permitWarningExplanation(for classification: PermitClassification) -> String {
+        switch classification {
+        case .erc2612:
+            return "Signing this lets the spender pull tokens from your account at any point before the deadline — without another approval. Verify the spender, amount, and deadline match what you expect."
+        case .permit2Single, .permit2Batch:
+            return "This grants Uniswap Permit2 allowance off-chain. The spender can transfer up to the listed amount until expiration, with no further on-chain step."
+        case .permit2TransferFrom:
+            return "Permit2 one-shot transfer authorization. The spender can pull this exact amount once before the deadline."
+        case .erc7702Delegation:
+            return "ERC-7702 set-code authorization installs delegate code on your EOA. Anything that delegate runs (including draining) executes with your account's authority."
+        }
+    }
+
+    private struct PermitRow { let key: String; let value: AnyView }
+
+    private func permitFieldRows(_ classification: PermitClassification) -> [PermitRow] {
+        switch classification {
+        case .erc2612(let spender, let amount, let deadline, let token):
+            var rows: [PermitRow] = []
+            if let token {
+                rows.append(PermitRow(key: "Token", value: AnyView(AddressView(address: token, muted: true))))
+            }
+            rows.append(PermitRow(key: "Spender", value: AnyView(AddressView(address: spender))))
+            rows.append(PermitRow(key: "Amount", value: AnyView(monoText(amount))))
+            rows.append(PermitRow(key: "Deadline", value: AnyView(monoText(formatExpiry(deadline)))))
+            return rows
+        case .permit2Single(let token, let spender, let amount, let expiration, let nonce):
+            return [
+                PermitRow(key: "Token", value: AnyView(AddressView(address: token, muted: true))),
+                PermitRow(key: "Spender", value: AnyView(AddressView(address: spender))),
+                PermitRow(key: "Amount", value: AnyView(monoText(amount))),
+                PermitRow(key: "Expires", value: AnyView(monoText(formatExpiry(expiration)))),
+                PermitRow(key: "Nonce", value: AnyView(monoText(nonce))),
+            ]
+        case .permit2Batch(let spender, let tokens, let amounts, let expiration):
+            var rows: [PermitRow] = [
+                PermitRow(key: "Spender", value: AnyView(AddressView(address: spender))),
+                PermitRow(key: "Earliest", value: AnyView(monoText(formatExpiry(expiration)))),
+            ]
+            for (idx, token) in tokens.enumerated() {
+                let amount = idx < amounts.count ? amounts[idx] : "?"
+                rows.append(PermitRow(
+                    key: "Token \(idx + 1)",
+                    value: AnyView(
+                        HStack(spacing: 6) {
+                            AddressView(address: token, muted: true)
+                            Text("·").foregroundStyle(Color.ink400)
+                            monoText(amount)
+                        }
+                    )
+                ))
+            }
+            return rows
+        case .permit2TransferFrom(let token, let spender, let amount, let deadline):
+            return [
+                PermitRow(key: "Token", value: AnyView(AddressView(address: token, muted: true))),
+                PermitRow(key: "Spender", value: AnyView(AddressView(address: spender))),
+                PermitRow(key: "Amount", value: AnyView(monoText(amount))),
+                PermitRow(key: "Deadline", value: AnyView(monoText(formatExpiry(deadline)))),
+            ]
+        case .erc7702Delegation(let delegate, let chainId, let nonce):
+            return [
+                PermitRow(key: "Delegate", value: AnyView(AddressView(address: delegate))),
+                PermitRow(key: "Chain", value: AnyView(monoText(chainId))),
+                PermitRow(key: "Nonce", value: AnyView(monoText(nonce))),
+            ]
+        }
+    }
+
+    private func monoText(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 12, design: .monospaced))
+            .foregroundStyle(Color.ink900)
+    }
+
+    /// Formats a uint256-as-string deadline/expiration. Treats values
+    /// that fit in Int64 as unix seconds and renders relative time;
+    /// returns the raw string otherwise so we never mis-display huge
+    /// adversarial numbers.
+    private func formatExpiry(_ raw: String) -> String {
+        guard let seconds = Int64(raw),
+              seconds > 0,
+              seconds < 4_000_000_000 else {
+            return raw
+        }
+        let date = Date(timeIntervalSince1970: TimeInterval(seconds))
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     // MARK: - Risk signals
