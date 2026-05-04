@@ -152,14 +152,51 @@ nonisolated enum MergedPolicyComposer {
         )
     }
 
-    /// Posture merge: strict-OR on (evaluatesRules, requiresApprovalPopup).
-    /// The output is mapped through SigningPosture.from so it lands in
-    /// one of the three legal cases — the function-local invariant the
-    /// follow-up task (#53) will replace with a typed proof.
+    /// Posture merge — exhaustive 3 × 3 case table.
+    ///
+    /// The earlier formulation used `SigningPosture.from(enabled:, requireExplicitApproval:)`
+    /// over the strict-OR of `(evaluatesRules, requiresApprovalPopup)`. That
+    /// only landed in a valid case because (evaluates=false, popup=false) is
+    /// unreachable under strict-OR — the third posture
+    /// (`requireApprovalWithoutRuleEvaluation`) has popup=true, so any pair
+    /// involving it forces popup=true. The unreachability was a function-local
+    /// invariant; a future change to `SigningPosture.from` could have
+    /// silently returned the wrong case.
+    ///
+    /// Switching on the tuple makes exhaustiveness a compile-time property:
+    /// every legal pair has a typed answer, every illegal pair would be
+    /// flagged by the Swift compiler, and the result is provably one of the
+    /// three valid cases without consulting any helper.
     static func stricterPosture(_ a: SigningPosture, _ b: SigningPosture) -> SigningPosture {
-        let evaluates = a.evaluatesRules || b.evaluatesRules
-        let popup = a.requiresApprovalPopup || b.requiresApprovalPopup
-        return SigningPosture.from(enabled: evaluates, requireExplicitApproval: popup)
+        switch (a, b) {
+
+        // Both sides happy to auto-sign → keep auto-sign.
+        case (.enforceRulesAndAutoSign, .enforceRulesAndAutoSign):
+            return .enforceRulesAndAutoSign
+
+        // Either side wants the popup and both still want evaluation
+        // → enforce + require approval.
+        case (.enforceRulesAndAutoSign, .enforceRulesAndRequireApproval),
+             (.enforceRulesAndRequireApproval, .enforceRulesAndAutoSign),
+             (.enforceRulesAndRequireApproval, .enforceRulesAndRequireApproval):
+            return .enforceRulesAndRequireApproval
+
+        // One side asks for "skip rules, just popup" but the other asks
+        // for evaluation. Strict-OR semantics → both wishes survive: we
+        // evaluate AND show the popup, i.e. enforceRulesAndRequireApproval.
+        // Both halves of the original disagreement get what they wanted.
+        case (.requireApprovalWithoutRuleEvaluation, .enforceRulesAndAutoSign),
+             (.enforceRulesAndAutoSign, .requireApprovalWithoutRuleEvaluation),
+             (.requireApprovalWithoutRuleEvaluation, .enforceRulesAndRequireApproval),
+             (.enforceRulesAndRequireApproval, .requireApprovalWithoutRuleEvaluation):
+            return .enforceRulesAndRequireApproval
+
+        // Both sides skip rules. Popup is still mandatory (popup=true on
+        // both inputs) but rule evaluation does not run on either side, so
+        // we keep the skip-rules posture.
+        case (.requireApprovalWithoutRuleEvaluation, .requireApprovalWithoutRuleEvaluation):
+            return .requireApprovalWithoutRuleEvaluation
+        }
     }
 
     private static func mergeHours(_ a: AllowedHours?, _ b: AllowedHours?) -> MergedConstraint<AllowedHours> {

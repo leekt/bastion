@@ -261,4 +261,45 @@ struct MergedPolicyTests {
         // get what they wanted: rules are evaluated AND popup is shown.
         #expect(merged.userOpPosture == .enforceRulesAndRequireApproval)
     }
+
+    /// PR follow-up #53: pin the full 3×3 truth table for `stricterPosture`.
+    /// The previous formulation (`SigningPosture.from(strict-OR booleans)`)
+    /// only landed in a valid case because (evaluates=false, popup=false)
+    /// is unreachable under strict-OR; an exhaustive switch makes that a
+    /// compile-time property. This test guards every cell so any future
+    /// behavioural change is a red CI run, not a silent semantic shift.
+    @Test("Posture merge truth table is exhaustive and stable")
+    func postureMergeTruthTable() {
+        let auto = SigningPosture.enforceRulesAndAutoSign
+        let approval = SigningPosture.enforceRulesAndRequireApproval
+        let skip = SigningPosture.requireApprovalWithoutRuleEvaluation
+
+        // (a, b, expected) — read as "merging a with b yields expected".
+        let table: [(SigningPosture, SigningPosture, SigningPosture)] = [
+            (auto, auto, auto),
+            (auto, approval, approval),
+            (approval, auto, approval),
+            (approval, approval, approval),
+            (auto, skip, approval),
+            (skip, auto, approval),
+            (approval, skip, approval),
+            (skip, approval, approval),
+            (skip, skip, skip),
+        ]
+        for (a, b, expected) in table {
+            #expect(MergedPolicyComposer.stricterPosture(a, b) == expected)
+        }
+    }
+
+    @Test("Posture merge is symmetric (commutative)")
+    func postureMergeSymmetric() {
+        for a in SigningPosture.allCases {
+            for b in SigningPosture.allCases {
+                #expect(
+                    MergedPolicyComposer.stricterPosture(a, b)
+                        == MergedPolicyComposer.stricterPosture(b, a)
+                )
+            }
+        }
+    }
 }
