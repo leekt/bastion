@@ -182,7 +182,11 @@ struct PairingFlowView: View {
         HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 7).fill(Color.ink900)
-                ShieldGlyph(size: 14, color: .white, filled: true)
+                // .paper instead of .white so the glyph stays visible in
+                // dark mode (ink900 inverts to off-white; a literal-white
+                // glyph on a near-white fill is invisible). paper inverts
+                // in the opposite direction so contrast is preserved.
+                ShieldGlyph(size: 14, color: .paper, filled: true)
             }
             .frame(width: 28, height: 28)
 
