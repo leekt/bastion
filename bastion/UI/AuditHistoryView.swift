@@ -167,15 +167,20 @@ struct AuditHistoryView: View {
     // MARK: - Rows
 
     private var rowsList: some View {
-        // No `List` here on purpose. macOS `List(.plain)` reserves space
-        // for an empty NSTableView header view that none of
-        // `.listRowInsets`, `.listRowSeparator(.hidden)`,
-        // `.scrollContentBackground(.hidden)`, or
-        // `.environment(\.defaultMinListRowHeight, 1)` could fully kill —
-        // that phantom header is what produced the giant empty band
-        // between `columnHeader` and the first row through every
-        // previous fix attempt. Plain `ScrollView + VStack` puts the
-        // first row flush below the column header without surprises.
+        // No `List` (its NSTableView phantom header insets rows down).
+        // No `LazyVStack` (its lazy-content reservation centers short
+        // datasets vertically on macOS).
+        // No GeometryReader/ZStack overlay tricks.
+        //
+        // Plain ScrollView + VStack with **all three** anchors set
+        // belt-and-suspenders: `.defaultScrollAnchor(.top)` on the
+        // ScrollView so macOS NSScrollView pins documentView origin to
+        // the top regardless of flipped-coordinate state, and
+        // `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`
+        // so the inner VStack fills the scroll container and aligns its
+        // children top-leading. Once one of these is missing, the
+        // container can position rows in the middle of empty space and
+        // we get the giant empty band the user kept seeing.
         ScrollView {
             VStack(spacing: 0) {
                 if filtered.isEmpty {
@@ -191,8 +196,9 @@ struct AuditHistoryView: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .defaultScrollAnchor(.top)
         .id(rowsContentIdentity)
     }
 
