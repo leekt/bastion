@@ -997,13 +997,20 @@ private struct ProfilePanel: View {
 
 // MARK: - CapTile
 
-// PR2: posture picker — three-way SigningPosture selector. Replaces the
-// old on/off operations toggle so the behaviour the operator chose is
-// unambiguous in both code and UI.
+// Posture picker — three-way SigningPosture selector rendered as a
+// macOS-style segmented control. PR2 introduced the picker as three
+// individual button pills in a row; polish task #52 redesigns it as a
+// single rounded container with one selected segment so it reads as a
+// group rather than three loose buttons. The selected segment carries
+// the dark fill, unselected segments are paper-on-light with a subtle
+// hover state.
 private struct PosturePicker: View {
     let label: String
     let hint: String
     @Binding var binding: SigningPosture
+
+    private static let cornerRadius: CGFloat = 7
+    private static let segmentHeight: CGFloat = 28
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1012,33 +1019,67 @@ private struct PosturePicker: View {
                 Text(hint).font(.system(size: 12)).foregroundStyle(Color.ink500)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 6) {
-                ForEach(SigningPosture.allCases, id: \.self) { posture in
-                    Button {
-                        binding = posture
-                    } label: {
-                        Text(postureShortLabel(posture))
-                            .font(.system(size: 11.5, weight: .medium))
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .foregroundStyle(binding == posture ? Color.paper : Color.ink700)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(binding == posture ? Color.ink900 : Color.paper)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .strokeBorder(binding == posture ? .clear : Color.ink200, lineWidth: 1)
-                                    )
-                            )
-                            .help(posture.hint)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
+            segmentedControl
         }
         .padding(.vertical, 10)
     }
 
-    private func postureShortLabel(_ p: SigningPosture) -> String {
+    private var segmentedControl: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(SigningPosture.allCases.enumerated()), id: \.element) { index, posture in
+                segmentButton(posture: posture)
+                if index < SigningPosture.allCases.count - 1 {
+                    // Hairline divider between segments — hidden when
+                    // either neighbour is selected (the selected pill's
+                    // outline already provides the boundary).
+                    Rectangle()
+                        .fill(Color.ink200)
+                        .frame(width: 1, height: 14)
+                        .opacity(neighbourSelected(at: index) ? 0 : 1)
+                }
+            }
+        }
+        .frame(height: Self.segmentHeight)
+        .background(
+            RoundedRectangle(cornerRadius: Self.cornerRadius)
+                .fill(Color.ink50)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Self.cornerRadius)
+                        .strokeBorder(Color.ink150, lineWidth: 1)
+                )
+        )
+    }
+
+    private func segmentButton(posture: SigningPosture) -> some View {
+        let isSelected = binding == posture
+        return Button {
+            withAnimation(.easeOut(duration: 0.12)) { binding = posture }
+        } label: {
+            Text(Self.postureShortLabel(posture))
+                .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Color.paper : Color.ink700)
+                .frame(maxWidth: .infinity)
+                .frame(height: Self.segmentHeight - 4)
+                .background(
+                    RoundedRectangle(cornerRadius: Self.cornerRadius - 2)
+                        .fill(isSelected ? Color.ink900 : .clear)
+                        .padding(2)
+                )
+                .help(posture.hint)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// True if either segment immediately around index `i` (i.e. i or i+1)
+    /// is selected. We hide the inter-segment hairline next to the
+    /// selected pill so the pill's own outline stays visually clean.
+    private func neighbourSelected(at i: Int) -> Bool {
+        let cases = SigningPosture.allCases
+        guard i + 1 < cases.count else { return false }
+        return binding == cases[i] || binding == cases[i + 1]
+    }
+
+    private static func postureShortLabel(_ p: SigningPosture) -> String {
         switch p {
         case .enforceRulesAndAutoSign:           return "Auto-sign"
         case .enforceRulesAndRequireApproval:    return "Always confirm"

@@ -19,7 +19,11 @@ struct SigningRequestView: View {
     private let initialCountdown = 60
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    private enum AuthStage { case idle, authing, done }
+    /// Display states for the footer. `.denied` is the brief
+    /// confirmation flash after the owner clicks Deny — without it the
+    /// popup vanished instantly and the owner had no visual proof their
+    /// click landed.
+    private enum AuthStage { case idle, authing, done, denied }
 
     private var request: SignRequest { approval.request }
     private var isOverride: Bool {
@@ -35,7 +39,7 @@ struct SigningRequestView: View {
         .frame(minWidth: 460, minHeight: 560)
         .onReceive(timer) { _ in
             guard authStage == .idle else { return }
-            if remainingSeconds > 0 { remainingSeconds -= 1 } else { onDeny() }
+            if remainingSeconds > 0 { remainingSeconds -= 1 } else { denyTapped() }
         }
     }
 
@@ -698,6 +702,14 @@ struct SigningRequestView: View {
                         .foregroundStyle(Color.bastionOk)
                 }
                 .padding(.vertical, 8)
+            case .denied:
+                HStack(spacing: 8) {
+                    CloseGlyph(size: 13, color: .bastionBad)
+                    Text("Denied · \(approval.clientContext.displayName) will see a rejection")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.bastionBad)
+                }
+                .padding(.vertical, 8)
             case .idle:
                 idleFooter
             }
@@ -718,7 +730,7 @@ struct SigningRequestView: View {
             .frame(maxWidth: .infinity)
 
             HStack(spacing: 8) {
-                Button(action: onDeny) {
+                Button(action: denyTapped) {
                     Text("Deny").frame(maxWidth: .infinity)
                 }
                 .keyboardShortcut(.escape)
@@ -750,6 +762,21 @@ struct SigningRequestView: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
             withAnimation { authStage = .done }
+        }
+    }
+
+    /// Polish (#49): show a brief red "Denied" footer flash before the
+    /// caller closes the panel. Otherwise the popup vanished as soon as
+    /// the user clicked Deny and they had no visual proof their click
+    /// landed — the same ambiguity that made the "Test Approval popup
+    /// disappears instantly" bug so confusing.
+    private func denyTapped() {
+        guard authStage == .idle else { return }
+        withAnimation { authStage = .denied }
+        // Hold the denied flash long enough to register, then call
+        // upstream — the caller closes the panel.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            onDeny()
         }
     }
 }
