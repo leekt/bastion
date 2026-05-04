@@ -22,7 +22,11 @@ struct AuditHistoryView: View {
                 filterRow
                 BastionDivider()
                 columnHeader
-                BastionDivider()
+                // No divider here on purpose — the column header is part
+                // of the data table, not a separate section. A divider
+                // between the header strip and the first row makes the
+                // header look like floating text above the data; without
+                // it the rows hang off the header naturally.
                 rowsList
             }
             .background(Color.paper)
@@ -409,7 +413,7 @@ private struct AuditRow: View {
                         .foregroundStyle(Color.ink400)
                         .frame(width: 14, alignment: .center)
                 }
-                .padding(EdgeInsets(top: 14, leading: 24, bottom: 14, trailing: 24))
+                .padding(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
                 .background(expanded ? Color.ink50 : Color.clear)
                 .contentShape(Rectangle())
             }
