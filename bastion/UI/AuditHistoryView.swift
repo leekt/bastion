@@ -168,14 +168,15 @@ struct AuditHistoryView: View {
     // MARK: - Rows
 
     private var rowsList: some View {
+        // ScrollView + plain VStack. LazyVStack on macOS inside a custom
+        // ScrollView misbehaves when the dataset is short — the NSScrollView
+        // host applies vertical centering to under-filled lazy content,
+        // which produced the giant empty bands above and below the rows
+        // in the audit screenshot. With a 200-record cap upstream, lazy
+        // initialization buys nothing here, so a regular VStack is the
+        // simplest (and correct) fix.
         ScrollView {
-            // Force the LazyVStack to fill its container width and pin its
-            // content to the top. Without an explicit frame, the macOS
-            // NSScrollView host can vertically center short content (when
-            // the scrollable area is taller than the rows themselves),
-            // which is what was producing the gigantic empty bands above
-            // and below the rows in the screenshot.
-            LazyVStack(spacing: 0) {
+            VStack(spacing: 0) {
                 if filtered.isEmpty {
                     emptyState
                 } else {
@@ -191,7 +192,6 @@ struct AuditHistoryView: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var emptyState: some View {

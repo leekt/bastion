@@ -145,7 +145,29 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
     }
 
     var clientDisplayName: String {
-        client?.displayName ?? "Unknown client"
+        // Fallback chain: persisted client snapshot → infer "system /
+        // owner action" from the dataPrefix → generic placeholder.
+        // We previously rendered "Unknown client" for every sparse
+        // record, including system-internal events (profile creation,
+        // wallet-group lifecycle, key reset) where there is no agent
+        // involved at all. That made the audit history read like a wall
+        // of unknown actors.
+        if let client { return client.displayName }
+        return Self.systemActorLabel(for: dataPrefix) ?? "Unknown client"
+    }
+
+    /// Best-effort actor label for events that don't carry a client
+    /// snapshot (typically owner-driven or system-internal events).
+    static func systemActorLabel(for dataPrefix: String) -> String? {
+        if dataPrefix.hasPrefix("walletgroup") { return "Owner action" }
+        switch dataPrefix {
+        case "profile":      return "System"
+        case "reset":        return "Owner action"
+        case "pair":         return "Pairing"
+        case "lockdown.enter", "lockdown.leave": return "Owner action"
+        case "pause.on", "pause.off": return "Owner action"
+        default:             return nil
+        }
     }
 
     var operationTitle: String {
@@ -173,7 +195,20 @@ nonisolated struct AuditEvent: Codable, Sendable, Identifiable {
         case .signPending, .signSuccess, .signDenied, .ruleViolation, .authFailed, .preflightCompleted, .keyReset:
             break
         }
-        return request?.title ?? type.rawValue
+        if let title = request?.title { return title }
+        // Humanized fallback for sparse records — surface a sentence-cased
+        // label instead of the raw enum string ("sign_success") that used
+        // to leak through.
+        switch type {
+        case .signPending:        return "Pending approval"
+        case .signSuccess:        return "Signed"
+        case .signDenied:         return "Denied"
+        case .ruleViolation:      return "Rule violation"
+        case .authFailed:         return "Authentication failed"
+        case .preflightCompleted: return "Preflight completed"
+        case .keyReset:           return "Signing keys reset"
+        default:                  return type.rawValue
+        }
     }
 
     var resultLabel: String {
@@ -481,11 +516,19 @@ nonisolated struct AuditRequestRecord: Codable, Sendable, Identifiable {
     }
 
     var clientDisplayName: String {
-        client?.displayName ?? latestEvent?.clientDisplayName ?? "Unknown client"
+        if let client { return client.displayName }
+        // Defer to the latest event — `AuditEvent.clientDisplayName`
+        // already maps system-internal dataPrefixes to "System" / "Owner
+        // action" rather than "Unknown client" for sparse records.
+        return latestEvent?.clientDisplayName ?? "Unknown client"
     }
 
     var operationTitle: String {
-        request?.title ?? latestEvent?.operationTitle ?? "Audit Request"
+        if let title = request?.title { return title }
+        // `AuditEvent.operationTitle` returns a humanized label for sign*
+        // events instead of the raw enum string when no request snapshot
+        // exists, so old sparse records render readably too.
+        return latestEvent?.operationTitle ?? "Audit Request"
     }
 
     var summary: String {

@@ -222,11 +222,13 @@ final class RuleEngine {
             config.clientProfiles.removeAll { $0.id == profile.id }
             return nil
         }
-        auditLog.record(AuditEvent(
-            type: .signSuccess,
-            dataPrefix: "profile",
-            reason: "Auto-created client profile for \(bundleId)"
-        ))
+        // Profile auto-creation is a side-effect of a signing attempt —
+        // the actual sign event recorded by SigningManager will carry the
+        // full request + client context, so the operator already sees the
+        // first appearance of a new bundle on its own audit row. We
+        // previously recorded a `.signSuccess` event with no request and
+        // no client context here, which surfaced as "Unknown client |
+        // sign_success" rows in the audit history. Suppressed.
         return clientProfile(bundleId: bundleId)
     }
 
