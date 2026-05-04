@@ -152,16 +152,23 @@ struct AuditHistoryView: View {
             Text("Request").frame(maxWidth: .infinity, alignment: .leading)
             Text("Outcome").frame(width: 130, alignment: .leading)
             Text("Chain").frame(width: 100, alignment: .leading)
-            Color.clear.frame(width: 14)
+            // Width-only frame on a Color leaves the vertical dimension
+            // flexible. With this trailing spacer flexible-vertical AND
+            // `rowsList`'s ScrollView ALSO flexible-vertical, the body
+            // VStack split its remaining height between them — giving
+            // `columnHeader` ~half the window with the text centered, and
+            // pushing the rows into the lower half. Pinning height to 1
+            // makes the spacer a no-op vertically.
+            Color.clear.frame(width: 14, height: 1)
         }
         .font(.system(size: 10.5, weight: .semibold))
         .kerning(0.6)
         .foregroundStyle(Color.ink500)
-        // Tight vertical padding — column header is a label strip above
-        // the data, not a content row. The 8pt padding the v2 mock used
-        // (combined with the surrounding filter / saved-view rows) made
-        // the header feel ~30pt tall for a single line of 10.5pt text.
         .padding(EdgeInsets(top: 4, leading: 24, bottom: 4, trailing: 24))
+        // Belt-and-suspenders: even if some future modifier reintroduces
+        // flexible vertical sizing, this clamps the header to natural
+        // content height.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Rows
