@@ -1715,111 +1715,29 @@ final class RuleEngine {
     /// BOTH rules with their original IDs so the group counter (shared
     /// across all members) and the agent counter (per-member) both
     /// increment.
+    /// PR3: thin shim over `MergedPolicyComposer`. Existing callers (rule
+    /// engine validators, signing context resolution) still consume a
+    /// `RuleConfig`, so we flatten back through `MergedPolicy.toRuleConfig()`.
+    /// New callers (UI surfacing the effective merged policy, audit log)
+    /// should call `mergedPolicy(group:member:)` directly to keep the
+    /// typed unsatisfiable cases visible.
     nonisolated func mergeGroupRules(group: RuleConfig, member: RuleConfig) -> RuleConfig {
-        // Intersection for string sets. Nil means "no restriction" in this
-        // codebase, so nil ∩ X = X (X restricts, the other side doesn't).
-        func intersectArrays(_ a: [String]?, _ b: [String]?) -> [String]? {
-            switch (a, b) {
-            case (nil, nil): return nil
-            case (nil, let x?): return x
-            case (let x?, nil): return x
-            case (let x?, let y?):
-                let ySet = Set(y.map { $0.lowercased() })
-                return x.filter { ySet.contains($0.lowercased()) }
-            }
-        }
-
-        func intersectInts(_ a: [Int]?, _ b: [Int]?) -> [Int]? {
-            switch (a, b) {
-            case (nil, nil): return nil
-            case (nil, let x?): return x
-            case (let x?, nil): return x
-            case (let x?, let y?):
-                let ySet = Set(y)
-                return x.filter { ySet.contains($0) }
-            }
-        }
-
-        func intersectDict(_ a: [String: [String]]?, _ b: [String: [String]]?) -> [String: [String]]? {
-            switch (a, b) {
-            case (nil, nil): return nil
-            case (nil, let x?): return x
-            case (let x?, nil): return x
-            case (let x?, let y?):
-                var out: [String: [String]] = [:]
-                // For keys in both: intersect the arrays.
-                // For keys only in one: keep that side (other has no restriction for that key).
-                let allKeys = Set(x.keys).union(y.keys)
-                for key in allKeys {
-                    let leftValues = x[key]
-                    let rightValues = y[key]
-                    switch (leftValues, rightValues) {
-                    case (nil, nil):
-                        continue
-                    case (let v?, nil), (nil, let v?):
-                        out[key] = v
-                    case (let lv?, let rv?):
-                        let rvSet = Set(rv.map { $0.lowercased() })
-                        let intersected = lv.filter { rvSet.contains($0.lowercased()) }
-                        if !intersected.isEmpty {
-                            out[key] = intersected
-                        } else {
-                            // Both sides restrict this key but share no overlap →
-                            // record an impossible allowlist. Using a sentinel
-                            // empty-but-present value so validation denies.
-                            out[key] = []
-                        }
-                    }
-                }
-                return out
-            }
-        }
-
-        return RuleConfig(
-            // PR2: merge per-operation postures with the stricter rule.
-            // Stricter = "any side that wants evaluation gets evaluation,
-            // any side that wants popup gets popup". The resulting bool
-            // pair maps back through SigningPosture.from to the right
-            // enum case.
-            userOpPosture: Self.stricterPosture(group.userOpPosture, member.userOpPosture),
-            allowedHours: tighterHours(group.allowedHours, member.allowedHours),
-            allowedChains: intersectInts(group.allowedChains, member.allowedChains),
-            allowedTargets: intersectDict(group.allowedTargets, member.allowedTargets),
-            allowedSelectors: intersectDict(group.allowedSelectors, member.allowedSelectors),
-            denySelectors: unionArrays(group.denySelectors, member.denySelectors),
-            // P1 fix: intersect allowedClients (matched by bundleId, case-
-            // insensitive). Previously a broad group allowlist could mask a
-            // narrow agent allowlist, letting unintended bundles use the
-            // agent membership. Empty-after-intersection produces an empty
-            // (always-deny) list — distinct from nil, which means "no
-            // restriction".
-            allowedClients: intersectAllowedClients(group.allowedClients, member.allowedClients),
-            rateLimits: group.rateLimits + member.rateLimits,
-            spendingLimits: group.spendingLimits + member.spendingLimits,
-            rawMessagePolicy: RawMessagePolicy(
-                posture: Self.stricterPosture(group.rawMessagePolicy.posture, member.rawMessagePolicy.posture),
-                allowRawSigning: group.rawMessagePolicy.allowRawSigning && member.rawMessagePolicy.allowRawSigning
-            ),
-            typedDataPolicy: TypedDataPolicy(
-                posture: Self.stricterPosture(group.typedDataPolicy.posture, member.typedDataPolicy.posture),
-                domainRules: group.typedDataPolicy.domainRules + member.typedDataPolicy.domainRules,
-                structRules: group.typedDataPolicy.structRules + member.typedDataPolicy.structRules
-            )
-        )
+        MergedPolicyComposer.compose(group: group, member: member).toRuleConfig()
     }
 
-    /// PR2: combine two postures by taking the strict-OR of their
-    /// component bits — any side wanting rule evaluation forces it; any
-    /// side wanting an approval popup forces it. The output is mapped
-    /// back through SigningPosture.from so the merge result is one of
-    /// the three legal enum cases. Note: requireApprovalWithoutRuleEvaluation
-    /// + enforceRulesAndAutoSign collapses to enforceRulesAndRequireApproval
-    /// — the merged side wants evaluation (member said skip but group said
-    /// evaluate) AND wants the popup (skip-rules side requires it).
+    /// Typed merge result. Use this when the caller needs to know
+    /// *whether* an unsatisfiable constraint exists (for UI / audit /
+    /// short-circuit denial) rather than only the flattened RuleConfig.
+    nonisolated func mergedPolicy(group: RuleConfig, member: RuleConfig) -> MergedPolicy {
+        MergedPolicyComposer.compose(group: group, member: member)
+    }
+
+    /// Posture merge: kept as a thin alias around `MergedPolicyComposer`'s
+    /// strict-OR so test fixtures and other callers don't need to know
+    /// about the composer type. The follow-up task (#53) replaces this
+    /// with a typed merge result.
     nonisolated static func stricterPosture(_ a: SigningPosture, _ b: SigningPosture) -> SigningPosture {
-        let evaluates = a.evaluatesRules || b.evaluatesRules
-        let popup = a.requiresApprovalPopup || b.requiresApprovalPopup
-        return SigningPosture.from(enabled: evaluates, requireExplicitApproval: popup)
+        MergedPolicyComposer.stricterPosture(a, b)
     }
 
     /// Intersects two AllowedClient lists by bundleId. Nil means "no
