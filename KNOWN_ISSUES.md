@@ -1,140 +1,235 @@
 # Known Issues & Design Limitations
 
-This document lists known security and design limitations that have been identified through three rounds of security audits and are accepted as inherent trade-offs or deferred for future work.
+_Last reviewed: 2026-05-04 — refreshed alongside the PR1–PR5 architectural cleanup series._
 
-All items below have been evaluated and triaged. None are exploitable without additional preconditions (e.g., compromised team signing key, malicious RPC, or physical access).
+This document is the canonical record of known security and design caveats Bastion ships with. None of the items below are exploitable without one of the preconditions called out in the **Risk** field (e.g. compromised team signing key, malicious bundler, physical access).
 
-## Signing Model Limitations
+## Taxonomy
 
-### EIP-191 Messages Have No Chain or Context Binding
-**Audit**: R3-02 (Medium)
+Every item has the same five fields so readers can scan and decide whether it affects their threat model.
 
-EIP-191 personal message signatures (`\x19Ethereum Signed Message:\n...`) contain no chain ID, contract address, nonce, or expiry. A signature is valid on every chain, in every protocol, forever.
+| Field | What it means |
+|-------|---------------|
+| **Status** | One of: `Accepted` (won't fix, justified), `Deferred` (will fix in a future milestone), `By design` (intentional architecture, surfaced because audits flagged it), `Mitigated` (was open in a prior release, resolved by the listed PR). |
+| **Severity** | `Critical` / `High` / `Medium` / `Low` / `Informational`. Severity is independent of status — `Mitigated` items keep their original severity for historical context. |
+| **Subsystem** | `Signing model` / `Spending limits` / `XPC & auth` / `Keychain` / `Approval UI` / `Concurrency` / `Infrastructure` / `Display`. |
+| **Audit ref** | Round-prefixed (`R2-M-04`, `R3-09`) for audit-round findings; bare letter-prefixed (`M-01`, `L-03`) for findings outside a numbered round. |
+| **Risk** / **Mitigation** | Plain prose. Mitigated items have a **Resolution** line instead of **Mitigation**, naming the PR. |
 
-**Mitigation**: `rawMessagePolicy.enabled = false` (default) requires explicit user approval with the approval window for every message signing request. Users can inspect the message text before approving.
+`Open` items are listed first, grouped by severity. `Mitigated` items follow at the bottom for traceability.
 
-**Recommendation for agents**: Prefer EIP-712 typed data over EIP-191 messages. EIP-712 includes `chainId` and `verifyingContract` in the domain separator, making signatures chain- and contract-scoped.
+---
 
-### EIP-712 Typed Data Can Authorize Permit2/Permit Operations
-**Audit**: R3-09 (Informational)
+## Open · Medium
 
-EIP-712 signing can authorize off-chain permit operations (ERC-2612, Permit2) that grant token allowances without an on-chain transaction from the smart account. Bastion validates domain rules and struct rules but does not extract spending amounts from typed data message fields.
+### Sliding window can permit up to 2× the configured limit across a boundary
+- **Status**: Accepted
+- **Severity**: Medium
+- **Subsystem**: Spending limits
+- **Audit ref**: R3-03
 
-**Mitigation**: `typedDataPolicy.requireExplicitApproval = true` forces all EIP-712 signatures through the approval UI. The full message JSON is displayed for user inspection.
+**Risk.** Spending limits use a sliding time window. An agent can spend up to the configured limit just before the oldest entries expire, then spend again immediately after they expire. The result is up to 2× the configured limit being spent in a span slightly longer than the window. Mathematically correct for sliding windows, but doesn't match the user's intuition of "no more than X per hour."
 
-### Compromised Paymaster Can Extract Value During postOp
-**Audit**: R3-08 (Informational)
+**Example** with a 1 ETH/hour limit:
+- T=0 → spend 0.9 ETH
+- T=59m59s → spend 0.1 ETH (total = 1.0 ETH, at limit)
+- T=60m01s → T=0 entry rolls off, spend 0.9 ETH again
 
-The paymaster address is set by the bundler response and included in the signed UserOp hash. Bastion cannot verify or restrict what a paymaster does during `postOp` execution. A compromised bundler could return a malicious paymaster.
+**Mitigation.** Inherent to sliding windows. A fixed-window alternative (resets at calendar boundaries) is a possible future setting but would change semantics for every user who already configured a sliding limit.
 
-**Mitigation**: App-configured ZeroDev project ID takes priority over agent-provided IDs (M-08). Users should only configure trusted bundler endpoints.
+### Approval timeout is fixed at 60 seconds
+- **Status**: Deferred
+- **Severity**: Medium
+- **Subsystem**: Approval UI
+- **Audit ref**: M-01
 
-## Spending Limit Model
+**Risk.** A legitimate signing request whose approval popup is open while the owner steps away will be auto-denied at 60s.
 
-### Sliding Window Allows Up to 2x Limit Across Boundary
-**Audit**: R3-03 (Medium)
+**Mitigation.** Timeout is logged as `approval_timeout` in the audit log so the owner can see they missed something. A configurable per-profile timeout is the planned fix; tracked separately from the architectural cleanup series.
 
-Spending limits use a sliding time window. An agent can spend up to the configured limit just before the oldest entries expire, then spend again immediately after they expire. This means up to 2x the configured limit can be spent in a period slightly longer than the window.
+### State-store account names are predictable strings
+- **Status**: Accepted
+- **Severity**: Medium
+- **Subsystem**: Keychain
+- **Audit ref**: M-03
 
-This is mathematically correct for sliding windows but may not match user expectations of "no more than X per hour."
+**Risk.** Rate-limit and spending state are stored under predictable Keychain account names (`state.ratelimit.{ruleId}`, `state.spending.{ruleId}`). With access to the Keychain, an attacker could target specific counters.
 
-**Example**: With a 1 ETH/hour limit:
-- T=0: spend 0.9 ETH
-- T=59m59s: spend 0.1 ETH (total = 1.0 ETH, at limit)
-- T=60m01s: T=0 entry expires, spend 0.9 ETH again
+**Mitigation.** Acceptable given the Keychain access-group trust boundary — anyone who can see these accounts can already see every other Bastion-owned secret in the same access group. The trust-boundary owner is the team signing key, not the account names.
 
-**Mitigation**: This is an inherent property of sliding windows. A fixed-window alternative (reset at calendar boundaries) could be offered in the future.
+### Audit HMAC key lives in the same Keychain as protected data
+- **Status**: Accepted
+- **Severity**: Medium
+- **Subsystem**: Keychain
+- **Audit ref**: M-04
 
-### ERC-777, ERC-1155, and Non-Standard Token Transfers
-**Audit**: R3-05 (Low)
+**Risk.** The HMAC key for audit-log integrity sits in the same Keychain Bastion has full access to. An attacker with Keychain access could recompute valid HMACs and rewrite history.
 
-`CalldataDecoder` recognizes ERC-20 `transfer`, `approve`, and `transferFrom` only. Non-standard token operations (ERC-777 `send`, ERC-1155 `safeTransferFrom`) are not decoded.
+**Mitigation.** The audit log additionally maintains a SHA-256 hash chain linking records, so insertion / deletion / reordering is detectable even if the HMAC is recomputed. Full Keychain compromise (i.e. team signing key compromise) is the precondition; once that holds, every other defense already collapsed too.
 
-**Mitigation**: Unknown selectors trigger `hasUnrecognizedCalldata = true`, which is a hard block requiring biometric override. This is the safe direction — unrecognized token operations cannot be silently approved.
+### `validate()` and `recordSuccess()` are not atomically protected within `RuleEngine`
+- **Status**: By design
+- **Severity**: Medium
+- **Subsystem**: Concurrency
+- **Audit ref**: R2-M-04
 
-## XPC & Authentication
+**Risk.** Both methods are `nonisolated`. The validate-then-record sequence has no internal lock — if a future caller invoked them off the serialization layer that exists today, two concurrent requests could both pass `validate()` against the same counter before either ran `recordSuccess()`.
 
-### DEBUG Builds Accept Untrusted Code Signatures
-**Audit**: H-03 (High, development only)
+**Mitigation.** All signing flows go through `SigningManager.processSignRequest`, which is `@MainActor` and gated by an `isProcessing` flag — every request is serialized. Future refactors must preserve this invariant; the typed merge work in PR3 is one step toward making it a structural property of the API rather than a runtime invariant.
 
-In DEBUG builds, XPC connections from processes with untrusted developer signatures (ad-hoc signed) are accepted. This allows any locally-compiled binary to connect to the XPC service during development.
+---
 
-**Mitigation**: `#if DEBUG` guard. Production (Release) builds strictly require valid team ID signatures. DEBUG builds must never be distributed.
+## Open · Low
 
-### Removed Clients Can Query Non-Signing Endpoints
-**Audit**: R3-06 (Low)
+### `CalldataDecoder` only recognizes ERC-20 transfer / approve / transferFrom
+- **Status**: Accepted
+- **Severity**: Low
+- **Subsystem**: Signing model
+- **Audit ref**: R3-05
 
-When a client is removed from `allowedClients`, its existing XPC connection can still call read-only endpoints (`getPublicKey`, `getRules`, `getState`, `getServiceInfo`, `openUI`). Signing operations are properly denied by the live allowlist check.
+**Risk.** Non-standard token operations (ERC-777 `send`, ERC-1155 `safeTransferFrom`) aren't decoded into structured fields, so spending-limit accounting can't apply to them.
 
-**Mitigation**: Read-only access on stale connections is low risk. Connections are invalidated when the client process terminates.
+**Mitigation.** Unrecognized selectors set `hasUnrecognizedCalldata = true`, which triggers a hard block in the approval UI requiring biometric override. The safe direction — unknown shapes never auto-sign.
 
-### Approval Timeout Is Fixed at 60 Seconds
-**Audit**: M-01 (Medium)
+### `formatAmount` uses `Double` for very large values
+- **Status**: Accepted
+- **Severity**: Low
+- **Subsystem**: Display
+- **Audit ref**: L-03
 
-The approval window times out after 60 seconds with no user action. Legitimate requests may be auto-denied when the user is briefly away.
+**Risk.** `SpendingLimitRule.formatAmount()` converts `UInt128` to `Double` for display, losing precision above 2⁵³ wei (~9,007 ETH).
 
-**Mitigation**: Timeout is logged as `approval_timeout` in the audit log. A configurable timeout could be added in the future.
+**Mitigation.** Display only. All actual limit enforcement is exact `UInt128` arithmetic — the precision loss never reaches a comparison.
 
-## Keychain Trust Boundary
+### Keccak-256 implementation has no input-length validation
+- **Status**: Accepted
+- **Severity**: Low
+- **Subsystem**: Infrastructure
+- **Audit ref**: L-04
 
-### State Store Uses Predictable Account Names
-**Audit**: M-03 (Medium)
+**Risk.** The C Keccak-256 routine accepts arbitrary `inputLen`. Reachable from XPC only with a hypothetical future code path.
 
-Rate limit and spending state are stored in Keychain accounts with predictable names (`state.ratelimit.{ruleId}`, `state.spending.{ruleId}`). If the team signing key is compromised, an attacker can target specific counters.
+**Mitigation.** Every existing caller provides bounded inputs. Not reachable through current XPC entry points; the validator would reject the operation type long before reaching the hashing primitive.
 
-**Mitigation**: This is acceptable given the Keychain access group trust boundary. Team signing key compromise implies full Keychain access regardless of account naming.
+### SE silent-context uses an empty application password
+- **Status**: By design
+- **Severity**: Low
+- **Subsystem**: Keychain
+- **Audit ref**: L-01
 
-### SE Silent Context Uses Empty Application Password
-**Audit**: L-01 (Low)
+**Risk.** `silentContext()` sets an empty `Data()` as the `.applicationPassword` credential.
 
-The `silentContext()` method sets an empty `Data()` as the `.applicationPassword` credential. This is the documented Apple approach for pre-satisfying `.privateKeyUsage` access control. The security relies on the Keychain access group, not the password value.
+**Mitigation.** This is the documented Apple approach for pre-satisfying `.privateKeyUsage` access control during a no-prompt operation. Security is enforced by the Keychain access group (`926A27BQ7W.com.bastion`), not the password value.
 
-**Mitigation**: By design. The Keychain access group (`926A27BQ7W.com.bastion`) is the actual security boundary.
+### DER signature parser handles only Secure-Enclave output
+- **Status**: Accepted
+- **Severity**: Low
+- **Subsystem**: Infrastructure
+- **Audit ref**: R2-L-02
 
-### Audit HMAC Key in Same Keychain as Protected Data
-**Audit**: M-04 (Mitigated)
+**Risk.** The DER parser in `SecureEnclaveManager` is simplified — no multi-byte length encoding, no full structure validation.
 
-The HMAC key for audit log integrity is stored in the same Keychain the app has full access to. An attacker with Keychain access can recompute valid HMACs.
+**Mitigation.** Parser only handles output from Apple's Secure Enclave, which always emits well-formed DER. Not safe to reuse against external/untrusted input without hardening.
 
-**Mitigation**: SHA-256 hash chain links audit records, detecting insertion, deletion, or reordering even if the HMAC is recomputed. Full Keychain compromise (team signing key) is the precondition.
+---
 
-## Display & UX
+## Open · Informational
 
-### formatAmount Uses Double for Very Large Values
-**Audit**: L-03 (Low)
+### EIP-191 messages have no chain or context binding
+- **Status**: By design (protocol limitation)
+- **Severity**: Informational
+- **Subsystem**: Signing model
+- **Audit ref**: R3-02
 
-`SpendingLimitRule.formatAmount()` converts `UInt128` to `Double` for display, losing precision for values > 2^53 wei (~9,007 ETH). Actual spending enforcement uses `UInt128` arithmetic correctly.
+**Risk.** EIP-191 personal-message signatures contain no chain ID, contract address, nonce, or expiry. A signature is valid on every chain, in every protocol, forever.
 
-**Mitigation**: Display only. No impact on actual limit enforcement.
+**Mitigation.** `rawMessagePolicy.posture` defaults to a posture that requires the approval popup; the message text is rendered for inspection. Agents are advised to prefer EIP-712 typed data, which carries the domain separator (chain ID + verifying contract). PR2 reified this into a typed posture so the "force approval popup" requirement is structural rather than a flag pair.
 
-### Keccak-256 Has No Input Length Validation
-**Audit**: L-04 (Low)
+### Compromised paymaster could extract value during `postOp`
+- **Status**: Accepted
+- **Severity**: Informational
+- **Subsystem**: Signing model
+- **Audit ref**: R3-08
 
-The C Keccak-256 implementation accepts arbitrary `inputLen` with no upper bound. All callers provide bounded inputs. Not reachable via XPC.
+**Risk.** The paymaster address is set by the bundler response and included in the signed UserOp hash; Bastion can't restrict what a paymaster does in `postOp` execution. A compromised bundler could substitute a malicious paymaster.
 
-**Mitigation**: Not exploitable through current code paths.
+**Mitigation.** App-configured ZeroDev project ID takes precedence over agent-supplied IDs (PR1 made this trust resolution explicit and tested). Users should configure trusted bundler endpoints; the rule engine surfaces the resolved project source in the audit log.
 
-## Concurrency
+### No TLS certificate pinning for ZeroDev / RPC endpoints
+- **Status**: Accepted
+- **Severity**: Informational
+- **Subsystem**: Infrastructure
+- **Audit ref**: I-03
 
-### validate() and recordSuccess() Sequence Is Not Atomic
-**Audit**: R2-M-04 (Medium)
+**Risk.** Communication uses standard HTTPS without certificate pinning. A network-level attacker with a CA-trusted certificate could intercept responses.
 
-`RuleEngine.validate()` and `RuleEngine.recordSuccess()` are `nonisolated` methods. The validate-then-record sequence is not atomically protected within `RuleEngine` itself.
+**Mitigation.** Standard TLS validation. The "max of static + trace spending" principle in the spending validator ensures trace data from a compromised RPC can never reduce a counter. Users should configure trusted RPC endpoints.
 
-**Mitigation**: `SigningManager.processSignRequest` runs on `@MainActor` with an `isProcessing` guard, serializing all signing requests. The TOCTOU window only exists if these methods are called outside this serialization context. Future refactors must preserve this invariant.
+### DEBUG builds accept untrusted code signatures (development only)
+- **Status**: By design
+- **Severity**: Informational (production); High (development only)
+- **Subsystem**: XPC & auth
+- **Audit ref**: H-03
 
-## Infrastructure
+**Risk.** In DEBUG builds, XPC connections from processes with untrusted developer signatures (ad-hoc signed) are accepted. Any locally-compiled binary can connect to the XPC service during development.
 
-### No TLS Certificate Pinning
-**Audit**: I-03 (Informational)
+**Mitigation.** `#if DEBUG` guard. Production (Release) builds strictly require valid team-ID signatures. DEBUG builds must never be distributed.
 
-Communication with ZeroDev bundler and RPC endpoints uses standard HTTPS without certificate pinning. A network-level attacker with a CA-trusted certificate could intercept responses.
+---
 
-**Mitigation**: Standard TLS validation. The max-of-both spending principle ensures trace data from a compromised RPC cannot reduce spending below what static analysis found. Users should configure trusted RPC endpoints.
+## Mitigated
 
-### DER Parser Simplified for SE Output Only
-**Audit**: R2-L-02 (Low)
+### EIP-712 typed data could authorize Permit2 / ERC-2612 / ERC-7702 silently
+- **Status**: Mitigated in [PR5 (#35)](https://github.com/leekt/bastion/pull/35)
+- **Severity**: Informational
+- **Subsystem**: Signing model — typed data
+- **Audit ref**: R3-09
 
-The DER signature parser in `SecureEnclaveManager` is simplified for Secure Enclave-produced P-256 signatures. It does not handle multi-byte length encoding or validate the full DER structure.
+**Original risk.** EIP-712 signing could authorize off-chain permit operations (ERC-2612, Permit2, ERC-7702 set-code) that grant token allowances or delegate execution authority without any on-chain transaction from the smart account. Bastion validated domain rules and struct rules but did not extract spending amounts, spenders, or expiries from the message body, leaving the user to read JSON.
 
-**Mitigation**: The parser only processes output from Apple's Secure Enclave, which always produces well-formed DER. Not reusable for external/untrusted input without hardening.
+**Resolution.** `PermitClassifier` parses ERC-2612 Permit, Permit2 (Single / Batch / TransferFrom), and ERC-7702 `Authorization` shapes from typed data and surfaces a structured warning panel in the approval UI with parsed Spender / Amount / Token / Expires fields plus a "Lasting allowance" chip when applicable. `typedDataPolicy.posture` continues to gate whether the popup is required.
+
+### Sessions and XPC connections survived allowlist tightening
+- **Status**: Mitigated in [PR4 (#33)](https://github.com/leekt/bastion/pull/33)
+- **Severity**: Medium
+- **Subsystem**: XPC & auth, Approval UI (sessions)
+- **Audit ref**: R3-06 (XPC piece) plus an undocumented gap (sessions piece)
+
+**Original risk.** Two related survival gaps:
+1. A temporarily-granted `AgentSession` (e.g. "Claude Code can sign on Base for 30 minutes, max 50 USDC") kept its original scope after the owner removed those permissions from the policy. The session ran to expiry on the older, broader rules.
+2. A live XPC connection from an agent kept its connection (and could call read-only endpoints such as `getPublicKey`, `getRules`, `getState`) after that agent's bundle was removed from `rules.allowedClients`. Signing was correctly denied on each call by the live allowlist check, but the connection itself stayed open until the agent process exited.
+
+**Resolution.** `RuleEngine.updateConfig` now runs a reconciliation pass after persisting the new policy:
+- `SessionStore.reconcile` walks every active `AgentSession` through the new pure `SessionReconciler`. Sessions that exceed the new policy are downgraded (chains / targets narrow to the surviving intersection) or revoked outright (when `allowedClients` no longer admits the bundle, or when no scope survives).
+- `XPCServer.reconcileConnections(against:)` cuts every active XPC connection whose verified bundle id is no longer in `rules.allowedClients`. Connections are tracked in a registry behind an `NSLock` and pruned via `invalidationHandler`.
+- `LockdownManager.enterLockdown` additionally calls `XPCServer.invalidateAllConnections()` so panicked owners get instant-stop semantics.
+
+### `enabled × requireExplicitApproval` boolean pair was structurally ambiguous
+- **Status**: Mitigated in [PR2 (#31)](https://github.com/leekt/bastion/pull/31)
+- **Severity**: Medium (ambiguity-class)
+- **Subsystem**: Signing model
+- **Audit ref**: post-R3 architectural finding
+
+**Original risk.** The "rules enabled" + "require explicit approval" boolean pair admitted a contradictory state: `enabled=false` + `requireExplicitApproval=true` and `enabled=false` + `requireExplicitApproval=false` were structurally distinct but should have meant the same thing ("don't evaluate rules, just always pop the approval"). Bug-prone in code reading and serialization.
+
+**Resolution.** Replaced with a typed `SigningPosture` enum (three legal cases: `enforceRulesAndAutoSign`, `enforceRulesAndRequireApproval`, `requireApprovalWithoutRuleEvaluation`) per operation type. Legacy boolean-pair JSON migrates to the right case via `SigningPosture.from(enabled:requireExplicitApproval:)`; encoder still writes the legacy mirrors so older readers stay coherent.
+
+### Wallet-group ∩ member rule merge used sentinel values for "deny everything"
+- **Status**: Mitigated in [PR3 (#32)](https://github.com/leekt/bastion/pull/32)
+- **Severity**: Low (clarity-class)
+- **Subsystem**: Signing model
+- **Audit ref**: post-R3 architectural finding
+
+**Original risk.** `RuleEngine.mergeGroupRules` encoded "intersection is empty so deny everything" using shape sentinels: `AllowedHours(0, 0)` for hours, `[]` for client allowlists. Every consumer of the merged result had to know which sentinel meant deny vs which meant intentionally empty. New consumers (UI surfacing the merged policy, audit log, future tooling) would each have to relearn the mapping or risk treating a sentinel as permissive.
+
+**Resolution.** `MergedPolicy` (typed `MergedConstraint<T>` per field — `.unrestricted | .restricted(T) | .unsatisfiable(reason)`) is now the canonical merge value. `RuleEngine.mergeGroupRules` is a thin shim that flattens through `MergedPolicy.toRuleConfig()` for legacy validation paths. The wallet-group settings panel surfaces `unsatisfiabilityReasons` so owners see exactly which constraints disagree instead of staring at silently-denying agents.
+
+### ZeroDev project trust resolution was implicit and inconsistent
+- **Status**: Mitigated in [PR1 (#30)](https://github.com/leekt/bastion/pull/30)
+- **Severity**: Medium (precedence-class)
+- **Subsystem**: Signing model
+- **Audit ref**: post-R3 architectural finding
+
+**Original risk.** Two code paths were independently deciding which ZeroDev project ID to trust (the one in the user's saved config vs the one the agent supplied with the request). Their precedence was implied by call-site ordering rather than written down, so a bundler-config drift would land different paths in different states.
+
+**Resolution.** `BundlerTrustResolver` is the single resolver. Returns a typed `ResolvedBundler` carrying the project id + a `Source` enum (`configMatchedRequest` / `configOverrodeRequest` / `requestFallback`). Validators and audit-log entries cite the source so precedence is auditable.
