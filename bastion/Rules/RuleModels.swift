@@ -111,8 +111,11 @@ nonisolated struct SpendingLimitStatus: Codable, Sendable {
 // MARK: - Rule Config
 
 nonisolated struct RuleConfig: Codable, Sendable {
-    var enabled: Bool
-    var requireExplicitApproval: Bool
+    /// PR2: posture for ERC-4337 user operations. Authoritative.
+    /// `enabled` and `requireExplicitApproval` below are kept on the
+    /// wire as legacy mirrors so older readers stay coherent, but every
+    /// decision in the rule engine consults `userOpPosture`.
+    var userOpPosture: SigningPosture
     var allowedHours: AllowedHours?
     var allowedChains: [Int]?
     var allowedTargets: [String: [String]]?   // chainId string -> [address]
@@ -124,9 +127,31 @@ nonisolated struct RuleConfig: Codable, Sendable {
     var rawMessagePolicy: RawMessagePolicy
     var typedDataPolicy: TypedDataPolicy
 
+    /// Legacy mirrors of `userOpPosture`. Reads return the derived
+    /// boolean; writes update the posture in the corresponding direction
+    /// so tests / external callers that still spell things in the old
+    /// shape don't break. New code should set `userOpPosture` directly.
+    var enabled: Bool {
+        get { userOpPosture.evaluatesRules }
+        set {
+            userOpPosture = SigningPosture.from(
+                enabled: newValue,
+                requireExplicitApproval: userOpPosture.requiresApprovalPopup
+            )
+        }
+    }
+    var requireExplicitApproval: Bool {
+        get { userOpPosture.requiresApprovalPopup }
+        set {
+            userOpPosture = SigningPosture.from(
+                enabled: userOpPosture.evaluatesRules,
+                requireExplicitApproval: newValue
+            )
+        }
+    }
+
     static let `default` = RuleConfig(
-        enabled: true,
-        requireExplicitApproval: false,
+        userOpPosture: .enforceRulesAndAutoSign,
         allowedHours: nil,
         allowedChains: nil,
         allowedTargets: nil,
@@ -140,6 +165,7 @@ nonisolated struct RuleConfig: Codable, Sendable {
     )
 
     private enum CodingKeys: String, CodingKey {
+        case userOpPosture
         case enabled
         case requireExplicitApproval
         case allowedHours
@@ -155,6 +181,35 @@ nonisolated struct RuleConfig: Codable, Sendable {
     }
 
     init(
+        userOpPosture: SigningPosture,
+        allowedHours: AllowedHours? = nil,
+        allowedChains: [Int]? = nil,
+        allowedTargets: [String: [String]]? = nil,
+        allowedSelectors: [String: [String]]? = nil,
+        denySelectors: [String]? = nil,
+        allowedClients: [AllowedClient]? = nil,
+        rateLimits: [RateLimitRule] = [],
+        spendingLimits: [SpendingLimitRule] = [],
+        rawMessagePolicy: RawMessagePolicy = .default,
+        typedDataPolicy: TypedDataPolicy = .default
+    ) {
+        self.userOpPosture = userOpPosture
+        self.allowedHours = allowedHours
+        self.allowedChains = allowedChains
+        self.allowedTargets = allowedTargets
+        self.allowedSelectors = allowedSelectors
+        self.denySelectors = denySelectors
+        self.allowedClients = allowedClients
+        self.rateLimits = rateLimits
+        self.spendingLimits = spendingLimits
+        self.rawMessagePolicy = rawMessagePolicy
+        self.typedDataPolicy = typedDataPolicy
+    }
+
+    /// Legacy initialiser — maps the boolean pair to `userOpPosture`.
+    /// Kept for in-memory call sites (tests, migration helpers) that
+    /// still spell things in the pre-PR2 shape.
+    init(
         enabled: Bool,
         requireExplicitApproval: Bool,
         allowedHours: AllowedHours?,
@@ -168,24 +223,33 @@ nonisolated struct RuleConfig: Codable, Sendable {
         rawMessagePolicy: RawMessagePolicy = .default,
         typedDataPolicy: TypedDataPolicy = .default
     ) {
-        self.enabled = enabled
-        self.requireExplicitApproval = requireExplicitApproval
-        self.allowedHours = allowedHours
-        self.allowedChains = allowedChains
-        self.allowedTargets = allowedTargets
-        self.allowedSelectors = allowedSelectors
-        self.denySelectors = denySelectors
-        self.allowedClients = allowedClients
-        self.rateLimits = rateLimits
-        self.spendingLimits = spendingLimits
-        self.rawMessagePolicy = rawMessagePolicy
-        self.typedDataPolicy = typedDataPolicy
+        self.init(
+            userOpPosture: SigningPosture.from(enabled: enabled, requireExplicitApproval: requireExplicitApproval),
+            allowedHours: allowedHours,
+            allowedChains: allowedChains,
+            allowedTargets: allowedTargets,
+            allowedSelectors: allowedSelectors,
+            denySelectors: denySelectors,
+            allowedClients: allowedClients,
+            rateLimits: rateLimits,
+            spendingLimits: spendingLimits,
+            rawMessagePolicy: rawMessagePolicy,
+            typedDataPolicy: typedDataPolicy
+        )
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        requireExplicitApproval = try container.decodeIfPresent(Bool.self, forKey: .requireExplicitApproval) ?? false
+        if let posture = try container.decodeIfPresent(SigningPosture.self, forKey: .userOpPosture) {
+            userOpPosture = posture
+        } else {
+            // Legacy migration: posture key absent → derive from enabled +
+            // requireExplicitApproval. PR23's "disabled = require approval"
+            // semantic is preserved by SigningPosture.from.
+            let enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            let requireApproval = try container.decodeIfPresent(Bool.self, forKey: .requireExplicitApproval) ?? false
+            userOpPosture = SigningPosture.from(enabled: enabled, requireExplicitApproval: requireApproval)
+        }
         allowedHours = try container.decodeIfPresent(AllowedHours.self, forKey: .allowedHours)
         allowedChains = try container.decodeIfPresent([Int].self, forKey: .allowedChains)
         allowedTargets = try container.decodeIfPresent([String: [String]].self, forKey: .allowedTargets)
@@ -196,6 +260,25 @@ nonisolated struct RuleConfig: Codable, Sendable {
         spendingLimits = try container.decodeIfPresent([SpendingLimitRule].self, forKey: .spendingLimits) ?? []
         rawMessagePolicy = try container.decodeIfPresent(RawMessagePolicy.self, forKey: .rawMessagePolicy) ?? .default
         typedDataPolicy = try container.decodeIfPresent(TypedDataPolicy.self, forKey: .typedDataPolicy) ?? .default
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(userOpPosture, forKey: .userOpPosture)
+        // Legacy mirrors so older builds reading the same wire format
+        // see a coherent enabled/requireApproval pair.
+        try c.encode(userOpPosture.evaluatesRules, forKey: .enabled)
+        try c.encode(userOpPosture.requiresApprovalPopup, forKey: .requireExplicitApproval)
+        try c.encodeIfPresent(allowedHours, forKey: .allowedHours)
+        try c.encodeIfPresent(allowedChains, forKey: .allowedChains)
+        try c.encodeIfPresent(allowedTargets, forKey: .allowedTargets)
+        try c.encodeIfPresent(allowedSelectors, forKey: .allowedSelectors)
+        try c.encodeIfPresent(denySelectors, forKey: .denySelectors)
+        try c.encodeIfPresent(allowedClients, forKey: .allowedClients)
+        try c.encode(rateLimits, forKey: .rateLimits)
+        try c.encode(spendingLimits, forKey: .spendingLimits)
+        try c.encode(rawMessagePolicy, forKey: .rawMessagePolicy)
+        try c.encode(typedDataPolicy, forKey: .typedDataPolicy)
     }
 }
 
@@ -701,43 +784,226 @@ nonisolated struct AllowedHours: Codable, Sendable {
     let end: Int
 }
 
+// MARK: - Signing posture (PR2)
+
+/// Per-operation posture. Replaces the previous combination of
+/// `enabled × requireExplicitApproval` booleans, which encoded three
+/// distinct behaviours but read like two — exactly the ambiguity that let
+/// the disabled-UserOp auto-sign bug exist before PR23.
+///
+/// Three explicit choices, applied independently to each operation type
+/// (raw messages, EIP-712 typed data, ERC-4337 user operations):
+///
+/// - `enforceRulesAndAutoSign` — evaluate every rule. If they all pass,
+///   sign without showing the approval popup. The post-approval auth gate
+///   (biometric / passcode) still runs based on `BastionConfig.authPolicy`.
+///   Best for low-friction agents whose rule set is tight enough to
+///   trust silently.
+/// - `enforceRulesAndRequireApproval` — evaluate every rule and *also*
+///   show the approval popup before signing. Use when satisfying the
+///   ruleset alone isn't enough; the operator wants eyes on every
+///   request.
+/// - `requireApprovalWithoutRuleEvaluation` — skip rule evaluation and
+///   force the approval popup unconditionally. The maximally cautious
+///   posture. This is what the old "rules disabled" state means after
+///   PR23 — every request is a manual decision.
+nonisolated enum SigningPosture: String, Codable, CaseIterable, Sendable {
+    case enforceRulesAndAutoSign           = "enforce_and_auto"
+    case enforceRulesAndRequireApproval    = "enforce_and_approve"
+    case requireApprovalWithoutRuleEvaluation = "approval_only"
+
+    var displayName: String {
+        switch self {
+        case .enforceRulesAndAutoSign:           return "Enforce rules · auto-sign"
+        case .enforceRulesAndRequireApproval:    return "Enforce rules · always confirm"
+        case .requireApprovalWithoutRuleEvaluation: return "Always confirm · skip rules"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .enforceRulesAndAutoSign:
+            return "Sign immediately when rules pass. Auth policy still gates the sign."
+        case .enforceRulesAndRequireApproval:
+            return "Show the approval popup even when rules pass."
+        case .requireApprovalWithoutRuleEvaluation:
+            return "Skip rule evaluation; every request waits for owner approval."
+        }
+    }
+
+    /// True iff rule evaluation should run for requests under this posture.
+    var evaluatesRules: Bool {
+        switch self {
+        case .enforceRulesAndAutoSign, .enforceRulesAndRequireApproval: return true
+        case .requireApprovalWithoutRuleEvaluation: return false
+        }
+    }
+
+    /// True iff the approval popup must always show before signing,
+    /// regardless of whether rules passed.
+    var requiresApprovalPopup: Bool {
+        switch self {
+        case .enforceRulesAndAutoSign: return false
+        case .enforceRulesAndRequireApproval, .requireApprovalWithoutRuleEvaluation: return true
+        }
+    }
+}
+
 nonisolated struct RawMessagePolicy: Codable, Sendable {
-    /// Master toggle — when false, all message/rawBytes requests require explicit approval.
-    var enabled: Bool
-    /// Sub-rule — when false (and enabled=true), only EIP-191 personal messages are allowed;
-    /// raw 32-byte signing requests are denied outright.
+    /// PR2: posture is the authoritative behaviour selector. The legacy
+    /// `enabled` boolean is kept on the wire so older builds that still
+    /// look at it stay coherent (true ↔ posture != .requireApprovalWithoutRuleEvaluation),
+    /// but every decision in the rule engine consults `posture` directly.
+    var posture: SigningPosture
+    /// Sub-rule — when false (and posture evaluates rules), only EIP-191
+    /// personal messages are allowed; raw 32-byte signing requests are
+    /// denied outright.
     var allowRawSigning: Bool
 
-    static let `default` = RawMessagePolicy(enabled: true, allowRawSigning: false)
+    /// Legacy mirror of posture. Writes preserve the `requireApproval`
+    /// half of the posture — toggling `enabled` to false collapses to
+    /// `.requireApprovalWithoutRuleEvaluation`; toggling it back to
+    /// true picks `.enforceRulesAndAutoSign` (raw messages don't have a
+    /// distinct "always approve" toggle in the legacy model).
+    var enabled: Bool {
+        get { posture.evaluatesRules }
+        set {
+            posture = newValue ? .enforceRulesAndAutoSign : .requireApprovalWithoutRuleEvaluation
+        }
+    }
 
+    static let `default` = RawMessagePolicy(posture: .enforceRulesAndAutoSign, allowRawSigning: false)
+
+    init(posture: SigningPosture, allowRawSigning: Bool = false) {
+        self.posture = posture
+        self.allowRawSigning = allowRawSigning
+    }
+
+    /// Legacy initialiser kept for in-memory call sites that haven't
+    /// migrated yet (tests, fixtures). Maps the boolean to a posture.
     init(enabled: Bool, allowRawSigning: Bool = false) {
-        self.enabled = enabled
+        self.posture = enabled ? .enforceRulesAndAutoSign : .requireApprovalWithoutRuleEvaluation
         self.allowRawSigning = allowRawSigning
     }
 
     private enum CodingKeys: CodingKey {
-        case enabled, allowRawSigning
+        case posture, enabled, allowRawSigning
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        if let posture = try container.decodeIfPresent(SigningPosture.self, forKey: .posture) {
+            self.posture = posture
+        } else {
+            // Legacy migration: posture key absent → derive from `enabled`.
+            let enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            self.posture = enabled ? .enforceRulesAndAutoSign : .requireApprovalWithoutRuleEvaluation
+        }
         allowRawSigning = try container.decodeIfPresent(Bool.self, forKey: .allowRawSigning) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(posture, forKey: .posture)
+        // Mirror to `enabled` for wire compatibility with anything still
+        // looking at it. New readers consult `posture`.
+        try c.encode(posture.evaluatesRules, forKey: .enabled)
+        try c.encode(allowRawSigning, forKey: .allowRawSigning)
     }
 }
 
 nonisolated struct TypedDataPolicy: Codable, Sendable {
-    var enabled: Bool
-    var requireExplicitApproval: Bool
+    /// PR2: posture is the authoritative behaviour selector.
+    var posture: SigningPosture
     var domainRules: [TypedDataDomainRule]
     var structRules: [TypedDataStructRule]
 
+    /// Legacy mirrors derived from posture so older readers stay coherent.
+    /// Writes update the posture via SigningPosture.from so the underlying
+    /// state stays canonical. Reads return derived booleans.
+    var enabled: Bool {
+        get { posture.evaluatesRules }
+        set {
+            posture = SigningPosture.from(
+                enabled: newValue,
+                requireExplicitApproval: posture.requiresApprovalPopup
+            )
+        }
+    }
+    var requireExplicitApproval: Bool {
+        get { posture.requiresApprovalPopup }
+        set {
+            posture = SigningPosture.from(
+                enabled: posture.evaluatesRules,
+                requireExplicitApproval: newValue
+            )
+        }
+    }
+
     static let `default` = TypedDataPolicy(
-        enabled: true,
-        requireExplicitApproval: false,
+        posture: .enforceRulesAndAutoSign,
         domainRules: [],
         structRules: []
     )
+
+    init(
+        posture: SigningPosture,
+        domainRules: [TypedDataDomainRule] = [],
+        structRules: [TypedDataStructRule] = []
+    ) {
+        self.posture = posture
+        self.domainRules = domainRules
+        self.structRules = structRules
+    }
+
+    /// Legacy initialiser. Maps the boolean pair to a posture.
+    init(
+        enabled: Bool,
+        requireExplicitApproval: Bool,
+        domainRules: [TypedDataDomainRule] = [],
+        structRules: [TypedDataStructRule] = []
+    ) {
+        self.posture = SigningPosture.from(enabled: enabled, requireExplicitApproval: requireExplicitApproval)
+        self.domainRules = domainRules
+        self.structRules = structRules
+    }
+
+    private enum CodingKeys: CodingKey {
+        case posture, enabled, requireExplicitApproval, domainRules, structRules
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let posture = try container.decodeIfPresent(SigningPosture.self, forKey: .posture) {
+            self.posture = posture
+        } else {
+            let enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            let requireApproval = try container.decodeIfPresent(Bool.self, forKey: .requireExplicitApproval) ?? false
+            self.posture = SigningPosture.from(enabled: enabled, requireExplicitApproval: requireApproval)
+        }
+        domainRules = try container.decodeIfPresent([TypedDataDomainRule].self, forKey: .domainRules) ?? []
+        structRules = try container.decodeIfPresent([TypedDataStructRule].self, forKey: .structRules) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(posture, forKey: .posture)
+        try c.encode(posture.evaluatesRules, forKey: .enabled)
+        try c.encode(posture.requiresApprovalPopup, forKey: .requireExplicitApproval)
+        try c.encode(domainRules, forKey: .domainRules)
+        try c.encode(structRules, forKey: .structRules)
+    }
+}
+
+extension SigningPosture {
+    /// Map the legacy two-boolean model onto a posture. Used during decode
+    /// of old configs and by legacy initialisers.
+    static func from(enabled: Bool, requireExplicitApproval: Bool) -> SigningPosture {
+        if !enabled { return .requireApprovalWithoutRuleEvaluation }
+        return requireExplicitApproval
+            ? .enforceRulesAndRequireApproval
+            : .enforceRulesAndAutoSign
+    }
 }
 
 nonisolated struct TypedDataDomainRule: Codable, Sendable, Identifiable {

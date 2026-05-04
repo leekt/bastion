@@ -424,7 +424,13 @@ final class RuleEngine {
             return denial
         }
 
-        guard config.rules.enabled else {
+        // PR2: skip rule evaluation when this operation's posture says so.
+        // Per-operation rather than the old single `enabled` flag, so a
+        // user can keep userOp rule evaluation while turning off raw-msg
+        // rules independently. requiresExplicitApproval will still force
+        // the approval popup for `.requireApprovalWithoutRuleEvaluation`,
+        // so "skip rules" never means "auto-sign without owner check".
+        guard posture(for: request, config: config).evaluatesRules else {
             return .allowed
         }
 
@@ -559,22 +565,22 @@ final class RuleEngine {
     }
 
     nonisolated func requiresExplicitApproval(for request: SignRequest, config: BastionConfig) -> Bool {
+        // PR2: posture is the single source of truth. Each operation type
+        // carries its own posture; the legacy enabled / requireExplicit
+        // booleans are derived for wire compatibility but ignored here.
+        // SigningPosture.requiresApprovalPopup encodes the post-PR23
+        // semantic that "skip rules" means "always approve" — the
+        // disabled-UserOp auto-sign bug is now structurally impossible.
+        return posture(for: request, config: config).requiresApprovalPopup
+    }
+
+    /// Resolves the posture for a given request. Public so SigningManager
+    /// and tests can ask the same question the validator asks.
+    nonisolated func posture(for request: SignRequest, config: BastionConfig) -> SigningPosture {
         switch request.operation {
-        case .message, .rawBytes:
-            // Require explicit approval when rule-based signing is disabled for messages.
-            return !config.rules.rawMessagePolicy.enabled
-        case .typedData:
-            // Require explicit approval when rule-based signing is disabled for EIP-712.
-            if !config.rules.typedDataPolicy.enabled { return true }
-            return config.rules.typedDataPolicy.requireExplicitApproval
-        case .userOperation:
-            // P1 fix: when rule-based signing is disabled (config.rules.enabled == false),
-            // validate() short-circuits to .allowed before any rule check runs. Without
-            // forcing approval here, a Silent / Open auth client could sign UserOps
-            // with zero policy enforcement. Mirror the message + typed-data behaviour
-            // and force interactive review whenever the rule engine is disabled.
-            if !config.rules.enabled { return true }
-            return config.rules.requireExplicitApproval
+        case .message, .rawBytes: return config.rules.rawMessagePolicy.posture
+        case .typedData:          return config.rules.typedDataPolicy.posture
+        case .userOperation:      return config.rules.userOpPosture
         }
     }
 
@@ -1770,8 +1776,12 @@ final class RuleEngine {
         }
 
         return RuleConfig(
-            enabled: group.enabled || member.enabled,
-            requireExplicitApproval: group.requireExplicitApproval || member.requireExplicitApproval,
+            // PR2: merge per-operation postures with the stricter rule.
+            // Stricter = "any side that wants evaluation gets evaluation,
+            // any side that wants popup gets popup". The resulting bool
+            // pair maps back through SigningPosture.from to the right
+            // enum case.
+            userOpPosture: Self.stricterPosture(group.userOpPosture, member.userOpPosture),
             allowedHours: tighterHours(group.allowedHours, member.allowedHours),
             allowedChains: intersectInts(group.allowedChains, member.allowedChains),
             allowedTargets: intersectDict(group.allowedTargets, member.allowedTargets),
@@ -1787,16 +1797,29 @@ final class RuleEngine {
             rateLimits: group.rateLimits + member.rateLimits,
             spendingLimits: group.spendingLimits + member.spendingLimits,
             rawMessagePolicy: RawMessagePolicy(
-                enabled: group.rawMessagePolicy.enabled && member.rawMessagePolicy.enabled,
+                posture: Self.stricterPosture(group.rawMessagePolicy.posture, member.rawMessagePolicy.posture),
                 allowRawSigning: group.rawMessagePolicy.allowRawSigning && member.rawMessagePolicy.allowRawSigning
             ),
             typedDataPolicy: TypedDataPolicy(
-                enabled: group.typedDataPolicy.enabled && member.typedDataPolicy.enabled,
-                requireExplicitApproval: group.typedDataPolicy.requireExplicitApproval || member.typedDataPolicy.requireExplicitApproval,
+                posture: Self.stricterPosture(group.typedDataPolicy.posture, member.typedDataPolicy.posture),
                 domainRules: group.typedDataPolicy.domainRules + member.typedDataPolicy.domainRules,
                 structRules: group.typedDataPolicy.structRules + member.typedDataPolicy.structRules
             )
         )
+    }
+
+    /// PR2: combine two postures by taking the strict-OR of their
+    /// component bits — any side wanting rule evaluation forces it; any
+    /// side wanting an approval popup forces it. The output is mapped
+    /// back through SigningPosture.from so the merge result is one of
+    /// the three legal enum cases. Note: requireApprovalWithoutRuleEvaluation
+    /// + enforceRulesAndAutoSign collapses to enforceRulesAndRequireApproval
+    /// — the merged side wants evaluation (member said skip but group said
+    /// evaluate) AND wants the popup (skip-rules side requires it).
+    nonisolated static func stricterPosture(_ a: SigningPosture, _ b: SigningPosture) -> SigningPosture {
+        let evaluates = a.evaluatesRules || b.evaluatesRules
+        let popup = a.requiresApprovalPopup || b.requiresApprovalPopup
+        return SigningPosture.from(enabled: evaluates, requireExplicitApproval: popup)
     }
 
     /// Intersects two AllowedClient lists by bundleId. Nil means "no

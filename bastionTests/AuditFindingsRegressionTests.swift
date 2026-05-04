@@ -94,8 +94,10 @@ struct AuditFindingsRegressionTests {
 
         #expect(engine().requiresExplicitApproval(for: request, config: config) == true)
 
+        // PR2: requireExplicitApproval is now a derived property on
+        // RuleConfig — set the underlying posture instead.
         var auto = rules
-        auto.requireExplicitApproval = false
+        auto.userOpPosture = .enforceRulesAndAutoSign
         let autoConfig = BastionConfig(authPolicy: .biometric, rules: auto)
         #expect(engine().requiresExplicitApproval(for: request, config: autoConfig) == false)
     }
