@@ -45,9 +45,12 @@ final class LockdownManager {
         ))
     }
 
-    /// Escalate to lockdown. Implies pause. Revokes all in-memory sessions.
+    /// Escalate to lockdown. Implies pause. Revokes all in-memory sessions
+    /// and severs every active XPC connection so in-flight agent requests
+    /// can't keep arriving while lockdown is engaged.
     func enterLockdown(reason: String) async {
         SessionStore.shared.revokeAll()
+        XPCServer.shared.invalidateAllConnections()
         let was = RuleEngine.shared.config.pauseState.lockedDown
         var pauseState = RuleEngine.shared.config.pauseState
         pauseState.paused = true

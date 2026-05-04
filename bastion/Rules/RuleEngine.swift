@@ -151,6 +151,25 @@ final class RuleEngine {
         config = normalized
         configLoaded = true
         configCorrupted = false
+
+        // PR4: After persisting the new policy, reconcile any in-flight
+        // session grants and live XPC connections so they can't keep
+        // operating with broader scope than the new rules allow. Without
+        // this, an attacker who got a 30-minute session before the
+        // owner tightened the allowlist could keep using the old scope
+        // until the session expires.
+        await applyPolicyReconciliation(normalized)
+    }
+
+    /// PR4: shared reconciliation hook. Internal so emergency lockdown
+    /// (LockdownManager) can trigger it after force-pause as well as the
+    /// regular updateConfig path.
+    @MainActor
+    func applyPolicyReconciliation(_ normalized: BastionConfig) async {
+        SessionStore.shared.reconcile { [weak self] bundleId in
+            self?.effectiveRules(for: bundleId) ?? normalized.rules
+        }
+        XPCServer.shared.reconcileConnections(against: normalized.rules)
     }
 
     /// v9: Pause / lockdown writes that intentionally skip biometric. Pause

@@ -8,6 +8,17 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
     private let signingManager = SigningManager.shared
     private let ruleEngine = RuleEngine.shared
 
+    /// PR4: Active connections keyed by their verified client bundle id
+    /// (or nil for unidentified clients — typically the unsigned dev CLI).
+    /// Tracking lets us cut connections from agents that the owner just
+    /// removed from the allowlist; otherwise an in-flight XPC connection
+    /// could keep submitting requests until the agent process restarts.
+    /// Mutated only under `connectionsLock`. Marked `nonisolated` because
+    /// the listener delegate callback fires from the XPC queue and
+    /// reconcile may be called from any actor.
+    private nonisolated let connectionsLock = NSLock()
+    private nonisolated(unsafe) var activeConnections: [(connection: NSXPCConnection, bundleId: String?)] = []
+
     private override init() {
         super.init()
     }
@@ -41,9 +52,66 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
             ruleEngine: ruleEngine,
             clientBundleId: clientBundleId
         )
-        newConnection.invalidationHandler = {}
+        registerConnection(newConnection, bundleId: clientBundleId)
+        newConnection.invalidationHandler = { [weak self, weak newConnection] in
+            guard let self, let conn = newConnection else { return }
+            self.unregisterConnection(conn)
+        }
         newConnection.resume()
         return true
+    }
+
+    // MARK: - Connection registry
+
+    private nonisolated func registerConnection(_ connection: NSXPCConnection, bundleId: String?) {
+        connectionsLock.lock()
+        defer { connectionsLock.unlock() }
+        activeConnections.append((connection, bundleId))
+    }
+
+    private nonisolated func unregisterConnection(_ connection: NSXPCConnection) {
+        connectionsLock.lock()
+        defer { connectionsLock.unlock() }
+        activeConnections.removeAll { $0.connection === connection }
+    }
+
+    /// PR4: Drop every active connection whose bundle id is no longer
+    /// authorized by the supplied rules. Returns the bundle ids that
+    /// were cut so the caller can audit.
+    @discardableResult
+    nonisolated func reconcileConnections(against rules: RuleConfig) -> [String] {
+        guard let allowed = rules.allowedClients, !allowed.isEmpty else { return [] }
+        let allowedSet = Set(allowed.map { $0.bundleId.lowercased() })
+        connectionsLock.lock()
+        let toCut = activeConnections.filter { entry in
+            guard let bundle = entry.bundleId else { return false }
+            return !allowedSet.contains(bundle.lowercased())
+        }
+        connectionsLock.unlock()
+        for entry in toCut {
+            entry.connection.invalidate()
+        }
+        return toCut.compactMap { $0.bundleId }
+    }
+
+    /// PR4: Drop every active connection. Used by emergency lockdown,
+    /// where the owner wants to stop signing immediately regardless of
+    /// rule contents.
+    nonisolated func invalidateAllConnections() {
+        connectionsLock.lock()
+        let snapshot = activeConnections
+        activeConnections.removeAll()
+        connectionsLock.unlock()
+        for entry in snapshot {
+            entry.connection.invalidate()
+        }
+    }
+
+    /// Test/diagnostic accessor: count of currently registered connections.
+    nonisolated func activeConnectionCount() -> Int {
+        connectionsLock.lock()
+        defer { connectionsLock.unlock() }
+        return activeConnections.count
     }
 
     // MARK: - Client Identification
