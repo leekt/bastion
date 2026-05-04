@@ -141,12 +141,9 @@ struct AuditHistoryView: View {
     }
 
     // MARK: - Column header
-
+    //
     // No divider between `columnHeader` and `rowsList` on purpose — the
-    // column header is part of the data table, not a separate section. A
-    // divider between the header strip and the first row makes the
-    // header look like floating text above the data; without it the
-    // rows hang off the header naturally.
+    // column header is part of the data table, not a separate section.
 
     private var columnHeader: some View {
         HStack(spacing: 12) {
@@ -170,36 +167,31 @@ struct AuditHistoryView: View {
     // MARK: - Rows
 
     private var rowsList: some View {
-        Group {
-            if filtered.isEmpty {
-                emptyState
-            } else {
-                // `List(.plain)` with row insets, separators, and the
-                // default-min-row-height all zeroed so rows are governed
-                // entirely by `AuditRow`'s own padding. The outer
-                // `.frame(maxHeight: .infinity)` defensive wrap that used
-                // to live here was patching around the .fullSizeContentView
-                // double-inset; now that the window style is plain, the
-                // List honours its container directly.
-                List {
+        // No `List` here on purpose. macOS `List(.plain)` reserves space
+        // for an empty NSTableView header view that none of
+        // `.listRowInsets`, `.listRowSeparator(.hidden)`,
+        // `.scrollContentBackground(.hidden)`, or
+        // `.environment(\.defaultMinListRowHeight, 1)` could fully kill —
+        // that phantom header is what produced the giant empty band
+        // between `columnHeader` and the first row through every
+        // previous fix attempt. Plain `ScrollView + VStack` puts the
+        // first row flush below the column header without surprises.
+        ScrollView {
+            VStack(spacing: 0) {
+                if filtered.isEmpty {
+                    emptyState
+                } else {
                     ForEach(filtered) { record in
-                        VStack(spacing: 0) {
-                            AuditRow(
-                                record: record,
-                                expanded: expandedID == record.id,
-                                onToggle: { expandedID = expandedID == record.id ? nil : record.id }
-                            )
-                            BastionDivider()
-                        }
-                        .listRowInsets(EdgeInsets())
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
+                        AuditRow(
+                            record: record,
+                            expanded: expandedID == record.id,
+                            onToggle: { expandedID = expandedID == record.id ? nil : record.id }
+                        )
+                        BastionDivider()
                     }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .environment(\.defaultMinListRowHeight, 1)
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .id(rowsContentIdentity)
     }
