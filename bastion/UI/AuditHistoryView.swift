@@ -79,7 +79,7 @@ struct AuditHistoryView: View {
             } label: { Text("+ Save").font(.system(size: 11)) }
                 .bastionButton(.ghost, size: .small)
         }
-        .padding(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
+        .padding(EdgeInsets(top: 6, leading: 24, bottom: 6, trailing: 24))
     }
 
     // MARK: - Filter row
@@ -119,7 +119,7 @@ struct AuditHistoryView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Color.ink500)
         }
-        .padding(EdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24))
+        .padding(EdgeInsets(top: 6, leading: 24, bottom: 6, trailing: 24))
         .background(Color.ink50)
     }
 
@@ -154,7 +154,11 @@ struct AuditHistoryView: View {
         .font(.system(size: 10.5, weight: .semibold))
         .kerning(0.6)
         .foregroundStyle(Color.ink500)
-        .padding(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
+        // Tight vertical padding — column header is a label strip above
+        // the data, not a content row. The 8pt padding the v2 mock used
+        // (combined with the surrounding filter / saved-view rows) made
+        // the header feel ~30pt tall for a single line of 10.5pt text.
+        .padding(EdgeInsets(top: 4, leading: 24, bottom: 4, trailing: 24))
     }
 
     // MARK: - Rows
