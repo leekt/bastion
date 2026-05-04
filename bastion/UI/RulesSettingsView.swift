@@ -646,32 +646,34 @@ private struct ProfilePanel: View {
     private var operationsCard: some View {
         BastionCard {
             VStack(alignment: .leading, spacing: 0) {
-                BastionSectionHeader(title: "Operations",
-                                     subtitle: "What this profile is allowed to sign.")
-                BastionToggleRow(
+                BastionSectionHeader(
+                    title: "Operations",
+                    subtitle: "Posture per operation type. Posture replaces the old enable/approve toggle pair so the behaviour you pick is unambiguous."
+                )
+                PosturePicker(
                     label: "Raw / personal-sign messages",
-                    hint: "EIP-191. No chain or contract binding — keep off unless required.",
-                    isOn: Binding(
-                        get: { rulesBinding.rawMessagePolicy.enabled },
-                        set: { rulesBinding.rawMessagePolicy.enabled = $0 }
+                    hint: "EIP-191. No chain or contract binding.",
+                    binding: Binding(
+                        get: { rulesBinding.rawMessagePolicy.posture },
+                        set: { rulesBinding.rawMessagePolicy.posture = $0 }
                     )
                 )
                 BastionDivider()
-                BastionToggleRow(
+                PosturePicker(
                     label: "EIP-712 typed data",
                     hint: "Domain allowlist + JSON subset matching enforced below.",
-                    isOn: Binding(
-                        get: { rulesBinding.typedDataPolicy.enabled },
-                        set: { rulesBinding.typedDataPolicy.enabled = $0 }
+                    binding: Binding(
+                        get: { rulesBinding.typedDataPolicy.posture },
+                        set: { rulesBinding.typedDataPolicy.posture = $0 }
                     )
                 )
                 BastionDivider()
-                BastionToggleRow(
+                PosturePicker(
                     label: "ERC-4337 user operations",
                     hint: "Calldata-decoded targets and spending caps enforced below.",
-                    isOn: Binding(
-                        get: { rulesBinding.enabled },
-                        set: { rulesBinding.enabled = $0 }
+                    binding: Binding(
+                        get: { rulesBinding.userOpPosture },
+                        set: { rulesBinding.userOpPosture = $0 }
                     )
                 )
             }
@@ -997,6 +999,56 @@ private struct ProfilePanel: View {
 }
 
 // MARK: - CapTile
+
+// PR2: posture picker — three-way SigningPosture selector. Replaces the
+// old on/off operations toggle so the behaviour the operator chose is
+// unambiguous in both code and UI.
+private struct PosturePicker: View {
+    let label: String
+    let hint: String
+    @Binding var binding: SigningPosture
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.system(size: 13)).foregroundStyle(Color.ink900)
+                Text(hint).font(.system(size: 12)).foregroundStyle(Color.ink500)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 6) {
+                ForEach(SigningPosture.allCases, id: \.self) { posture in
+                    Button {
+                        binding = posture
+                    } label: {
+                        Text(postureShortLabel(posture))
+                            .font(.system(size: 11.5, weight: .medium))
+                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .foregroundStyle(binding == posture ? Color.paper : Color.ink700)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(binding == posture ? Color.ink900 : Color.paper)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .strokeBorder(binding == posture ? .clear : Color.ink200, lineWidth: 1)
+                                    )
+                            )
+                            .help(posture.hint)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.vertical, 10)
+    }
+
+    private func postureShortLabel(_ p: SigningPosture) -> String {
+        switch p {
+        case .enforceRulesAndAutoSign:           return "Auto-sign"
+        case .enforceRulesAndRequireApproval:    return "Always confirm"
+        case .requireApprovalWithoutRuleEvaluation: return "Skip rules"
+        }
+    }
+}
 
 private struct CapTile: View {
     let label: String
