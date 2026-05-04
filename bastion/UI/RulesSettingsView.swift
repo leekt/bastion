@@ -70,16 +70,13 @@ struct RulesSettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                MacTrafficLights()
-                Text("Bastion · Settings")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.ink500)
-                    .padding(.leading, 4)
-                Spacer()
-            }
-            .padding(EdgeInsets(top: 12, leading: 14, bottom: 6, trailing: 14))
-
+            // Note: the v2 redesign mock-up assumed a chromeless window and
+            // drew a fake "Bastion · Settings" label + decorative traffic
+            // lights here. The SwiftUI `Settings` scene gives this window
+            // a real macOS title bar, so the fake header used to stack on
+            // top of the real one. Killing the fake row removes both
+            // visual clutter and the cosmetic "red/yellow/green dots that
+            // don't do anything" complaint.
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     SidebarSection(title: "Defaults") {

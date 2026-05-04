@@ -17,8 +17,6 @@ struct AuditHistoryView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                titleBar
-                BastionDivider()
                 savedViewsRow
                 BastionDivider()
                 filterRow
@@ -39,34 +37,15 @@ struct AuditHistoryView: View {
         .onAppear { reload() }
     }
 
-    // MARK: - Title bar
+    // MARK: - Saved views + search
 
-    private var titleBar: some View {
-        HStack(spacing: 10) {
-            MacTrafficLights()
-            Text("Bastion · Audit history")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.ink500)
-                .padding(.leading, 4)
-            Spacer()
-            TextField("Search…", text: $search)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .frame(width: 220)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.ink50)
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.ink200, lineWidth: 1))
-                )
-            Button("Export…") { showExport = true }
-                .bastionButton(.default, size: .small)
-        }
-        .padding(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-    }
-
-    // MARK: - Saved views
-
+    /// PR fix: the v2 mock had a separate `titleBar` row that drew a fake
+    /// "Bastion · Audit history" label, decorative traffic-light dots, the
+    /// search box and the Export button. The SwiftUI `Settings`-style
+    /// window already gives us a real macOS title bar with real traffic
+    /// lights, so the fake header just stacked on top of the real one and
+    /// made the chrome ~50pt taller than necessary. Search + Export move
+    /// into this row alongside the saved-view chips.
     private var savedViewsRow: some View {
         HStack(spacing: 8) {
             LabelXS(text: "Views")
@@ -83,9 +62,21 @@ struct AuditHistoryView: View {
                 savedView = .failed; filters = AuditFilters(outcome: .failed, client: nil, chainId: nil, range: .last24h)
             }
             Spacer()
+            TextField("Search…", text: $search)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .frame(width: 200)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.ink50)
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.ink200, lineWidth: 1))
+                )
+            Button("Export…") { showExport = true }
+                .bastionButton(.default, size: .small)
             Button {
                 // backend gap — saved views persistence not implemented
-            } label: { Text("+ Save current").font(.system(size: 11)) }
+            } label: { Text("+ Save").font(.system(size: 11)) }
                 .bastionButton(.ghost, size: .small)
         }
         .padding(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
