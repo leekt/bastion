@@ -66,6 +66,15 @@ nonisolated struct AgentSession: Identifiable, Hashable, Sendable, Codable {
     }
 }
 
+/// PR4: Per-session result of a `SessionStore.reconcile` pass. The
+/// caller (typically `RuleEngine.updateConfig`) audits these so the
+/// owner can see exactly what happened to which session when the
+/// allowlist tightened.
+nonisolated struct SessionReconciliationEntry: Sendable, Equatable {
+    let sessionId: UUID
+    let outcome: SessionReconciler.Outcome
+}
+
 /// Thread-safe shadow of active sessions, readable from any actor context.
 /// Maintained alongside the @MainActor SessionStore; the rule engine reads
 /// this snapshot during validation.
@@ -198,6 +207,39 @@ final class SessionStore {
     func revokeAll() {
         sessions.removeAll()
         persist()
+    }
+
+    /// PR4: Reconcile every active session against the rules currently in
+    /// effect for its agent. Sessions that exceed the new policy are
+    /// downgraded (chains/targets narrowed to the surviving intersection)
+    /// or revoked when nothing survives. Returns a report of every
+    /// outcome so the caller (typically `RuleEngine.updateConfig`) can
+    /// audit the change. The reconciler defers the actual rule lookup to
+    /// the closure so this method stays decoupled from `RuleEngine`.
+    @discardableResult
+    func reconcile(rulesProvider: (String?) -> RuleConfig) -> [SessionReconciliationEntry] {
+        var results: [SessionReconciliationEntry] = []
+        var newSessions: [AgentSession] = []
+        var anyChange = false
+        for session in sessions {
+            let rules = rulesProvider(session.clientBundleId)
+            let outcome = SessionReconciler.reconcile(session, against: rules)
+            results.append(SessionReconciliationEntry(sessionId: session.id, outcome: outcome))
+            switch outcome {
+            case .unchanged:
+                newSessions.append(session)
+            case .downgraded(let updated, _):
+                newSessions.append(updated)
+                anyChange = true
+            case .revoked:
+                anyChange = true
+            }
+        }
+        if anyChange {
+            sessions = newSessions
+            persist()
+        }
+        return results
     }
 
     func active() -> [AgentSession] {
