@@ -678,14 +678,18 @@ extension EdgeInsets {
     static let bastionPanelContent = EdgeInsets(top: 18, leading: 28, bottom: 28, trailing: 28)
 }
 
-// MARK: - Small caps label
+// MARK: - Section label
+//
+// Used everywhere a small "section header" caption was needed — sidebar section
+// titles, audit column headers, "Views" / "Code" / "Risk signals" labels, etc.
+// The previous 10.5pt + uppercase + kerning(0.6) treatment was stylized below
+// macOS comfortable read size; bumped to 11pt regular case to match Finder/Mail.
 
-struct LabelXS: View {
+struct BastionSectionLabel: View {
     let text: String
     var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .semibold))
-            .kerning(0.6)
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Color.ink500)
     }
 }

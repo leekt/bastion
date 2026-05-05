@@ -131,7 +131,7 @@ struct SigningRequestView: View {
 
     private var decodedAction: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Decoded action").padding(.bottom, 2)
+            BastionSectionLabel(text: "Decoded action").padding(.bottom, 2)
 
             Text(headline)
                 .font(.system(size: 22, weight: .semibold, design: .monospaced))
@@ -626,7 +626,7 @@ struct SigningRequestView: View {
 
     private var riskSignalsPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Risk signals")
+            BastionSectionLabel(text: "Risk signals")
             // Use LazyVGrid as a poor man's wrapping flow — adaptive columns
             // give us wrap-by-width without a custom Layout.
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 6)], alignment: .leading, spacing: 6) {

@@ -63,7 +63,7 @@ struct PolicySimulatorView: View {
                                         .font(.system(size: 13, weight: .medium))
                                 }
                                 if !result.reasons.isEmpty {
-                                    LabelXS(text: "Reasons")
+                                    BastionSectionLabel(text: "Reasons")
                                     ForEach(Array(result.reasons.enumerated()), id: \.offset) { _, reason in
                                         HStack(alignment: .top, spacing: 8) {
                                             Circle().fill(Color.bastionBad).frame(width: 4, height: 4).padding(.top, 6)

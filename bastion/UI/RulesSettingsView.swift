@@ -439,10 +439,7 @@ private struct SidebarSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(title.uppercased())
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .kerning(0.6)
-                    .foregroundStyle(Color.ink400)
+                BastionSectionLabel(text: title)
                 Spacer()
                 if let trailing { trailing }
             }
@@ -719,14 +716,13 @@ private struct ProfilePanel: View {
 
         return VStack(spacing: 0) {
             HStack {
-                Text("CHAIN").frame(width: 110, alignment: .leading)
-                Text("TARGET").frame(maxWidth: .infinity, alignment: .leading)
-                Text("CAP").frame(width: 130, alignment: .leading)
-                Text("USED 24H").frame(width: 110, alignment: .leading)
+                Text("Chain").frame(width: 110, alignment: .leading)
+                Text("Target").frame(maxWidth: .infinity, alignment: .leading)
+                Text("Cap").frame(width: 130, alignment: .leading)
+                Text("Used 24h").frame(width: 110, alignment: .leading)
                 Color.clear.frame(width: 24)
             }
-            .font(.system(size: 10.5, weight: .semibold))
-            .kerning(0.6)
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Color.ink500)
             .padding(.bottom, 6)
             BastionDivider()

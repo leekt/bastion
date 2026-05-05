@@ -94,7 +94,7 @@ struct MenuBarPanelView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 ShieldGlyph(size: 13, color: .bastionAccentDeep)
-                LabelXS(text: "Incoming pair request")
+                BastionSectionLabel(text: "Incoming pair request")
             }
             ForEach(pendingPairings) { request in
                 PendingPairingRow(request: request) {
@@ -350,7 +350,7 @@ struct MenuBarPanelView: View {
     private func recentActivity(snapshot: Snapshot) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                LabelXS(text: "Recent activity")
+                BastionSectionLabel(text: "Recent activity")
                 Spacer()
                 Button {
                     AuditHistoryWindowManager.shared.showWindow()
@@ -384,7 +384,7 @@ struct MenuBarPanelView: View {
     private var activeSessionsBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                LabelXS(text: "Active sessions")
+                BastionSectionLabel(text: "Active sessions")
                 Spacer()
                 Button {
                     GrantSessionWindowManager.shared.showWindow()
@@ -544,10 +544,7 @@ private struct PendingPairingRow: View {
                 Spacer()
             }
             HStack {
-                Text("Code")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .kerning(0.6)
-                    .foregroundStyle(Color.ink500)
+                BastionSectionLabel(text: "Code")
                 Text(request.pairingCode)
                     .font(.system(size: 14, weight: .semibold, design: .monospaced))
                     .tracking(1.2)
