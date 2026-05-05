@@ -429,7 +429,7 @@ struct MenuBarPanelView: View {
                 openSettings()
                 NSApp.activate(ignoringOtherApps: true)
             }
-            #if !BASTION_HELPER
+            #if DEBUG && !BASTION_HELPER
             Menu {
                 Button("Policy Review Sample") {
                     SigningRequestPanelManager.shared.showRequest(

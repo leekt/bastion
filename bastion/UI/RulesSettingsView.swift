@@ -317,17 +317,21 @@ struct RulesSettingsView: View {
     }
 
     private func launchTestApproval() {
+        #if DEBUG
         SigningRequestPanelManager.shared.showRequest(
             SigningRequestPreviewFactory.policyReview(),
             onApprove: {}, onDeny: {}
         )
+        #endif
     }
 
     private func launchTestViolation() {
+        #if DEBUG
         SigningRequestPanelManager.shared.showRequest(
             SigningRequestPreviewFactory.ruleOverride(),
             onApprove: {}, onDeny: {}
         )
+        #endif
     }
 
     private func applyTemplateToDefault(_ template: PairingPolicyTemplate) {
@@ -630,12 +634,14 @@ private struct ProfilePanel: View {
                 }
             }
             Spacer()
+            #if DEBUG
             HStack(spacing: 8) {
                 Button("Test approval", action: onLaunchTestApproval)
                     .bastionButton(.default)
                 Button("Test violation", action: onLaunchTestViolation)
                     .bastionButton(.danger)
             }
+            #endif
         }
         .padding(EdgeInsets(top: 18, leading: 28, bottom: 16, trailing: 28))
     }
