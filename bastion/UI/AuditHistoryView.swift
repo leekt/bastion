@@ -449,6 +449,8 @@ private struct AuditRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(record.operationTitle), from \(record.clientDisplayName), \(record.latestEvent?.resultLabel ?? "no outcome"), \(BastionFormat.relative(record.latestTimestamp))")
+            .accessibilityHint(expanded ? "Collapse details" : "Expand details")
 
             if expanded {
                 ExpandedDetail(record: record)

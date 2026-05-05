@@ -502,6 +502,8 @@ private struct SidebarRow: View {
         .onHover { hovered = $0 }
         .padding(.horizontal, 8)
         .padding(.bottom, 1)
+        .accessibilityLabel(sublabel.map { "\(label), \($0)" } ?? label)
+        .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
     }
 }
 

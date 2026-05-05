@@ -83,6 +83,8 @@ struct SigningRequestView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: BastionTokens.windowRadius))
         .shadow(color: Color.black.opacity(0.22), radius: 30, y: 24)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(isOverride ? "Rule violation, owner authentication required" : "Signing request approval")
     }
 
     // MARK: - Header
@@ -119,6 +121,7 @@ struct SigningRequestView: View {
             Text(timeString)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(remainingSeconds < 10 ? Color.bastionBad : Color.ink500)
+                .accessibilityLabel("Auto-deny in \(remainingSeconds) seconds")
         }
         .padding(EdgeInsets(top: 14, leading: 16, bottom: 12, trailing: 16))
     }
@@ -741,6 +744,8 @@ struct SigningRequestView: View {
                 }
                 .keyboardShortcut(.escape)
                 .bastionButton(.default)
+                .accessibilityLabel("Deny signing request")
+                .accessibilityHint("Reject this request from \(approval.clientContext.displayName) without signing.")
 
                 Button(action: primaryTapped) {
                     Text(isOverride ? "Override & Sign" : "Approve")
@@ -751,6 +756,10 @@ struct SigningRequestView: View {
                 .disabled(!canSubmitApproval)
                 .opacity(canSubmitApproval ? 1 : 0.45)
                 .frame(maxWidth: .infinity)
+                .accessibilityLabel(isOverride ? "Override rules and sign" : "Approve signing request")
+                .accessibilityHint(isOverride
+                    ? "Authorize this request even though it violates configured rules. Owner authentication required."
+                    : "Sign this request from \(approval.clientContext.displayName).")
             }
         }
     }
