@@ -306,7 +306,7 @@ struct PairingFlowView: View {
                                 .foregroundStyle(Color.ink500)
                                 .multilineTextAlignment(.trailing)
                         }
-                        .padding(12)
+                        .padding(.m)
                         .background(
                             RoundedRectangle(cornerRadius: BastionTokens.radiusMedium)
                                 .fill(selectedTemplate == template ? Color.ink50 : Color.paper)
@@ -544,7 +544,7 @@ struct PairingFlowView: View {
                 .foregroundStyle(Color.bastionAccentDeep)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(12)
+        .padding(.m)
         .background(
             RoundedRectangle(cornerRadius: BastionTokens.radiusMedium)
                 .fill(Color.bastionAccentSoft)

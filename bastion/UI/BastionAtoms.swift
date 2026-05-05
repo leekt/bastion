@@ -313,16 +313,35 @@ struct BastionChip: View {
 struct StatusDot: View {
     enum State { case ok, warn, bad, idle }
     let state: State
-    var size: CGFloat = 6
+    /// Requested diameter. Floored at 8pt — a 5–7pt dot is below the
+    /// click-target minimum and indistinguishable for color-blind users
+    /// without the inset glyph.
+    var size: CGFloat = 8
+
+    private var resolvedSize: CGFloat { max(size, 8) }
 
     var body: some View {
         Circle()
             .fill(color)
-            .frame(width: size, height: size)
+            .frame(width: resolvedSize, height: resolvedSize)
             .overlay(
                 Circle()
                     .stroke(softColor, lineWidth: 3)
             )
+            .overlay(glyph)
+            .accessibilityLabel(Text(stateLabel))
+    }
+
+    @ViewBuilder
+    private var glyph: some View {
+        // Shape redundancy with color: SF Symbol on top of the dot fill.
+        // Skipped for `idle` (no useful shape) and for very small dots
+        // where the symbol would not render legibly.
+        if let symbol, resolvedSize >= 8 {
+            Image(systemName: symbol)
+                .font(.system(size: resolvedSize * 0.7, weight: .bold))
+                .foregroundStyle(Color.paper)
+        }
     }
 
     private var color: Color {
@@ -340,6 +359,24 @@ struct StatusDot: View {
         case .warn: return .bastionWarnSoft
         case .bad:  return .bastionBadSoft
         case .idle: return .clear
+        }
+    }
+
+    private var symbol: String? {
+        switch state {
+        case .ok:   return "checkmark"
+        case .warn: return "exclamationmark"
+        case .bad:  return "xmark"
+        case .idle: return nil
+        }
+    }
+
+    private var stateLabel: String {
+        switch state {
+        case .ok:   return "Status: ok"
+        case .warn: return "Status: warning"
+        case .bad:  return "Status: error"
+        case .idle: return "Status: idle"
         }
     }
 }
@@ -626,18 +663,6 @@ extension View {
     }
 }
 
-// MARK: - Mac traffic light dots (used inside Settings/Audit windows since title bar is hidden)
-
-struct MacTrafficLights: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(Color(red: 1.0, green: 0.373, blue: 0.341)).frame(width: 12, height: 12)
-            Circle().fill(Color(red: 0.996, green: 0.737, blue: 0.180)).frame(width: 12, height: 12)
-            Circle().fill(Color(red: 0.157, green: 0.784, blue: 0.251)).frame(width: 12, height: 12)
-        }
-    }
-}
-
 // MARK: - Section divider
 
 struct BastionDivider: View {
@@ -690,14 +715,18 @@ extension EdgeInsets {
     static let bastionPanelContent = EdgeInsets(top: 18, leading: 28, bottom: 28, trailing: 28)
 }
 
-// MARK: - Small caps label
+// MARK: - Section label
+//
+// Used everywhere a small "section header" caption was needed — sidebar section
+// titles, audit column headers, "Views" / "Code" / "Risk signals" labels, etc.
+// The previous 10.5pt + uppercase + kerning(0.6) treatment was stylized below
+// macOS comfortable read size; bumped to 11pt regular case to match Finder/Mail.
 
-struct LabelXS: View {
+struct BastionSectionLabel: View {
     let text: String
     var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: 10.5, weight: .semibold))
-            .kerning(0.6)
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Color.ink500)
     }
 }

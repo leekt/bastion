@@ -14,6 +14,78 @@ enum BastionTokens {
     static let monoFont = Font.system(.body, design: .monospaced)
 }
 
+// MARK: - Font scale
+//
+// Previously the codebase used 9 distinct font sizes (10.5 / 11 / 11.5 / 12 /
+// 12.5 / 13 / 14 / 17 / 18). macOS conventionally uses 4–5 (mini=10, secondary
+// =11, body=13, title=15-17). Half-point variants are indistinguishable to
+// readers and create accidental visual noise. New sites should use a token.
+
+enum BastionFont {
+    /// 11pt — secondary captions, "X of Y" counts, hint lines.
+    case caption
+    /// 12pt — body labels and form field labels.
+    case label
+    /// 13pt — primary body text.
+    case body
+    /// 17pt — panel and window titles.
+    case title
+    /// 24pt — dashboard hero numerals.
+    case large
+
+    var size: CGFloat {
+        switch self {
+        case .caption: return 11
+        case .label:   return 12
+        case .body:    return 13
+        case .title:   return 17
+        case .large:   return 24
+        }
+    }
+
+    func font(weight: Font.Weight = .regular, design: Font.Design = .default) -> Font {
+        .system(size: size, weight: weight, design: design)
+    }
+}
+
+extension Text {
+    /// Apply a Bastion font token. Equivalent to `.font(.system(size: token.size, weight: weight, design: design))`.
+    func bastionFont(_ token: BastionFont, weight: Font.Weight = .regular, design: Font.Design = .default) -> Text {
+        font(token.font(weight: weight, design: design))
+    }
+}
+
+// MARK: - Spacing scale
+//
+// The codebase had ~130 hardcoded padding values clustered around 4/6/8/10/12
+// /14/16/18/22/24/28 — every fix-the-spacing PR picked new arbitrary numbers.
+// This is the canonical 5-step scale; new sites should use a token instead of
+// a literal so the spacing rhythm stays consistent across screens.
+
+enum BastionSpacing: CGFloat {
+    case xs = 4
+    case s = 8
+    case m = 12
+    case l = 16
+    case xl = 24
+
+    var value: CGFloat { rawValue }
+}
+
+extension View {
+    /// Apply token-scaled padding. Prefer this over `.padding(<literal>)`.
+    func padding(_ token: BastionSpacing, _ edges: Edge.Set = .all) -> some View {
+        padding(edges, token.value)
+    }
+
+    /// Apply token-scaled padding with separate vertical and horizontal values.
+    /// Common pattern: `.padding(vertical: .s, horizontal: .m)`.
+    func padding(vertical: BastionSpacing, horizontal: BastionSpacing) -> some View {
+        padding(.vertical, vertical.value)
+            .padding(.horizontal, horizontal.value)
+    }
+}
+
 // MARK: - Adaptive color helpers
 
 private func adaptive(_ light: Color, _ dark: Color) -> Color {

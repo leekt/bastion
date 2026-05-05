@@ -69,7 +69,7 @@ struct WalletGroupPanel: View {
                                 }
                             }
                         }
-                        .padding(8)
+                        .padding(.s)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: 6).fill(Color.bastionBadSoft.opacity(0.6))

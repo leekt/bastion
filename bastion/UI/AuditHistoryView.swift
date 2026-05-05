@@ -47,7 +47,7 @@ struct AuditHistoryView: View {
     /// into this row alongside the saved-view chips.
     private var savedViewsRow: some View {
         HStack(spacing: 8) {
-            LabelXS(text: "Views")
+            BastionSectionLabel(text: "Views")
             ViewChip(label: "All", active: savedView == nil) {
                 savedView = nil; filters = .default
             }
@@ -73,10 +73,6 @@ struct AuditHistoryView: View {
                 )
             Button("Export…") { showExport = true }
                 .bastionButton(.default, size: .small)
-            Button {
-                // backend gap — saved views persistence not implemented
-            } label: { Text("+ Save").font(.system(size: 11)) }
-                .bastionButton(.ghost, size: .small)
         }
         .padding(EdgeInsets(top: 6, leading: 24, bottom: 6, trailing: 24))
     }
@@ -161,8 +157,7 @@ struct AuditHistoryView: View {
             // makes the spacer a no-op vertically.
             Color.clear.frame(width: 14, height: 1)
         }
-        .font(.system(size: 10.5, weight: .semibold))
-        .kerning(0.6)
+        .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(Color.ink500)
         .padding(EdgeInsets(top: 4, leading: 24, bottom: 4, trailing: 24))
         // Belt-and-suspenders: even if some future modifier reintroduces
@@ -454,6 +449,8 @@ private struct AuditRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(record.operationTitle), from \(record.clientDisplayName), \(record.latestEvent?.resultLabel ?? "no outcome"), \(BastionFormat.relative(record.latestTimestamp))")
+            .accessibilityHint(expanded ? "Collapse details" : "Expand details")
 
             if expanded {
                 ExpandedDetail(record: record)
@@ -490,13 +487,13 @@ private struct OutcomeBadge: View {
     var body: some View {
         switch record.latestEvent?.type {
         case .userOpReceiptSuccess:
-            BastionChip(label: "Confirmed", style: .ok, leading: AnyView(StatusDot(state: .ok, size: 5)))
+            BastionChip(label: "Confirmed", style: .ok, leading: AnyView(StatusDot(state: .ok)))
         case .signSuccess, .userOpSubmitted:
-            BastionChip(label: "Signed", style: .ok, leading: AnyView(StatusDot(state: .ok, size: 5)))
+            BastionChip(label: "Signed", style: .ok, leading: AnyView(StatusDot(state: .ok)))
         case .signDenied, .ruleViolation, .authFailed, .userOpSendFailed, .userOpReceiptFailed:
-            BastionChip(label: "Denied", style: .bad, leading: AnyView(StatusDot(state: .bad, size: 5)))
+            BastionChip(label: "Denied", style: .bad, leading: AnyView(StatusDot(state: .bad)))
         case .userOpReceiptTimeout:
-            BastionChip(label: "Pending", style: .warn, leading: AnyView(StatusDot(state: .warn, size: 5)))
+            BastionChip(label: "Pending", style: .warn, leading: AnyView(StatusDot(state: .warn)))
         default:
             BastionChip(label: record.latestEvent?.resultLabel ?? "—", style: .neutral)
         }
@@ -559,7 +556,7 @@ private struct ExpandedDetail: View {
             }
             DetailRow(key: "Audit signature", value: AnyView(
                 HStack(spacing: 6) {
-                    StatusDot(state: AuditLog.shared.logTampered ? .bad : .ok, size: 5)
+                    StatusDot(state: AuditLog.shared.logTampered ? .bad : .ok)
                     Text(AuditLog.shared.logTampered ? "Tampered — verify install" : "Tamper-evident · verified")
                         .font(.system(size: 11.5))
                         .foregroundStyle(AuditLog.shared.logTampered ? Color.bastionBad : Color.bastionOk)
@@ -586,7 +583,7 @@ private struct ExpandedDetail: View {
     private var timeline: some View {
         let chainId = guessChainId(record)
         return VStack(alignment: .leading, spacing: 0) {
-            LabelXS(text: "Timeline").padding(.bottom, 10)
+            BastionSectionLabel(text: "Timeline").padding(.bottom, 10)
             ForEach(Array(record.events.enumerated()), id: \.offset) { idx, event in
                 TimelineEntry(event: event, isLast: idx == record.events.count - 1, chainId: chainId)
             }

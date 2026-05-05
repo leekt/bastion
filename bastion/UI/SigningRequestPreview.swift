@@ -1,5 +1,6 @@
 import Foundation
 
+#if DEBUG
 enum SigningRequestPreviewFactory {
     static func policyReview() -> ApprovalRequest {
         ApprovalRequest(
@@ -113,3 +114,4 @@ enum SigningRequestPreviewFactory {
         )
     }
 }
+#endif

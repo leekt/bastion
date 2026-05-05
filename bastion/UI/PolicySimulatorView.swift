@@ -20,13 +20,15 @@ struct PolicySimulatorView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    // Defensive: ScrollView+VStack centers short content vertically
+                    // on macOS unless the inner stack pins to topLeading.
                     BastionCard {
                         VStack(alignment: .leading, spacing: 8) {
                             BastionSectionHeader(title: "UserOperation JSON")
                             TextEditor(text: $pasted)
                                 .font(.system(size: 12, design: .monospaced))
                                 .frame(minHeight: 220)
-                                .padding(8)
+                                .padding(.s)
                                 .background(
                                     RoundedRectangle(cornerRadius: 7)
                                         .fill(Color.ink50)
@@ -61,7 +63,7 @@ struct PolicySimulatorView: View {
                                         .font(.system(size: 13, weight: .medium))
                                 }
                                 if !result.reasons.isEmpty {
-                                    LabelXS(text: "Reasons")
+                                    BastionSectionLabel(text: "Reasons")
                                     ForEach(Array(result.reasons.enumerated()), id: \.offset) { _, reason in
                                         HStack(alignment: .top, spacing: 8) {
                                             Circle().fill(Color.bastionBad).frame(width: 4, height: 4).padding(.top, 6)
@@ -77,6 +79,7 @@ struct PolicySimulatorView: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }

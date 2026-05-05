@@ -369,13 +369,14 @@ struct GrantSessionSheet: View {
                 intentField
             }
             .padding(EdgeInsets(top: 16, leading: 18, bottom: 16, trailing: 18))
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxHeight: 480)
     }
 
     private var clientPicker: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Agent")
+            BastionSectionLabel(text: "Agent")
             Menu {
                 ForEach(availableClients) { client in
                     Button(client.label) {
@@ -405,7 +406,7 @@ struct GrantSessionSheet: View {
 
     private var durationPicker: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Duration")
+            BastionSectionLabel(text: "Duration")
             HStack(spacing: 6) {
                 ForEach([5, 15, 30, 60, 120], id: \.self) { mins in
                     Button {
@@ -437,7 +438,7 @@ struct GrantSessionSheet: View {
 
     private var limitsRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Spending caps")
+            BastionSectionLabel(text: "Spending caps")
             HStack(spacing: 8) {
                 limitField(label: "USDC max", binding: $usdcCap, placeholder: "0", suffix: "USDC")
                 limitField(label: "ETH max", binding: $ethCap, placeholder: "0", suffix: "ETH")
@@ -470,7 +471,7 @@ struct GrantSessionSheet: View {
 
     private var chainsPicker: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Allowed chains")
+            BastionSectionLabel(text: "Allowed chains")
             HStack(spacing: 6) {
                 ForEach(chainOptions, id: \.id) { option in
                     let on = selectedChains.contains(option.id)
@@ -500,7 +501,7 @@ struct GrantSessionSheet: View {
 
     private var targetsField: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Allowed targets (optional)")
+            BastionSectionLabel(text: "Allowed targets (optional)")
             TextField("0xa0b8…, 0xf39f…", text: $allowedTargets, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(3, reservesSpace: true)
@@ -519,7 +520,7 @@ struct GrantSessionSheet: View {
 
     private var intentField: some View {
         VStack(alignment: .leading, spacing: 6) {
-            LabelXS(text: "Intent (shown in audit)")
+            BastionSectionLabel(text: "Intent (shown in audit)")
             TextField("Rebalancing Base USDC into treasury…", text: $intent)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))

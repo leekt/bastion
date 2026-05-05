@@ -317,17 +317,21 @@ struct RulesSettingsView: View {
     }
 
     private func launchTestApproval() {
+        #if DEBUG
         SigningRequestPanelManager.shared.showRequest(
             SigningRequestPreviewFactory.policyReview(),
             onApprove: {}, onDeny: {}
         )
+        #endif
     }
 
     private func launchTestViolation() {
+        #if DEBUG
         SigningRequestPanelManager.shared.showRequest(
             SigningRequestPreviewFactory.ruleOverride(),
             onApprove: {}, onDeny: {}
         )
+        #endif
     }
 
     private func applyTemplateToDefault(_ template: PairingPolicyTemplate) {
@@ -435,10 +439,7 @@ private struct SidebarSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(title.uppercased())
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .kerning(0.6)
-                    .foregroundStyle(Color.ink400)
+                BastionSectionLabel(text: title)
                 Spacer()
                 if let trailing { trailing }
             }
@@ -465,7 +466,7 @@ private struct SidebarRow: View {
                 if let icon {
                     icon.frame(width: 16)
                 } else if let dot = statusDot {
-                    StatusDot(state: dot, size: 7)
+                    StatusDot(state: dot)
                         .padding(.horizontal, 4.5)
                 } else {
                     Color.clear.frame(width: 16)
@@ -501,6 +502,8 @@ private struct SidebarRow: View {
         .onHover { hovered = $0 }
         .padding(.horizontal, 8)
         .padding(.bottom, 1)
+        .accessibilityLabel(sublabel.map { "\(label), \($0)" } ?? label)
+        .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
     }
 }
 
@@ -605,6 +608,7 @@ private struct ProfilePanel: View {
                     if let profile { validatorCard(profile: profile) }
                 }
                 .padding(EdgeInsets(top: 18, leading: 28, bottom: 80, trailing: 28))
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -619,7 +623,7 @@ private struct ProfilePanel: View {
                     BastionChip(label: profileSubtitle, style: .outline)
                     if let profile, let activity = profileActivity(profile) {
                         BastionChip(label: activity.label, style: activity.style,
-                                    leading: AnyView(StatusDot(state: activity.dot, size: 5)))
+                                    leading: AnyView(StatusDot(state: activity.dot)))
                     }
                 }
                 if let profile, let address = accountAddressForProfile(profile) {
@@ -630,12 +634,14 @@ private struct ProfilePanel: View {
                 }
             }
             Spacer()
+            #if DEBUG
             HStack(spacing: 8) {
                 Button("Test approval", action: onLaunchTestApproval)
                     .bastionButton(.default)
                 Button("Test violation", action: onLaunchTestViolation)
                     .bastionButton(.danger)
             }
+            #endif
         }
         .padding(EdgeInsets(top: 18, leading: 28, bottom: 16, trailing: 28))
     }
@@ -712,14 +718,13 @@ private struct ProfilePanel: View {
 
         return VStack(spacing: 0) {
             HStack {
-                Text("CHAIN").frame(width: 110, alignment: .leading)
-                Text("TARGET").frame(maxWidth: .infinity, alignment: .leading)
-                Text("CAP").frame(width: 130, alignment: .leading)
-                Text("USED 24H").frame(width: 110, alignment: .leading)
+                Text("Chain").frame(width: 110, alignment: .leading)
+                Text("Target").frame(maxWidth: .infinity, alignment: .leading)
+                Text("Cap").frame(width: 130, alignment: .leading)
+                Text("Used 24h").frame(width: 110, alignment: .leading)
                 Color.clear.frame(width: 24)
             }
-            .font(.system(size: 10.5, weight: .semibold))
-            .kerning(0.6)
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Color.ink500)
             .padding(.bottom, 6)
             BastionDivider()
@@ -821,7 +826,7 @@ private struct ProfilePanel: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Color.bastionAccentDeep)
                 }
-                .padding(12)
+                .padding(.m)
                 .background(
                     RoundedRectangle(cornerRadius: 8).fill(Color.bastionAccentSoft)
                 )
@@ -1238,7 +1243,7 @@ private struct AppPreferencesPanel: View {
                                     Spacer()
                                     let sample = rpcMonitor.samples[bundlerPreferences.chainRPCs[idx].chainId]
                                     HStack(spacing: 5) {
-                                        StatusDot(state: dotState(for: sample?.status ?? .unknown), size: 6)
+                                        StatusDot(state: dotState(for: sample?.status ?? .unknown))
                                         Text(latencyLabel(sample))
                                             .font(.system(size: 11))
                                             .foregroundStyle(Color.ink500)
@@ -1258,6 +1263,7 @@ private struct AppPreferencesPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -1296,6 +1302,7 @@ private struct RuleTemplatesPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -1454,6 +1461,7 @@ private struct AddressBookPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -1524,6 +1532,7 @@ private struct HighValueRulePanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
         .onAppear {
@@ -1588,6 +1597,7 @@ private struct PolicyHistoryPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
         .onAppear {
