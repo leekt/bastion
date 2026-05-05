@@ -425,10 +425,6 @@ struct MenuBarPanelView: View {
             MenuRow(label: "Audit History…", shortcut: "⌘⇧H") {
                 AuditHistoryWindowManager.shared.showWindow()
             }
-            MenuRow(label: "Wallet Groups…", shortcut: nil) {
-                openSettings()
-                NSApp.activate(ignoringOtherApps: true)
-            }
             #if DEBUG && !BASTION_HELPER
             Menu {
                 Button("Policy Review Sample") {
