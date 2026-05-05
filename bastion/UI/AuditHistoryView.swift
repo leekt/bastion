@@ -485,13 +485,13 @@ private struct OutcomeBadge: View {
     var body: some View {
         switch record.latestEvent?.type {
         case .userOpReceiptSuccess:
-            BastionChip(label: "Confirmed", style: .ok, leading: AnyView(StatusDot(state: .ok, size: 5)))
+            BastionChip(label: "Confirmed", style: .ok, leading: AnyView(StatusDot(state: .ok)))
         case .signSuccess, .userOpSubmitted:
-            BastionChip(label: "Signed", style: .ok, leading: AnyView(StatusDot(state: .ok, size: 5)))
+            BastionChip(label: "Signed", style: .ok, leading: AnyView(StatusDot(state: .ok)))
         case .signDenied, .ruleViolation, .authFailed, .userOpSendFailed, .userOpReceiptFailed:
-            BastionChip(label: "Denied", style: .bad, leading: AnyView(StatusDot(state: .bad, size: 5)))
+            BastionChip(label: "Denied", style: .bad, leading: AnyView(StatusDot(state: .bad)))
         case .userOpReceiptTimeout:
-            BastionChip(label: "Pending", style: .warn, leading: AnyView(StatusDot(state: .warn, size: 5)))
+            BastionChip(label: "Pending", style: .warn, leading: AnyView(StatusDot(state: .warn)))
         default:
             BastionChip(label: record.latestEvent?.resultLabel ?? "—", style: .neutral)
         }
@@ -554,7 +554,7 @@ private struct ExpandedDetail: View {
             }
             DetailRow(key: "Audit signature", value: AnyView(
                 HStack(spacing: 6) {
-                    StatusDot(state: AuditLog.shared.logTampered ? .bad : .ok, size: 5)
+                    StatusDot(state: AuditLog.shared.logTampered ? .bad : .ok)
                     Text(AuditLog.shared.logTampered ? "Tampered — verify install" : "Tamper-evident · verified")
                         .font(.system(size: 11.5))
                         .foregroundStyle(AuditLog.shared.logTampered ? Color.bastionBad : Color.bastionOk)

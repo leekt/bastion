@@ -466,7 +466,7 @@ private struct SidebarRow: View {
                 if let icon {
                     icon.frame(width: 16)
                 } else if let dot = statusDot {
-                    StatusDot(state: dot, size: 7)
+                    StatusDot(state: dot)
                         .padding(.horizontal, 4.5)
                 } else {
                     Color.clear.frame(width: 16)
@@ -621,7 +621,7 @@ private struct ProfilePanel: View {
                     BastionChip(label: profileSubtitle, style: .outline)
                     if let profile, let activity = profileActivity(profile) {
                         BastionChip(label: activity.label, style: activity.style,
-                                    leading: AnyView(StatusDot(state: activity.dot, size: 5)))
+                                    leading: AnyView(StatusDot(state: activity.dot)))
                     }
                 }
                 if let profile, let address = accountAddressForProfile(profile) {
@@ -1241,7 +1241,7 @@ private struct AppPreferencesPanel: View {
                                     Spacer()
                                     let sample = rpcMonitor.samples[bundlerPreferences.chainRPCs[idx].chainId]
                                     HStack(spacing: 5) {
-                                        StatusDot(state: dotState(for: sample?.status ?? .unknown), size: 6)
+                                        StatusDot(state: dotState(for: sample?.status ?? .unknown))
                                         Text(latencyLabel(sample))
                                             .font(.system(size: 11))
                                             .foregroundStyle(Color.ink500)
