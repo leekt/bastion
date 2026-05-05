@@ -28,7 +28,7 @@ struct PolicySimulatorView: View {
                             TextEditor(text: $pasted)
                                 .font(.system(size: 12, design: .monospaced))
                                 .frame(minHeight: 220)
-                                .padding(8)
+                                .padding(.s)
                                 .background(
                                     RoundedRectangle(cornerRadius: 7)
                                         .fill(Color.ink50)

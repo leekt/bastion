@@ -824,7 +824,7 @@ private struct ProfilePanel: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Color.bastionAccentDeep)
                 }
-                .padding(12)
+                .padding(.m)
                 .background(
                     RoundedRectangle(cornerRadius: 8).fill(Color.bastionAccentSoft)
                 )

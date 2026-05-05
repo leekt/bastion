@@ -293,7 +293,7 @@ struct MenuBarPanelView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
+        .padding(.m)
         .background(Color.bastionBadSoft)
     }
 
@@ -458,7 +458,7 @@ struct MenuBarPanelView: View {
                 NSApplication.shared.terminate(nil)
             }
         }
-        .padding(8)
+        .padding(.s)
     }
 
     // MARK: - Snapshot

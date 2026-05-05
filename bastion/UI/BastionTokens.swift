@@ -14,6 +14,37 @@ enum BastionTokens {
     static let monoFont = Font.system(.body, design: .monospaced)
 }
 
+// MARK: - Spacing scale
+//
+// The codebase had ~130 hardcoded padding values clustered around 4/6/8/10/12
+// /14/16/18/22/24/28 — every fix-the-spacing PR picked new arbitrary numbers.
+// This is the canonical 5-step scale; new sites should use a token instead of
+// a literal so the spacing rhythm stays consistent across screens.
+
+enum BastionSpacing: CGFloat {
+    case xs = 4
+    case s = 8
+    case m = 12
+    case l = 16
+    case xl = 24
+
+    var value: CGFloat { rawValue }
+}
+
+extension View {
+    /// Apply token-scaled padding. Prefer this over `.padding(<literal>)`.
+    func padding(_ token: BastionSpacing, _ edges: Edge.Set = .all) -> some View {
+        padding(edges, token.value)
+    }
+
+    /// Apply token-scaled padding with separate vertical and horizontal values.
+    /// Common pattern: `.padding(vertical: .s, horizontal: .m)`.
+    func padding(vertical: BastionSpacing, horizontal: BastionSpacing) -> some View {
+        padding(.vertical, vertical.value)
+            .padding(.horizontal, horizontal.value)
+    }
+}
+
 // MARK: - Adaptive color helpers
 
 private func adaptive(_ light: Color, _ dark: Color) -> Color {
