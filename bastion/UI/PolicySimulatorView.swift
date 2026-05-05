@@ -20,6 +20,8 @@ struct PolicySimulatorView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    // Defensive: ScrollView+VStack centers short content vertically
+                    // on macOS unless the inner stack pins to topLeading.
                     BastionCard {
                         VStack(alignment: .leading, spacing: 8) {
                             BastionSectionHeader(title: "UserOperation JSON")
@@ -77,6 +79,7 @@ struct PolicySimulatorView: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }

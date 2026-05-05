@@ -369,6 +369,7 @@ struct GrantSessionSheet: View {
                 intentField
             }
             .padding(EdgeInsets(top: 16, leading: 18, bottom: 16, trailing: 18))
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxHeight: 480)
     }

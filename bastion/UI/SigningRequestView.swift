@@ -638,6 +638,7 @@ struct SigningRequestView: View {
                     .help(signal.detail ?? signal.label)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .padding(EdgeInsets(top: 0, leading: 16, bottom: 12, trailing: 16))
     }

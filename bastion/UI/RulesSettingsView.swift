@@ -609,6 +609,7 @@ private struct ProfilePanel: View {
                     if let profile { validatorCard(profile: profile) }
                 }
                 .padding(EdgeInsets(top: 18, leading: 28, bottom: 80, trailing: 28))
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -1264,6 +1265,7 @@ private struct AppPreferencesPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -1302,6 +1304,7 @@ private struct RuleTemplatesPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -1460,6 +1463,7 @@ private struct AddressBookPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
@@ -1530,6 +1534,7 @@ private struct HighValueRulePanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
         .onAppear {
@@ -1594,6 +1599,7 @@ private struct PolicyHistoryPanel: View {
                     }
                 }
                 .padding(.bastionPanelContent)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
         .onAppear {
