@@ -73,10 +73,6 @@ struct AuditHistoryView: View {
                 )
             Button("Export…") { showExport = true }
                 .bastionButton(.default, size: .small)
-            Button {
-                // backend gap — saved views persistence not implemented
-            } label: { Text("+ Save").font(.system(size: 11)) }
-                .bastionButton(.ghost, size: .small)
         }
         .padding(EdgeInsets(top: 6, leading: 24, bottom: 6, trailing: 24))
     }
