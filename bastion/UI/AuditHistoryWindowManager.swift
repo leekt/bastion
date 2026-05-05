@@ -20,8 +20,8 @@ final class AuditHistoryWindowManager {
         let hostingController = NSHostingController(rootView: AuditHistoryView())
 
         // No `.fullSizeContentView` here on purpose — the v2 mock used it
-        // to host a custom in-content title bar (`MacTrafficLights` + a
-        // "Bastion · Audit history" label) that we removed in PR #38. With
+        // to host a custom in-content title bar (decorative traffic-light
+        // dots + a "Bastion · Audit history" label) that we removed in PR #38. With
         // that flag set, the wrapped NSScrollView inside SwiftUI's `List`
         // applied its own ~28pt content inset matching the title bar's
         // intrusion (on top of the safe-area inset SwiftUI already

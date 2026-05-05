@@ -626,18 +626,6 @@ extension View {
     }
 }
 
-// MARK: - Mac traffic light dots (used inside Settings/Audit windows since title bar is hidden)
-
-struct MacTrafficLights: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(Color(red: 1.0, green: 0.373, blue: 0.341)).frame(width: 12, height: 12)
-            Circle().fill(Color(red: 0.996, green: 0.737, blue: 0.180)).frame(width: 12, height: 12)
-            Circle().fill(Color(red: 0.157, green: 0.784, blue: 0.251)).frame(width: 12, height: 12)
-        }
-    }
-}
-
 // MARK: - Section divider
 
 struct BastionDivider: View {
