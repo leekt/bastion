@@ -1,0 +1,17 @@
+# Xcode
+xcuserdata/
+*.xcscmblueprint
+DerivedData/
+build/
+
+# macOS
+.DS_Store
+
+# Debug artifacts
+.bastion-dev-local.env
+bastion-debug.log
+bastion-init-marker.txt
+*.profraw
+
+# Release artifacts
+dist/

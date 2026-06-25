@@ -1,0 +1,1752 @@
+import Foundation
+import LocalAuthentication
+
+// MARK: - Errors
+
+nonisolated enum BastionError: Int, Error, CustomStringConvertible, Sendable {
+    case keyCreationFailed = 1
+    case keyNotFound = 2
+    case signingFailed = 3
+    case authFailed = 4
+    case userDenied = 5
+    case ruleViolation = 6
+    case timeout = 9
+    case appNotRunning = 10
+    case invalidInput = 11
+    case storageFailed = 12
+
+    var description: String {
+        switch self {
+        case .keyCreationFailed: return "Failed to create Secure Enclave key"
+        case .keyNotFound: return "Key not found in Secure Enclave"
+        case .signingFailed: return "Signing operation failed"
+        case .authFailed: return "Authentication failed"
+        case .userDenied: return "User denied the signing request"
+        case .ruleViolation: return "Rule violation"
+        case .timeout: return "Request timed out"
+        case .appNotRunning: return "Bastion app is not running"
+        case .invalidInput: return "Invalid input data"
+        case .storageFailed: return "Secure storage operation failed"
+        }
+    }
+
+    var nsError: NSError {
+        NSError(domain: "com.bastion.error", code: rawValue, userInfo: [NSLocalizedDescriptionKey: description])
+    }
+}
+
+// MARK: - Response Types
+
+nonisolated struct SignResponse: Codable, Sendable {
+    let pubkeyX: String
+    let pubkeyY: String
+    let r: String
+    let s: String
+    let accountAddress: String?
+    let clientBundleId: String?
+    let submission: UserOperationSubmissionResponse?
+}
+
+nonisolated enum UserOperationSubmissionStatus: String, Codable, Sendable {
+    case submitted = "submitted"
+    case sendFailed = "send_failed"
+}
+
+nonisolated struct UserOperationSubmissionResponse: Codable, Sendable {
+    let provider: String
+    let status: UserOperationSubmissionStatus
+    let userOpHash: String?
+    let transactionHash: String?
+    let error: String?
+    let failureStage: String?
+    let failureCategory: String?
+    let retryable: Bool?
+    let recoverySuggestion: String?
+
+    init(
+        provider: String,
+        status: UserOperationSubmissionStatus,
+        userOpHash: String?,
+        transactionHash: String?,
+        error: String?,
+        diagnostic: ProviderFailureDiagnostic? = nil
+    ) {
+        self.provider = provider
+        self.status = status
+        self.userOpHash = userOpHash
+        self.transactionHash = transactionHash
+        self.error = error
+        self.failureStage = diagnostic?.stage.rawValue
+        self.failureCategory = diagnostic?.category.rawValue
+        self.retryable = diagnostic?.retryable
+        self.recoverySuggestion = diagnostic?.recoverySuggestion
+    }
+}
+
+nonisolated struct PublicKeyResponse: Codable, Sendable {
+    let x: String
+    let y: String
+    let accountAddress: String?
+}
+
+nonisolated struct ServiceInfoResponse: Codable, Sendable {
+    let version: String
+    let serviceRegistrationStatus: String
+    let configCorrupted: Bool
+    let bundlePath: String
+    let executablePath: String
+    let bundleIdentifier: String?
+    let processIdentifier: Int32
+    let launchMode: String
+    let machServiceName: String
+    let launchAgentPlistName: String
+}
+
+nonisolated struct ResetSigningKeysResponse: Codable, Sendable {
+    let deletedKeyTags: [String]
+    let requestedKeyTags: [String]
+}
+
+nonisolated struct RulesResponse: Codable, Sendable {
+    let authPolicy: String
+    let globalAuthPolicy: String?
+    let rules: RuleConfig
+    let globalRules: RuleConfig?
+    let clientProfile: ClientProfileInfo?
+    let accountAddress: String?
+}
+
+nonisolated struct StateResponse: Codable, Sendable {
+    let rateLimits: [RateLimitStatus]
+    let spendingLimits: [SpendingLimitStatus]
+    let clientProfile: ClientProfileInfo?
+    let accountAddress: String?
+}
+
+nonisolated struct RateLimitStatus: Codable, Sendable {
+    let maxRequests: Int
+    let windowSeconds: Int
+    let currentCount: Int
+    let remaining: Int
+    let windowResetsAt: String?
+}
+
+nonisolated struct SpendingLimitStatus: Codable, Sendable {
+    let token: String
+    let allowance: String
+    let spent: String
+    let remaining: String
+    let windowSeconds: Int?
+    let windowResetsAt: String?
+}
+
+// MARK: - Rule Config
+
+nonisolated struct RuleConfig: Codable, Sendable {
+    /// PR2: posture for ERC-4337 user operations. Authoritative.
+    /// `enabled` and `requireExplicitApproval` below are kept on the
+    /// wire as legacy mirrors so older readers stay coherent, but every
+    /// decision in the rule engine consults `userOpPosture`.
+    var userOpPosture: SigningPosture
+    var allowedHours: AllowedHours?
+    var allowedChains: [Int]?
+    var allowedTargets: [String: [String]]?   // chainId string -> [address]
+    var allowedSelectors: [String: [String]]? // address -> [4-byte hex selectors]
+    var denySelectors: [String]?              // globally blocked selectors
+    var allowedClients: [AllowedClient]?
+    var rateLimits: [RateLimitRule]
+    var spendingLimits: [SpendingLimitRule]
+    var rawMessagePolicy: RawMessagePolicy
+    var typedDataPolicy: TypedDataPolicy
+
+    /// Legacy mirrors of `userOpPosture`. Reads return the derived
+    /// boolean; writes update the posture in the corresponding direction
+    /// so tests / external callers that still spell things in the old
+    /// shape don't break. New code should set `userOpPosture` directly.
+    var enabled: Bool {
+        get { userOpPosture.evaluatesRules }
+        set {
+            userOpPosture = SigningPosture.from(
+                enabled: newValue,
+                requireExplicitApproval: userOpPosture.requiresApprovalPopup
+            )
+        }
+    }
+    var requireExplicitApproval: Bool {
+        get { userOpPosture.requiresApprovalPopup }
+        set {
+            userOpPosture = SigningPosture.from(
+                enabled: userOpPosture.evaluatesRules,
+                requireExplicitApproval: newValue
+            )
+        }
+    }
+
+    static let `default` = RuleConfig(
+        userOpPosture: .enforceRulesAndRequireApproval,
+        allowedHours: nil,
+        allowedChains: nil,
+        allowedTargets: nil,
+        allowedSelectors: nil,
+        denySelectors: nil,
+        allowedClients: nil,
+        rateLimits: [],
+        spendingLimits: [],
+        rawMessagePolicy: .default,
+        typedDataPolicy: .default
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case userOpPosture
+        case enabled
+        case requireExplicitApproval
+        case allowedHours
+        case allowedChains
+        case allowedTargets
+        case allowedSelectors
+        case denySelectors
+        case allowedClients
+        case rateLimits
+        case spendingLimits
+        case rawMessagePolicy
+        case typedDataPolicy
+    }
+
+    init(
+        userOpPosture: SigningPosture,
+        allowedHours: AllowedHours? = nil,
+        allowedChains: [Int]? = nil,
+        allowedTargets: [String: [String]]? = nil,
+        allowedSelectors: [String: [String]]? = nil,
+        denySelectors: [String]? = nil,
+        allowedClients: [AllowedClient]? = nil,
+        rateLimits: [RateLimitRule] = [],
+        spendingLimits: [SpendingLimitRule] = [],
+        rawMessagePolicy: RawMessagePolicy = .default,
+        typedDataPolicy: TypedDataPolicy = .default
+    ) {
+        self.userOpPosture = userOpPosture
+        self.allowedHours = allowedHours
+        self.allowedChains = allowedChains
+        self.allowedTargets = allowedTargets
+        self.allowedSelectors = allowedSelectors
+        self.denySelectors = denySelectors
+        self.allowedClients = allowedClients
+        self.rateLimits = rateLimits
+        self.spendingLimits = spendingLimits
+        self.rawMessagePolicy = rawMessagePolicy
+        self.typedDataPolicy = typedDataPolicy
+    }
+
+    /// Legacy initialiser — maps the boolean pair to `userOpPosture`.
+    /// Kept for in-memory call sites (tests, migration helpers) that
+    /// still spell things in the pre-PR2 shape.
+    init(
+        enabled: Bool,
+        requireExplicitApproval: Bool,
+        allowedHours: AllowedHours?,
+        allowedChains: [Int]?,
+        allowedTargets: [String: [String]]?,
+        allowedSelectors: [String: [String]]? = nil,
+        denySelectors: [String]? = nil,
+        allowedClients: [AllowedClient]?,
+        rateLimits: [RateLimitRule],
+        spendingLimits: [SpendingLimitRule],
+        rawMessagePolicy: RawMessagePolicy = .default,
+        typedDataPolicy: TypedDataPolicy = .default
+    ) {
+        self.init(
+            userOpPosture: SigningPosture.from(enabled: enabled, requireExplicitApproval: requireExplicitApproval),
+            allowedHours: allowedHours,
+            allowedChains: allowedChains,
+            allowedTargets: allowedTargets,
+            allowedSelectors: allowedSelectors,
+            denySelectors: denySelectors,
+            allowedClients: allowedClients,
+            rateLimits: rateLimits,
+            spendingLimits: spendingLimits,
+            rawMessagePolicy: rawMessagePolicy,
+            typedDataPolicy: typedDataPolicy
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let posture = try container.decodeIfPresent(SigningPosture.self, forKey: .userOpPosture) {
+            userOpPosture = posture
+        } else {
+            // Legacy migration: posture key absent → derive from enabled +
+            // requireExplicitApproval. PR23's "disabled = require approval"
+            // semantic is preserved by SigningPosture.from.
+            let enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            let requireApproval = try container.decodeIfPresent(Bool.self, forKey: .requireExplicitApproval) ?? false
+            userOpPosture = SigningPosture.from(enabled: enabled, requireExplicitApproval: requireApproval)
+        }
+        allowedHours = try container.decodeIfPresent(AllowedHours.self, forKey: .allowedHours)
+        allowedChains = try container.decodeIfPresent([Int].self, forKey: .allowedChains)
+        allowedTargets = try container.decodeIfPresent([String: [String]].self, forKey: .allowedTargets)
+        allowedSelectors = try container.decodeIfPresent([String: [String]].self, forKey: .allowedSelectors)
+        denySelectors = try container.decodeIfPresent([String].self, forKey: .denySelectors)
+        allowedClients = try container.decodeIfPresent([AllowedClient].self, forKey: .allowedClients)
+        rateLimits = try container.decodeIfPresent([RateLimitRule].self, forKey: .rateLimits) ?? []
+        spendingLimits = try container.decodeIfPresent([SpendingLimitRule].self, forKey: .spendingLimits) ?? []
+        rawMessagePolicy = try container.decodeIfPresent(RawMessagePolicy.self, forKey: .rawMessagePolicy) ?? .default
+        typedDataPolicy = try container.decodeIfPresent(TypedDataPolicy.self, forKey: .typedDataPolicy) ?? .default
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(userOpPosture, forKey: .userOpPosture)
+        // Legacy mirrors so older builds reading the same wire format
+        // see a coherent enabled/requireApproval pair.
+        try c.encode(userOpPosture.evaluatesRules, forKey: .enabled)
+        try c.encode(userOpPosture.requiresApprovalPopup, forKey: .requireExplicitApproval)
+        try c.encodeIfPresent(allowedHours, forKey: .allowedHours)
+        try c.encodeIfPresent(allowedChains, forKey: .allowedChains)
+        try c.encodeIfPresent(allowedTargets, forKey: .allowedTargets)
+        try c.encodeIfPresent(allowedSelectors, forKey: .allowedSelectors)
+        try c.encodeIfPresent(denySelectors, forKey: .denySelectors)
+        try c.encodeIfPresent(allowedClients, forKey: .allowedClients)
+        try c.encode(rateLimits, forKey: .rateLimits)
+        try c.encode(spendingLimits, forKey: .spendingLimits)
+        try c.encode(rawMessagePolicy, forKey: .rawMessagePolicy)
+        try c.encode(typedDataPolicy, forKey: .typedDataPolicy)
+    }
+}
+
+/// Identifies an XPC client allowed to connect.
+/// Clients are matched by bundle identifier extracted from their code signature.
+nonisolated struct AllowedClient: Codable, Sendable, Identifiable, Hashable {
+    let id: String          // unique rule ID
+    let bundleId: String    // e.g. "com.bastion.cli", "com.myagent.app"
+    let label: String?      // human-readable name for UI display
+
+    var displayDescription: String {
+        label ?? bundleId
+    }
+}
+
+nonisolated struct ClientProfile: Codable, Sendable, Identifiable {
+    var id: String
+    var bundleId: String
+    var label: String?
+    var authPolicy: AuthPolicy?
+    var keyTag: String
+    var rules: RuleConfig
+    /// When set, this client is a member of a wallet group and signs for the
+    /// shared smart account via `membershipId`'s scoped validator key.
+    /// When nil, the client uses its own `keyTag` (private wallet — default).
+    var walletGroupId: String?
+    /// Points to `AgentMembership.id` inside the referenced wallet group.
+    /// Required whenever `walletGroupId` is set.
+    var membershipId: String?
+
+    init(
+        id: String = UUID().uuidString,
+        bundleId: String,
+        label: String? = nil,
+        authPolicy: AuthPolicy? = nil,
+        keyTag: String = ClientProfile.makeKeyTag(),
+        rules: RuleConfig,
+        walletGroupId: String? = nil,
+        membershipId: String? = nil
+    ) {
+        self.id = id
+        self.bundleId = bundleId
+        self.label = label
+        self.authPolicy = authPolicy
+        self.keyTag = keyTag
+        self.rules = rules
+        self.walletGroupId = walletGroupId
+        self.membershipId = membershipId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case bundleId
+        case label
+        case authPolicy
+        case keyTag
+        case rules
+        case walletGroupId
+        case membershipId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        bundleId = try container.decode(String.self, forKey: .bundleId)
+        label = try container.decodeIfPresent(String.self, forKey: .label)
+        authPolicy = try container.decodeIfPresent(AuthPolicy.self, forKey: .authPolicy)
+        keyTag = try container.decodeIfPresent(String.self, forKey: .keyTag) ?? Self.makeKeyTag()
+        rules = try container.decodeIfPresent(RuleConfig.self, forKey: .rules) ?? .default
+        walletGroupId = try container.decodeIfPresent(String.self, forKey: .walletGroupId)
+        membershipId = try container.decodeIfPresent(String.self, forKey: .membershipId)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(bundleId, forKey: .bundleId)
+        try container.encodeIfPresent(label, forKey: .label)
+        try container.encodeIfPresent(authPolicy, forKey: .authPolicy)
+        try container.encode(keyTag, forKey: .keyTag)
+        try container.encode(rules, forKey: .rules)
+        try container.encodeIfPresent(walletGroupId, forKey: .walletGroupId)
+        try container.encodeIfPresent(membershipId, forKey: .membershipId)
+    }
+
+    static func makeKeyTag() -> String {
+        "com.bastion.signingkey.client.\(UUID().uuidString.lowercased())"
+    }
+
+    var displayDescription: String {
+        label ?? bundleId
+    }
+
+    /// True when this profile is a member of a wallet group.
+    var isGroupMember: Bool {
+        walletGroupId != nil && membershipId != nil
+    }
+}
+
+// MARK: - Wallet Group
+
+/// A shared smart account. The owner holds a sudo Secure Enclave key that
+/// can install and revoke per-agent scoped validators. Every agent member
+/// gets its OWN SE key — cryptographic isolation is preserved. The shared
+/// quantity is the on-chain smart account address, not the signing key.
+nonisolated struct WalletGroup: Codable, Sendable, Identifiable {
+    let id: String
+    var label: String
+    /// Tag of the owner's SE key. Format:
+    /// `com.bastion.walletgroup.<groupId>.owner`
+    var ownerKeyTag: String
+    /// Shared on-chain smart account address (derived from the owner
+    /// validator's public key). Computed once at group creation.
+    var accountAddress: String?
+    /// Chains where this wallet is deployed / has installed validators.
+    var chainIds: [Int]
+    /// Rules that apply to every agent member in addition to their own
+    /// scoped rules. Intersection semantics: both the group's rules and
+    /// the agent's rules must pass. Spending limits defined here share a
+    /// counter across all members because the rule ID is the same.
+    var sharedRules: RuleConfig
+    var members: [AgentMembership]
+    var createdAt: Date
+
+    init(
+        id: String = UUID().uuidString,
+        label: String,
+        ownerKeyTag: String? = nil,
+        accountAddress: String? = nil,
+        chainIds: [Int] = [],
+        sharedRules: RuleConfig = .default,
+        members: [AgentMembership] = [],
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.label = label
+        self.ownerKeyTag = ownerKeyTag ?? Self.makeOwnerKeyTag(groupId: id)
+        self.accountAddress = accountAddress
+        self.chainIds = chainIds
+        self.sharedRules = sharedRules
+        self.members = members
+        self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case ownerKeyTag
+        case accountAddress
+        case chainIds
+        case sharedRules
+        case members
+        case createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedId = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        id = decodedId
+        label = try container.decode(String.self, forKey: .label)
+        ownerKeyTag = try container.decodeIfPresent(String.self, forKey: .ownerKeyTag)
+            ?? Self.makeOwnerKeyTag(groupId: decodedId)
+        accountAddress = try container.decodeIfPresent(String.self, forKey: .accountAddress)
+        chainIds = try container.decodeIfPresent([Int].self, forKey: .chainIds) ?? []
+        sharedRules = try container.decodeIfPresent(RuleConfig.self, forKey: .sharedRules) ?? .default
+        members = try container.decodeIfPresent([AgentMembership].self, forKey: .members) ?? []
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
+
+    static func makeOwnerKeyTag(groupId: String) -> String {
+        "com.bastion.walletgroup.\(groupId.lowercased()).owner"
+    }
+
+    static func makeAgentKeyTag(groupId: String, memberId: String) -> String {
+        "com.bastion.walletgroup.\(groupId.lowercased()).agent.\(memberId.lowercased())"
+    }
+
+    func member(id memberId: String) -> AgentMembership? {
+        members.first(where: { $0.id == memberId })
+    }
+
+    /// Members that are currently allowed to sign on-chain.
+    var activeMembers: [AgentMembership] {
+        members.filter { $0.installStatus.isInstalled }
+    }
+}
+
+/// A single agent's scoped access to a wallet group. Each membership has
+/// its own Secure Enclave key; the owner installs this key on-chain as a
+/// permissioned validator module.
+nonisolated struct AgentMembership: Codable, Sendable, Identifiable {
+    let id: String
+    var clientProfileId: String?
+    var label: String?
+    var keyTag: String
+    /// Rules scoped to this single agent. Combined with the group's
+    /// `sharedRules` via intersection — both must pass.
+    var scopedRules: RuleConfig
+    /// Address of the on-chain validator module bound to this membership,
+    /// once installed. Nil while status is `.pending`.
+    var validatorAddress: String?
+    var installStatus: ValidatorInstallStatus
+    var installedAt: Date?
+    var revokedAt: Date?
+    var createdAt: Date
+
+    init(
+        id: String = UUID().uuidString,
+        clientProfileId: String? = nil,
+        label: String? = nil,
+        keyTag: String,
+        scopedRules: RuleConfig = .default,
+        validatorAddress: String? = nil,
+        installStatus: ValidatorInstallStatus = .pending,
+        installedAt: Date? = nil,
+        revokedAt: Date? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.clientProfileId = clientProfileId
+        self.label = label
+        self.keyTag = keyTag
+        self.scopedRules = scopedRules
+        self.validatorAddress = validatorAddress
+        self.installStatus = installStatus
+        self.installedAt = installedAt
+        self.revokedAt = revokedAt
+        self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case clientProfileId
+        case label
+        case keyTag
+        case scopedRules
+        case validatorAddress
+        case installStatus
+        case installedAt
+        case revokedAt
+        case createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        clientProfileId = try container.decodeIfPresent(String.self, forKey: .clientProfileId)
+        label = try container.decodeIfPresent(String.self, forKey: .label)
+        keyTag = try container.decode(String.self, forKey: .keyTag)
+        scopedRules = try container.decodeIfPresent(RuleConfig.self, forKey: .scopedRules) ?? .default
+        validatorAddress = try container.decodeIfPresent(String.self, forKey: .validatorAddress)
+        installStatus = try container.decodeIfPresent(ValidatorInstallStatus.self, forKey: .installStatus) ?? .pending
+        installedAt = try container.decodeIfPresent(Date.self, forKey: .installedAt)
+        revokedAt = try container.decodeIfPresent(Date.self, forKey: .revokedAt)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
+
+    var displayDescription: String {
+        label ?? keyTag
+    }
+}
+
+/// Lifecycle of an agent's validator module relative to the on-chain
+/// smart account. Bastion refuses to sign for agents in `.revoked` status
+/// and signs only for `.installed` memberships.
+nonisolated enum ValidatorInstallStatus: Codable, Sendable, Equatable {
+    case pending
+    case installed(txHash: String)
+    case revoked(txHash: String)
+
+    var isRevoked: Bool {
+        if case .revoked = self { return true }
+        return false
+    }
+
+    var isInstalled: Bool {
+        if case .installed = self { return true }
+        return false
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case txHash
+    }
+
+    private enum State: String, Codable {
+        case pending
+        case installed
+        case revoked
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let state = try container.decode(State.self, forKey: .state)
+        switch state {
+        case .pending:
+            self = .pending
+        case .installed:
+            let hash = try container.decode(String.self, forKey: .txHash)
+            self = .installed(txHash: hash)
+        case .revoked:
+            let hash = try container.decode(String.self, forKey: .txHash)
+            self = .revoked(txHash: hash)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .pending:
+            try container.encode(State.pending, forKey: .state)
+        case .installed(let hash):
+            try container.encode(State.installed, forKey: .state)
+            try container.encode(hash, forKey: .txHash)
+        case .revoked(let hash):
+            try container.encode(State.revoked, forKey: .state)
+            try container.encode(hash, forKey: .txHash)
+        }
+    }
+}
+
+nonisolated struct ClientProfileInfo: Codable, Sendable, Identifiable {
+    let id: String
+    let bundleId: String
+    let label: String?
+    let authPolicy: String
+    let keyTag: String?
+    let accountAddress: String?
+    let walletGroupId: String?
+    let membershipId: String?
+
+    init(
+        id: String,
+        bundleId: String,
+        label: String?,
+        authPolicy: String,
+        keyTag: String?,
+        accountAddress: String?,
+        walletGroupId: String? = nil,
+        membershipId: String? = nil
+    ) {
+        self.id = id
+        self.bundleId = bundleId
+        self.label = label
+        self.authPolicy = authPolicy
+        self.keyTag = keyTag
+        self.accountAddress = accountAddress
+        self.walletGroupId = walletGroupId
+        self.membershipId = membershipId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, bundleId, label, authPolicy, keyTag, accountAddress, walletGroupId, membershipId
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        bundleId = try c.decode(String.self, forKey: .bundleId)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        authPolicy = try c.decode(String.self, forKey: .authPolicy)
+        keyTag = try c.decodeIfPresent(String.self, forKey: .keyTag)
+        accountAddress = try c.decodeIfPresent(String.self, forKey: .accountAddress)
+        walletGroupId = try c.decodeIfPresent(String.self, forKey: .walletGroupId)
+        membershipId = try c.decodeIfPresent(String.self, forKey: .membershipId)
+    }
+
+    var displayDescription: String {
+        label ?? bundleId
+    }
+
+    var isGroupMember: Bool {
+        walletGroupId != nil && membershipId != nil
+    }
+}
+
+// MARK: - Key Lifecycle
+
+nonisolated enum KeyLifecycleSubject: String, Codable, Sendable, Equatable {
+    case privateClient = "private_client"
+    case walletGroupAgent = "wallet_group_agent"
+    case walletGroupOwner = "wallet_group_owner"
+}
+
+nonisolated enum KeyLifecycleDisposition: String, Codable, Sendable, Equatable {
+    case ready
+    case requiresOnChainInstall = "requires_on_chain_install"
+    case requiresReEnrollment = "requires_re_enrollment"
+    case blocked
+}
+
+nonisolated enum KeyLifecycleAction: String, Codable, Sendable, Equatable {
+    case authenticateOwner = "authenticate_owner"
+    case createReplacementSecureEnclaveKey = "create_replacement_secure_enclave_key"
+    case updateClientProfileKeyTag = "update_client_profile_key_tag"
+    case deleteOldLocalKey = "delete_old_local_key"
+    case reinstallAgentValidatorOnChain = "reinstall_agent_validator_on_chain"
+    case revokeOldAgentValidatorOnChain = "revoke_old_agent_validator_on_chain"
+    case rePairClient = "re_pair_client"
+    case createReplacementWalletGroup = "create_replacement_wallet_group"
+    case restoreConfigBackup = "restore_config_backup"
+}
+
+nonisolated struct KeyLifecyclePlan: Codable, Sendable, Equatable {
+    let subject: KeyLifecycleSubject
+    let disposition: KeyLifecycleDisposition
+    let oldKeyTag: String?
+    let replacementKeyTagPrefix: String?
+    let signingAvailableAfterLocalStep: Bool
+    let requiresOnChainAction: Bool
+    let actions: [KeyLifecycleAction]
+    let operatorSummary: String
+    let blockingReason: String?
+
+    var isActionable: Bool {
+        disposition != .blocked
+    }
+}
+
+nonisolated struct ClientKeyRotationResult: Codable, Sendable, Equatable {
+    let profileId: String
+    let bundleId: String
+    let oldKeyTag: String
+    let newKeyTag: String
+    let oldAccountAddress: String?
+    let newAccountAddress: String?
+}
+
+nonisolated struct RotateClientKeyRequest: Codable, Sendable {
+    let profileId: String
+}
+
+nonisolated enum KeyLifecyclePlanner {
+    static func privateClientRotationPlan(profile: ClientProfile) -> KeyLifecyclePlan {
+        guard !profile.isGroupMember else {
+            return KeyLifecyclePlan(
+                subject: .walletGroupAgent,
+                disposition: .requiresOnChainInstall,
+                oldKeyTag: profile.keyTag,
+                replacementKeyTagPrefix: WalletGroup.makeAgentKeyTag(groupId: profile.walletGroupId ?? "group", memberId: profile.membershipId ?? "member"),
+                signingAvailableAfterLocalStep: false,
+                requiresOnChainAction: true,
+                actions: [
+                    .authenticateOwner,
+                    .createReplacementSecureEnclaveKey,
+                    .reinstallAgentValidatorOnChain,
+                    .revokeOldAgentValidatorOnChain,
+                    .rePairClient
+                ],
+                operatorSummary: "Rotate the agent key by creating a replacement membership key, installing that validator on-chain, then re-pairing the client to the installed membership.",
+                blockingReason: nil
+            )
+        }
+
+        return KeyLifecyclePlan(
+            subject: .privateClient,
+            disposition: .ready,
+            oldKeyTag: profile.keyTag,
+            replacementKeyTagPrefix: "com.bastion.signingkey.client.",
+            signingAvailableAfterLocalStep: true,
+            requiresOnChainAction: false,
+            actions: [
+                .authenticateOwner,
+                .createReplacementSecureEnclaveKey,
+                .updateClientProfileKeyTag,
+                .deleteOldLocalKey
+            ],
+            operatorSummary: "Create a new per-client Secure Enclave key, update the profile key tag atomically, then delete the old local key.",
+            blockingReason: nil
+        )
+    }
+
+    static func walletGroupOwnerRecoveryPlan(group: WalletGroup) -> KeyLifecyclePlan {
+        KeyLifecyclePlan(
+            subject: .walletGroupOwner,
+            disposition: .blocked,
+            oldKeyTag: group.ownerKeyTag,
+            replacementKeyTagPrefix: WalletGroup.makeOwnerKeyTag(groupId: group.id),
+            signingAvailableAfterLocalStep: false,
+            requiresOnChainAction: true,
+            actions: [
+                .restoreConfigBackup,
+                .createReplacementWalletGroup,
+                .rePairClient
+            ],
+            operatorSummary: "A lost wallet-group owner Secure Enclave key cannot be locally recovered or exported. Restore config for policy context, then create a replacement group and re-enroll clients unless an external on-chain recovery path already exists.",
+            blockingReason: "Secure Enclave private keys are non-exportable; Bastion cannot rebind a deployed owner validator without an owner or external recovery authority."
+        )
+    }
+
+    static func deviceReplacementPlan(hasConfigBackup: Bool) -> KeyLifecyclePlan {
+        KeyLifecyclePlan(
+            subject: .privateClient,
+            disposition: hasConfigBackup ? .requiresReEnrollment : .blocked,
+            oldKeyTag: nil,
+            replacementKeyTagPrefix: "com.bastion.signingkey.client.",
+            signingAvailableAfterLocalStep: false,
+            requiresOnChainAction: true,
+            actions: hasConfigBackup
+                ? [.restoreConfigBackup, .createReplacementSecureEnclaveKey, .rePairClient, .reinstallAgentValidatorOnChain]
+                : [.createReplacementSecureEnclaveKey, .rePairClient],
+            operatorSummary: hasConfigBackup
+                ? "Restore the config backup for policy context, create replacement Secure Enclave keys on the new Mac, then re-pair clients and reinstall any deployed validators."
+                : "Without a config backup or old Mac, Bastion can only create new keys and re-pair clients from scratch.",
+            blockingReason: hasConfigBackup ? nil : "No config backup is available; old client profile IDs, policies, and wallet-group bindings cannot be reconstructed locally."
+        )
+    }
+}
+
+// MARK: - Wallet Group XPC Requests/Responses
+
+nonisolated struct CreateWalletGroupRequest: Codable, Sendable {
+    let label: String
+    let chainIds: [Int]
+    let sharedRules: RuleConfig?
+}
+
+nonisolated struct AddAgentRequest: Codable, Sendable {
+    let groupId: String
+    let label: String?
+    /// Optional pre-existing ClientProfile to bind this membership to.
+    /// If nil, the caller is expected to call register afterwards.
+    let clientProfileId: String?
+    let scopedRules: RuleConfig?
+}
+
+nonisolated struct UpdateAgentScopeRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let scopedRules: RuleConfig
+}
+
+nonisolated struct MarkInstalledRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let txHash: String
+    let validatorAddress: String?
+}
+
+// MARK: - Pairing handshake (XPC wire)
+
+/// Returned from the XPC `startPairing` endpoint. The CLI prints the
+/// `pairingCode` to the operator's terminal and then polls `pollPairing`
+/// with the same `requestId` until it sees a terminal state.
+nonisolated struct PairingHandshakeResponse: Codable, Sendable {
+    let requestId: String
+    let pairingCode: String
+    let expiresAt: Date
+}
+
+/// State of a pending pairing handshake.
+nonisolated enum PairingPollState: String, Codable, Sendable {
+    case pending
+    case accepted
+    case rejected
+    case expired
+}
+
+nonisolated struct PairingPollResponse: Codable, Sendable {
+    let state: PairingPollState
+    /// Populated only when `state == .accepted` so the CLI can persist the
+    /// minted profile id (used to disambiguate later signing requests).
+    let profile: ClientProfileInfo?
+    /// Optional human-readable reason — typically populated for rejected /
+    /// expired states.
+    let reason: String?
+}
+
+nonisolated struct WalletGroupInfo: Codable, Sendable, Identifiable {
+    let id: String
+    let label: String
+    let ownerKeyTag: String?
+    let accountAddress: String?
+    let chainIds: [Int]
+    let sharedRules: RuleConfig?
+    let members: [AgentMembershipInfo]
+    let createdAt: String
+    let memberCount: Int
+    let activeMemberCount: Int
+}
+
+nonisolated struct AgentMembershipInfo: Codable, Sendable, Identifiable {
+    let id: String
+    let label: String?
+    let keyTag: String?
+    let clientProfileId: String?
+    let scopedRules: RuleConfig?
+    let validatorAddress: String?
+    let installStatus: ValidatorInstallStatus
+    let installedAt: String?
+    let revokedAt: String?
+}
+
+nonisolated struct WalletGroupListResponse: Codable, Sendable {
+    let groups: [WalletGroupInfo]
+}
+
+// MARK: - Phase 2 — On-Chain Install Requests
+
+nonisolated struct InstallAgentOnChainRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let projectId: String?
+    /// If true, Bastion submits the UserOp via ZeroDev and waits for a
+    /// receipt. If false, the signed UserOp is returned for the caller to
+    /// submit elsewhere.
+    let submit: Bool
+    /// How long to poll for a UserOp receipt, in seconds. 0 = no poll.
+    let waitForReceiptSeconds: Int?
+}
+
+nonisolated struct UninstallAgentOnChainRequest: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let projectId: String?
+    let submit: Bool
+    let waitForReceiptSeconds: Int?
+}
+
+/// XPC-safe serialization of `RuleEngine.WalletGroupChainResult`.
+nonisolated struct WalletGroupChainResultInfo: Codable, Sendable {
+    let groupId: String
+    let memberId: String
+    let chainId: Int
+    let userOp: UserOperationRPC
+    let userOpHash: String?
+    let txHash: String?
+    let membership: AgentMembershipInfo?
+}
+
+nonisolated struct AllowedHours: Codable, Sendable {
+    let start: Int
+    let end: Int
+}
+
+// MARK: - Signing posture (PR2)
+
+/// Per-operation posture. Replaces the previous combination of
+/// `enabled × requireExplicitApproval` booleans, which encoded three
+/// distinct behaviours but read like two — exactly the ambiguity that let
+/// the disabled-UserOp auto-sign bug exist before PR23.
+///
+/// Three explicit choices, applied independently to each operation type
+/// (raw messages, EIP-712 typed data, ERC-4337 user operations):
+///
+/// - `enforceRulesAndAutoSign` — evaluate every rule. If they all pass,
+///   sign without showing the approval popup. The post-approval auth gate
+///   (biometric / passcode) still runs based on `BastionConfig.authPolicy`.
+///   Best for low-friction agents whose rule set is tight enough to
+///   trust silently.
+/// - `enforceRulesAndRequireApproval` — evaluate every rule and *also*
+///   show the approval popup before signing. Use when satisfying the
+///   ruleset alone isn't enough; the operator wants eyes on every
+///   request.
+/// - `requireApprovalWithoutRuleEvaluation` — skip rule evaluation and
+///   force the approval popup unconditionally. The maximally cautious
+///   posture. This is what the old "rules disabled" state means after
+///   PR23 — every request is a manual decision.
+nonisolated enum SigningPosture: String, Codable, CaseIterable, Sendable {
+    case enforceRulesAndAutoSign           = "enforce_and_auto"
+    case enforceRulesAndRequireApproval    = "enforce_and_approve"
+    case requireApprovalWithoutRuleEvaluation = "approval_only"
+
+    var displayName: String {
+        switch self {
+        case .enforceRulesAndAutoSign:           return "Enforce rules · auto-sign"
+        case .enforceRulesAndRequireApproval:    return "Enforce rules · always confirm"
+        case .requireApprovalWithoutRuleEvaluation: return "Always confirm · skip rules"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .enforceRulesAndAutoSign:
+            return "Sign immediately when rules pass. Auth policy still gates the sign."
+        case .enforceRulesAndRequireApproval:
+            return "Show the approval popup even when rules pass."
+        case .requireApprovalWithoutRuleEvaluation:
+            return "Skip rule evaluation; every request waits for owner approval."
+        }
+    }
+
+    /// True iff rule evaluation should run for requests under this posture.
+    var evaluatesRules: Bool {
+        switch self {
+        case .enforceRulesAndAutoSign, .enforceRulesAndRequireApproval: return true
+        case .requireApprovalWithoutRuleEvaluation: return false
+        }
+    }
+
+    /// True iff the approval popup must always show before signing,
+    /// regardless of whether rules passed.
+    var requiresApprovalPopup: Bool {
+        switch self {
+        case .enforceRulesAndAutoSign: return false
+        case .enforceRulesAndRequireApproval, .requireApprovalWithoutRuleEvaluation: return true
+        }
+    }
+}
+
+nonisolated struct RawMessagePolicy: Codable, Sendable {
+    /// PR2: posture is the authoritative behaviour selector. The legacy
+    /// `enabled` boolean is kept on the wire so older builds that still
+    /// look at it stay coherent (true ↔ posture != .requireApprovalWithoutRuleEvaluation),
+    /// but every decision in the rule engine consults `posture` directly.
+    var posture: SigningPosture
+    /// Sub-rule — when false (and posture evaluates rules), only EIP-191
+    /// personal messages are allowed; raw 32-byte signing requests are
+    /// denied outright.
+    var allowRawSigning: Bool
+
+    /// Legacy mirror of posture. Writes preserve the `requireApproval`
+    /// half of the posture — toggling `enabled` to false collapses to
+    /// `.requireApprovalWithoutRuleEvaluation`; toggling it back to
+    /// true picks `.enforceRulesAndAutoSign` (raw messages don't have a
+    /// distinct "always approve" toggle in the legacy model).
+    var enabled: Bool {
+        get { posture.evaluatesRules }
+        set {
+            posture = newValue ? .enforceRulesAndAutoSign : .requireApprovalWithoutRuleEvaluation
+        }
+    }
+
+    static let `default` = RawMessagePolicy(posture: .enforceRulesAndRequireApproval, allowRawSigning: false)
+
+    init(posture: SigningPosture, allowRawSigning: Bool = false) {
+        self.posture = posture
+        self.allowRawSigning = allowRawSigning
+    }
+
+    /// Legacy initialiser kept for in-memory call sites that haven't
+    /// migrated yet (tests, fixtures). Maps the boolean to a posture.
+    init(enabled: Bool, allowRawSigning: Bool = false) {
+        self.posture = enabled ? .enforceRulesAndAutoSign : .requireApprovalWithoutRuleEvaluation
+        self.allowRawSigning = allowRawSigning
+    }
+
+    private enum CodingKeys: CodingKey {
+        case posture, enabled, allowRawSigning
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let posture = try container.decodeIfPresent(SigningPosture.self, forKey: .posture) {
+            self.posture = posture
+        } else {
+            // Legacy migration: posture key absent → derive from `enabled`.
+            let enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            self.posture = enabled ? .enforceRulesAndAutoSign : .requireApprovalWithoutRuleEvaluation
+        }
+        allowRawSigning = try container.decodeIfPresent(Bool.self, forKey: .allowRawSigning) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(posture, forKey: .posture)
+        // Mirror to `enabled` for wire compatibility with anything still
+        // looking at it. New readers consult `posture`.
+        try c.encode(posture.evaluatesRules, forKey: .enabled)
+        try c.encode(allowRawSigning, forKey: .allowRawSigning)
+    }
+}
+
+nonisolated struct TypedDataPolicy: Codable, Sendable {
+    /// PR2: posture is the authoritative behaviour selector.
+    var posture: SigningPosture
+    var domainRules: [TypedDataDomainRule]
+    var structRules: [TypedDataStructRule]
+
+    /// Legacy mirrors derived from posture so older readers stay coherent.
+    /// Writes update the posture via SigningPosture.from so the underlying
+    /// state stays canonical. Reads return derived booleans.
+    var enabled: Bool {
+        get { posture.evaluatesRules }
+        set {
+            posture = SigningPosture.from(
+                enabled: newValue,
+                requireExplicitApproval: posture.requiresApprovalPopup
+            )
+        }
+    }
+    var requireExplicitApproval: Bool {
+        get { posture.requiresApprovalPopup }
+        set {
+            posture = SigningPosture.from(
+                enabled: posture.evaluatesRules,
+                requireExplicitApproval: newValue
+            )
+        }
+    }
+
+    static let `default` = TypedDataPolicy(
+        posture: .enforceRulesAndRequireApproval,
+        domainRules: [],
+        structRules: []
+    )
+
+    init(
+        posture: SigningPosture,
+        domainRules: [TypedDataDomainRule] = [],
+        structRules: [TypedDataStructRule] = []
+    ) {
+        self.posture = posture
+        self.domainRules = domainRules
+        self.structRules = structRules
+    }
+
+    /// Legacy initialiser. Maps the boolean pair to a posture.
+    init(
+        enabled: Bool,
+        requireExplicitApproval: Bool,
+        domainRules: [TypedDataDomainRule] = [],
+        structRules: [TypedDataStructRule] = []
+    ) {
+        self.posture = SigningPosture.from(enabled: enabled, requireExplicitApproval: requireExplicitApproval)
+        self.domainRules = domainRules
+        self.structRules = structRules
+    }
+
+    private enum CodingKeys: CodingKey {
+        case posture, enabled, requireExplicitApproval, domainRules, structRules
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let posture = try container.decodeIfPresent(SigningPosture.self, forKey: .posture) {
+            self.posture = posture
+        } else {
+            let enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+            let requireApproval = try container.decodeIfPresent(Bool.self, forKey: .requireExplicitApproval) ?? false
+            self.posture = SigningPosture.from(enabled: enabled, requireExplicitApproval: requireApproval)
+        }
+        domainRules = try container.decodeIfPresent([TypedDataDomainRule].self, forKey: .domainRules) ?? []
+        structRules = try container.decodeIfPresent([TypedDataStructRule].self, forKey: .structRules) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(posture, forKey: .posture)
+        try c.encode(posture.evaluatesRules, forKey: .enabled)
+        try c.encode(posture.requiresApprovalPopup, forKey: .requireExplicitApproval)
+        try c.encode(domainRules, forKey: .domainRules)
+        try c.encode(structRules, forKey: .structRules)
+    }
+}
+
+extension SigningPosture {
+    /// Map the legacy two-boolean model onto a posture. Used during decode
+    /// of old configs and by legacy initialisers.
+    static func from(enabled: Bool, requireExplicitApproval: Bool) -> SigningPosture {
+        if !enabled { return .requireApprovalWithoutRuleEvaluation }
+        return requireExplicitApproval
+            ? .enforceRulesAndRequireApproval
+            : .enforceRulesAndAutoSign
+    }
+}
+
+nonisolated struct TypedDataDomainRule: Codable, Sendable, Identifiable {
+    let id: String
+    var label: String?
+    var primaryType: String?
+    var name: String?
+    var version: String?
+    var chainId: Int?
+    var verifyingContract: String?
+
+    var displayDescription: String {
+        label ?? primaryType ?? name ?? "Domain Rule"
+    }
+}
+
+nonisolated struct TypedDataStructRule: Codable, Sendable, Identifiable {
+    let id: String
+    var label: String?
+    var primaryType: String
+    var matcherJSON: String
+
+    var displayDescription: String {
+        label ?? primaryType
+    }
+}
+
+nonisolated struct BundlerPreferences: Codable, Sendable {
+    var zeroDevProjectId: String?
+    var chainRPCs: [ChainRPCPreference]
+
+    static let `default` = BundlerPreferences(
+        zeroDevProjectId: nil,
+        chainRPCs: []
+    )
+}
+
+nonisolated struct ChainRPCPreference: Codable, Sendable, Identifiable {
+    var chainId: Int
+    var rpcURL: String
+
+    var id: String {
+        String(chainId)
+    }
+}
+
+// MARK: - Rate Limit Rule
+
+/// Time-windowed request counter.
+/// Example: maxRequests=10, windowSeconds=3600 → max 10 requests per hour.
+nonisolated struct RateLimitRule: Codable, Sendable, Identifiable {
+    let id: String
+    let maxRequests: Int
+    let windowSeconds: Int
+
+    var displayDescription: String {
+        let window = Self.formatWindow(windowSeconds)
+        return "\(maxRequests) requests per \(window)"
+    }
+
+    static func formatWindow(_ seconds: Int) -> String {
+        switch seconds {
+        case 60: return "minute"
+        case 3600: return "hour"
+        case 86400: return "day"
+        case 604800: return "week"
+        default:
+            if seconds < 3600 { return "\(seconds / 60) minutes" }
+            if seconds < 86400 { return "\(seconds / 3600) hours" }
+            return "\(seconds / 86400) days"
+        }
+    }
+}
+
+// MARK: - Spending Limit Rule
+
+/// Per-token spending allowance with optional time window reset.
+/// Example: token=.eth, allowance="1000000000000000000" (1 ETH), windowSeconds=86400 → 1 ETH per day.
+/// If windowSeconds is nil, the allowance is lifetime (never resets without master key).
+nonisolated struct SpendingLimitRule: Codable, Sendable, Identifiable {
+    let id: String
+    let token: TokenIdentifier
+    let allowance: String       // smallest unit (wei for ETH, 6 decimals for USDC)
+    let windowSeconds: Int?     // nil = lifetime, 86400 = daily reset
+    /// v9: optional per-target scope. When non-nil, this allowance only
+    /// applies to spends that send the token to this address. Multiple rules
+    /// can stack: a global cap (targetAddress=nil) plus a per-target cap.
+    /// The tightest applicable cap wins. Stored lower-cased.
+    let targetAddress: String?
+
+    var displayDescription: String {
+        let amount = formatAmount()
+        let window = windowSeconds.map { RateLimitRule.formatWindow($0) } ?? "lifetime"
+        if let target = targetAddress {
+            return "\(amount) \(token.displayName) per \(window) to \(target.prefix(10))…"
+        }
+        return "\(amount) \(token.displayName) per \(window)"
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        token: TokenIdentifier,
+        allowance: String,
+        windowSeconds: Int?,
+        targetAddress: String? = nil
+    ) {
+        self.id = id
+        self.token = token
+        self.allowance = allowance
+        self.windowSeconds = windowSeconds
+        if let target = targetAddress, !target.isEmpty {
+            self.targetAddress = target.lowercased()
+        } else {
+            self.targetAddress = nil
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        token = try c.decode(TokenIdentifier.self, forKey: .token)
+        allowance = try c.decode(String.self, forKey: .allowance)
+        windowSeconds = try c.decodeIfPresent(Int.self, forKey: .windowSeconds)
+        // v9 migration: legacy rules have no targetAddress key — treat as global.
+        if let raw = try c.decodeIfPresent(String.self, forKey: .targetAddress), !raw.isEmpty {
+            targetAddress = raw.lowercased()
+        } else {
+            targetAddress = nil
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, token, allowance, windowSeconds, targetAddress
+    }
+
+    private func formatAmount() -> String {
+        guard let raw = UInt128(allowance) else { return allowance }
+        let decimals = token.decimals
+        let divisor = pow(10.0, Double(decimals))
+        let display = Double(raw) / divisor
+        if display == display.rounded() {
+            return String(format: "%.0f", display)
+        }
+        return String(format: "%.4f", display)
+    }
+}
+
+// MARK: - Auth Policy
+
+nonisolated enum AuthPolicy: String, Codable, CaseIterable, Sendable {
+    case open
+    case passcode
+    case biometric
+    case biometricOrPasscode
+
+    var displayName: String {
+        switch self {
+        case .open: return "Open (No Auth)"
+        case .passcode: return "Passcode Only"
+        case .biometric: return "Biometric Only"
+        case .biometricOrPasscode: return "Biometric or Passcode"
+        }
+    }
+
+    var laPolicy: LAPolicy? {
+        switch self {
+        case .open: return nil
+        case .passcode: return .deviceOwnerAuthentication
+        case .biometric: return .deviceOwnerAuthenticationWithBiometrics
+        case .biometricOrPasscode: return .deviceOwnerAuthentication
+        }
+    }
+
+    var accessControlFlags: SecAccessControlCreateFlags {
+        switch self {
+        case .open: return .privateKeyUsage
+        case .passcode: return [.privateKeyUsage, .devicePasscode]
+        case .biometric: return [.privateKeyUsage, .biometryCurrentSet]
+        case .biometricOrPasscode: return [.privateKeyUsage, .userPresence]
+        }
+    }
+}
+
+// MARK: - Audit Redaction
+
+/// Controls how sensitive fields are redacted in the on-disk audit log.
+nonisolated enum AuditRedactionLevel: String, Codable, CaseIterable, Sendable {
+    /// No redaction — full fidelity (default).
+    case none
+    /// Payloads (raw message text, typed-data JSON, UserOp JSON) are removed.
+    /// Detail strings containing addresses or amounts are replaced with "[REDACTED]".
+    case redactPayloads
+    /// Payloads, all detail strings, and the digest hex are replaced with "[REDACTED]".
+    case redactAll
+}
+
+// MARK: - Address book entry (v9)
+
+/// A user-defined label for an address. Surfaces in approvals, audit, and
+/// settings. Pure metadata — never affects rule decisions on its own.
+nonisolated struct AddressBookEntry: Codable, Sendable, Identifiable, Hashable {
+    let id: String
+    var address: String
+    var label: String
+    /// Optional chain scope. Nil means the label applies on every chain.
+    var chainId: Int?
+    var note: String?
+
+    init(id: String = UUID().uuidString, address: String, label: String, chainId: Int? = nil, note: String? = nil) {
+        self.id = id
+        self.address = address
+        self.label = label
+        self.chainId = chainId
+        self.note = note
+    }
+}
+
+// MARK: - Rule template (v9)
+
+/// First-class reusable starting points for new clients. Owners can pick a
+/// template at pairing time, or apply one to an existing profile.
+nonisolated struct RuleTemplate: Codable, Sendable, Identifiable {
+    let id: String
+    var label: String
+    var hint: String
+    var rules: RuleConfig
+    var authPolicy: AuthPolicy
+    /// Built-in templates use stable string ids ("conservative", "readonly", "treasury").
+    /// User-created templates use UUIDs.
+    var isBuiltin: Bool
+
+    static let conservative = RuleTemplate(
+        id: "conservative",
+        label: "Conservative DeFi",
+        hint: "Allow-list of audited targets, modest spending caps, biometric on review.",
+        rules: RuleConfig(
+            enabled: true,
+            requireExplicitApproval: false,
+            allowedHours: nil,
+            allowedChains: [8453, 1],
+            allowedTargets: nil,
+            allowedClients: nil,
+            rateLimits: [
+                RateLimitRule(id: UUID().uuidString, maxRequests: 60, windowSeconds: 3600),
+            ],
+            spendingLimits: [
+                SpendingLimitRule(token: .usdc, allowance: "50000000", windowSeconds: 86400), // 50 USDC/day
+                SpendingLimitRule(token: .eth, allowance: "20000000000000000", windowSeconds: 86400), // 0.02 ETH/day
+            ]
+        ),
+        authPolicy: .biometric,
+        isBuiltin: true
+    )
+    static let readonly = RuleTemplate(
+        id: "readonly",
+        label: "Read-only signer",
+        hint: "EIP-712 typed data only. No transfers. Useful for session keys + auth flows.",
+        rules: RuleConfig(
+            enabled: true,
+            requireExplicitApproval: false,
+            allowedHours: nil,
+            allowedChains: nil,
+            allowedTargets: nil,
+            allowedClients: nil,
+            rateLimits: [
+                RateLimitRule(id: UUID().uuidString, maxRequests: 200, windowSeconds: 3600),
+            ],
+            // Zero-allowance spend rules block all transfers, leaving only
+            // EIP-712 / message signing usable.
+            spendingLimits: [
+                SpendingLimitRule(token: .usdc, allowance: "0", windowSeconds: 86400),
+                SpendingLimitRule(token: .eth, allowance: "0", windowSeconds: 86400),
+            ]
+        ),
+        authPolicy: .open,
+        isBuiltin: true
+    )
+    static let treasury = RuleTemplate(
+        id: "treasury",
+        label: "Treasury custodian",
+        hint: "Single counterparty, high cap, every signature requires owner approval.",
+        rules: RuleConfig(
+            enabled: true,
+            requireExplicitApproval: true,
+            allowedHours: nil,
+            allowedChains: [8453, 1],
+            allowedTargets: nil,
+            allowedClients: nil,
+            rateLimits: [
+                RateLimitRule(id: UUID().uuidString, maxRequests: 10, windowSeconds: 3600),
+            ],
+            spendingLimits: [
+                SpendingLimitRule(token: .usdc, allowance: "10000000000", windowSeconds: 86400), // 10 000 USDC/day
+                SpendingLimitRule(token: .eth, allowance: "5000000000000000000", windowSeconds: 86400), // 5 ETH/day
+            ]
+        ),
+        authPolicy: .biometricOrPasscode,
+        isBuiltin: true
+    )
+
+    static let builtins: [RuleTemplate] = [.conservative, .readonly, .treasury]
+}
+
+// MARK: - High-value rule (v9)
+
+/// Optional friction layer for high-value transfers. When the USD-equivalent of a
+/// userOp's spend exceeds `thresholdUsd`, the approval popup requires the owner
+/// to type `confirmationPhrase` before the Approve button enables.
+///
+/// Backed by the high-value typed-confirm UI in SigningRequestView; rule engine
+/// integration lands when a USD price oracle is wired up.
+nonisolated struct HighValueRule: Codable, Sendable, Hashable {
+    var enabled: Bool
+    var thresholdUsd: Double
+    var confirmationPhrase: String
+
+    static let `default` = HighValueRule(
+        enabled: false,
+        thresholdUsd: 10_000,
+        confirmationPhrase: "TRANSFER"
+    )
+}
+
+// MARK: - Pause/Lockdown state (v9)
+
+/// Soft-lockdown flag. When `paused` is true, the rule engine denies every
+/// signing request until the owner resumes. `lockedDown` upgrades the state:
+/// it adds a banner enumerating residual on-chain attack surface (validators
+/// not yet uninstalled, sessions still valid, etc.).
+nonisolated struct PauseState: Codable, Sendable, Hashable {
+    var paused: Bool
+    var lockedDown: Bool
+    var pausedAt: Date?
+    var reason: String?
+
+    static let `default` = PauseState(paused: false, lockedDown: false, pausedAt: nil, reason: nil)
+}
+
+nonisolated struct BastionConfig: Codable, Sendable {
+    var version: Int = 9
+    var authPolicy: AuthPolicy
+    var rules: RuleConfig
+    var bundlerPreferences: BundlerPreferences
+    var clientProfiles: [ClientProfile]
+    var walletGroups: [WalletGroup]
+    var auditRedactionLevel: AuditRedactionLevel
+
+    /// User-defined labels for addresses. v9.
+    var addressBook: [AddressBookEntry]
+    /// User-defined and built-in rule templates. v9.
+    var ruleTemplates: [RuleTemplate]
+    /// Owner-controlled high-value friction. v9.
+    var highValue: HighValueRule
+    /// Pause/lockdown state. v9.
+    var pauseState: PauseState
+
+    // M-04: Default to biometricOrPasscode for production safety.
+    // Prevents new installs from running with no auth.
+    static let `default` = BastionConfig(
+        authPolicy: .biometricOrPasscode,
+        rules: .default,
+        bundlerPreferences: .default,
+        clientProfiles: [],
+        walletGroups: [],
+        auditRedactionLevel: .none,
+        addressBook: [],
+        ruleTemplates: RuleTemplate.builtins,
+        highValue: .default,
+        pauseState: .default
+    )
+
+    init(
+        version: Int = 9,
+        authPolicy: AuthPolicy,
+        rules: RuleConfig,
+        bundlerPreferences: BundlerPreferences = .default,
+        clientProfiles: [ClientProfile] = [],
+        walletGroups: [WalletGroup] = [],
+        auditRedactionLevel: AuditRedactionLevel = .none,
+        addressBook: [AddressBookEntry] = [],
+        ruleTemplates: [RuleTemplate] = RuleTemplate.builtins,
+        highValue: HighValueRule = .default,
+        pauseState: PauseState = .default
+    ) {
+        self.version = version
+        self.authPolicy = authPolicy
+        self.rules = rules
+        self.bundlerPreferences = bundlerPreferences
+        self.clientProfiles = clientProfiles
+        self.walletGroups = walletGroups
+        self.auditRedactionLevel = auditRedactionLevel
+        self.addressBook = addressBook
+        self.ruleTemplates = ruleTemplates
+        self.highValue = highValue
+        self.pauseState = pauseState
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case authPolicy
+        case rules
+        case bundlerPreferences
+        case clientProfiles
+        case walletGroups
+        case auditRedactionLevel
+        case addressBook
+        case ruleTemplates
+        case highValue
+        case pauseState
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 4
+        // H-01: Default to biometricOrPasscode when the key is missing from stored JSON.
+        authPolicy = try container.decodeIfPresent(AuthPolicy.self, forKey: .authPolicy) ?? .biometricOrPasscode
+        rules = try container.decodeIfPresent(RuleConfig.self, forKey: .rules) ?? .default
+        bundlerPreferences = try container.decodeIfPresent(BundlerPreferences.self, forKey: .bundlerPreferences) ?? .default
+        clientProfiles = try container.decodeIfPresent([ClientProfile].self, forKey: .clientProfiles) ?? []
+        // v7 → v8 migration: older configs simply have no walletGroups.
+        walletGroups = try container.decodeIfPresent([WalletGroup].self, forKey: .walletGroups) ?? []
+        auditRedactionLevel = try container.decodeIfPresent(AuditRedactionLevel.self, forKey: .auditRedactionLevel) ?? .none
+        // v8 → v9 migration: address book / rule templates / high-value / pause state default to empty.
+        addressBook = try container.decodeIfPresent([AddressBookEntry].self, forKey: .addressBook) ?? []
+        ruleTemplates = try container.decodeIfPresent([RuleTemplate].self, forKey: .ruleTemplates) ?? RuleTemplate.builtins
+        highValue = try container.decodeIfPresent(HighValueRule.self, forKey: .highValue) ?? .default
+        pauseState = try container.decodeIfPresent(PauseState.self, forKey: .pauseState) ?? .default
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(authPolicy, forKey: .authPolicy)
+        try container.encode(rules, forKey: .rules)
+        try container.encode(bundlerPreferences, forKey: .bundlerPreferences)
+        try container.encode(clientProfiles, forKey: .clientProfiles)
+        try container.encode(walletGroups, forKey: .walletGroups)
+        try container.encode(auditRedactionLevel, forKey: .auditRedactionLevel)
+        try container.encode(addressBook, forKey: .addressBook)
+        try container.encode(ruleTemplates, forKey: .ruleTemplates)
+        try container.encode(highValue, forKey: .highValue)
+        try container.encode(pauseState, forKey: .pauseState)
+    }
+
+    /// Looks up the user-assigned label for an address. Returns nil when no
+    /// entry matches (possibly scoped to a specific chain).
+    func label(for address: String, chainId: Int? = nil) -> String? {
+        let normalized = address.lowercased()
+        for entry in addressBook {
+            guard entry.address.lowercased() == normalized else { continue }
+            if let entryChain = entry.chainId, let requestChain = chainId, entryChain != requestChain { continue }
+            return entry.label
+        }
+        return nil
+    }
+}
+
+// MARK: - Sign Request (internal)
+
+nonisolated struct SignRequest: Sendable {
+    let operation: SigningOperation
+    let requestID: String
+    let timestamp: Date
+    let clientBundleId: String?  // bundle ID of the XPC client, nil if unknown
+    let userOperationSubmission: UserOperationSubmissionRequest?
+    /// v9: optional human-readable reason supplied by the agent. Surfaced in
+    /// approval popups and audit history. Capped to 240 characters at ingestion.
+    let intent: String?
+
+    init(
+        operation: SigningOperation,
+        requestID: String,
+        timestamp: Date,
+        clientBundleId: String?,
+        userOperationSubmission: UserOperationSubmissionRequest? = nil,
+        intent: String? = nil
+    ) {
+        self.operation = operation
+        self.requestID = requestID
+        self.timestamp = timestamp
+        self.clientBundleId = clientBundleId
+        self.userOperationSubmission = userOperationSubmission
+        if let intent {
+            let trimmed = intent.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.intent = trimmed.isEmpty ? nil : String(trimmed.prefix(240))
+        } else {
+            self.intent = nil
+        }
+    }
+
+    /// The 32-byte hash to be signed by the Secure Enclave.
+    /// Each operation type produces its own Ethereum-standard hash.
+    var data: Data {
+        switch operation {
+        case .message(let text):
+            if text.hasPrefix("0x"), let rawData = Data(hexString: text) {
+                return EthHashing.personalMessageHash(data: rawData)
+            }
+            return EthHashing.personalMessageHash(text)
+        case .rawBytes(let bytes):
+            // Signed directly — no Ethereum prefix applied.
+            return bytes
+        case .typedData(let typed):
+            return EthHashing.typedDataHash(typed)
+        case .userOperation(let op):
+            return EthHashing.userOperationHash(op)
+        }
+    }
+
+    var requiresUserOperationSubmission: Bool {
+        userOperationSubmission != nil
+    }
+}
+
+nonisolated enum ApprovalMode: Sendable {
+    case policyReview
+    case ruleOverride([String])
+}
+
+nonisolated struct ApprovalRequest: Sendable {
+    let request: SignRequest
+    let mode: ApprovalMode
+    let clientContext: ClientSigningContext
+    let preflightResult: PreflightResult?
+    let typedConfirmationPhrase: String?
+
+    init(
+        request: SignRequest,
+        mode: ApprovalMode,
+        clientContext: ClientSigningContext,
+        preflightResult: PreflightResult? = nil,
+        typedConfirmationPhrase: String? = nil
+    ) {
+        self.request = request
+        self.mode = mode
+        self.clientContext = clientContext
+        self.preflightResult = preflightResult
+        self.typedConfirmationPhrase = typedConfirmationPhrase
+    }
+}
+
+nonisolated struct ClientSigningContext: Sendable {
+    let bundleId: String?
+    let profileId: String?
+    let profileLabel: String?
+    let authPolicy: AuthPolicy
+    let keyTag: String
+    let accountAddress: String?
+    let rules: RuleConfig
+
+    var displayName: String {
+        profileLabel ?? bundleId ?? "Unknown client"
+    }
+
+    var shortBundleName: String {
+        guard let bundleId, !bundleId.isEmpty else {
+            return "Unknown"
+        }
+        return bundleId.split(separator: ".").last.map(String.init) ?? bundleId
+    }
+}
+
+nonisolated extension Data {
+    var hex: String { map { String(format: "%02x", $0) }.joined() }
+
+    init?(hexString: String) {
+        var hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
+        if hex.count.isMultiple(of: 2) == false {
+            hex = "0" + hex
+        }
+        let len = hex.count / 2
+        var data = Data(capacity: len)
+        var index = hex.startIndex
+        for _ in 0..<len {
+            let nextIndex = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<nextIndex], radix: 16) else { return nil }
+            data.append(byte)
+            index = nextIndex
+        }
+        self = data
+    }
+}

@@ -1,0 +1,152 @@
+name: Signed Release
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag/name used for GitHub download URLs, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  signed-release:
+    name: Build, notarize, and verify
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      BASTION_RELEASE_OUTPUT_DIR: ${{ github.workspace }}/dist/release
+      BASTION_RELEASE_DERIVED_DATA_PATH: ${{ runner.temp }}/bastion-release-derived-data
+      BASTION_NOTARY_PROFILE: bastion-ci-notary
+      BASTION_EXPECTED_TEAM_ID: ${{ vars.BASTION_EXPECTED_TEAM_ID || '926A27BQ7W' }}
+      BASTION_RELEASE_DOWNLOAD_BASE_URL: ${{ vars.BASTION_RELEASE_DOWNLOAD_BASE_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode toolchain
+        run: |
+          xcodebuild -version
+          xcrun --find notarytool
+
+      - name: Check signing and notarization secrets
+        shell: bash
+        env:
+          BASTION_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.BASTION_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          BASTION_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.BASTION_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          BASTION_NOTARY_APPLE_ID: ${{ secrets.BASTION_NOTARY_APPLE_ID }}
+          BASTION_NOTARY_TEAM_ID: ${{ secrets.BASTION_NOTARY_TEAM_ID }}
+          BASTION_NOTARY_PASSWORD: ${{ secrets.BASTION_NOTARY_PASSWORD }}
+        run: |
+          missing=0
+          for name in \
+            BASTION_DEVELOPER_ID_APPLICATION_P12_BASE64 \
+            BASTION_DEVELOPER_ID_APPLICATION_P12_PASSWORD \
+            BASTION_NOTARY_APPLE_ID \
+            BASTION_NOTARY_TEAM_ID \
+            BASTION_NOTARY_PASSWORD
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required secret: ${name}"
+              missing=1
+            fi
+          done
+          exit "${missing}"
+
+      - name: Import Developer ID signing assets
+        shell: bash
+        env:
+          BASTION_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.BASTION_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          BASTION_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.BASTION_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          BASTION_MAIN_PROVISIONING_PROFILE_BASE64: ${{ secrets.BASTION_MAIN_PROVISIONING_PROFILE_BASE64 }}
+          BASTION_HELPER_PROVISIONING_PROFILE_BASE64: ${{ secrets.BASTION_HELPER_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          cert_path="${RUNNER_TEMP}/bastion-developer-id.p12"
+          keychain_path="${RUNNER_TEMP}/bastion-release.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          printf '%s' "${BASTION_DEVELOPER_ID_APPLICATION_P12_BASE64}" | /usr/bin/base64 -D > "${cert_path}"
+
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          current_keychains="$(security list-keychains -d user | tr -d '"')"
+          security list-keychains -d user -s "${keychain_path}" ${current_keychains}
+          security default-keychain -d user -s "${keychain_path}"
+          security import "${cert_path}" \
+            -k "${keychain_path}" \
+            -P "${BASTION_DEVELOPER_ID_APPLICATION_P12_PASSWORD}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
+          security find-identity -v -p codesigning "${keychain_path}"
+
+          profiles_dir="${HOME}/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "${profiles_dir}"
+          if [ -n "${BASTION_MAIN_PROVISIONING_PROFILE_BASE64}" ]; then
+            printf '%s' "${BASTION_MAIN_PROVISIONING_PROFILE_BASE64}" | /usr/bin/base64 -D > "${profiles_dir}/bastion-main.provisionprofile"
+          fi
+          if [ -n "${BASTION_HELPER_PROVISIONING_PROFILE_BASE64}" ]; then
+            printf '%s' "${BASTION_HELPER_PROVISIONING_PROFILE_BASE64}" | /usr/bin/base64 -D > "${profiles_dir}/bastion-helper.provisionprofile"
+          fi
+
+          echo "BASTION_RELEASE_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
+
+      - name: Store notarization credentials
+        shell: bash
+        env:
+          BASTION_NOTARY_APPLE_ID: ${{ secrets.BASTION_NOTARY_APPLE_ID }}
+          BASTION_NOTARY_TEAM_ID: ${{ secrets.BASTION_NOTARY_TEAM_ID }}
+          BASTION_NOTARY_PASSWORD: ${{ secrets.BASTION_NOTARY_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "${BASTION_NOTARY_PROFILE}" \
+            --apple-id "${BASTION_NOTARY_APPLE_ID}" \
+            --team-id "${BASTION_NOTARY_TEAM_ID}" \
+            --password "${BASTION_NOTARY_PASSWORD}" \
+            --keychain "${BASTION_RELEASE_KEYCHAIN}"
+
+      - name: Build signed release artifacts
+        shell: bash
+        env:
+          BASTION_RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: ./scripts/release-ci.sh
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bastion-release-${{ github.run_number }}
+          path: |
+            dist/release/Bastion.app
+            dist/release/*.zip
+            dist/release/*.dmg
+            dist/release/*.json
+          if-no-files-found: error
+
+      - name: Publish GitHub release artifacts
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes "Automated Bastion signed release artifacts."
+          gh release upload "${GITHUB_REF_NAME}" \
+            "${BASTION_RELEASE_OUTPUT_DIR}"/*.zip \
+            "${BASTION_RELEASE_OUTPUT_DIR}"/*.dmg \
+            "${BASTION_RELEASE_OUTPUT_DIR}"/*.json \
+            --clobber
+
+      - name: Delete temporary keychain
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${BASTION_RELEASE_KEYCHAIN:-}" ]; then
+            security delete-keychain "${BASTION_RELEASE_KEYCHAIN}" || true
+          fi

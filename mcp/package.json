@@ -1,0 +1,33 @@
+{
+  "name": "@bastion/mcp",
+  "version": "0.1.0",
+  "description": "Bastion MCP server and REST API for AI agent signing",
+  "module": "src/mcp-server.ts",
+  "type": "module",
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "mcp": "bun run src/mcp-server.ts",
+    "rest": "bun run src/rest-server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14"
+  },
+  "peerDependencies": {
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "hono": "4.12.22",
+    "zod": "4.4.3"
+  },
+  "overrides": {
+    "@hono/node-server": "1.19.13",
+    "fast-uri": "3.1.2",
+    "hono": "4.12.22",
+    "ip-address": "10.2.0",
+    "path-to-regexp": "8.4.2",
+    "qs": "6.15.2"
+  }
+}
