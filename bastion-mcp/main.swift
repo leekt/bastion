@@ -3,6 +3,15 @@ import Foundation
 
 private let maxReceiptWaitSeconds = 120
 private let maxBodyBytes = 1 * 1024 * 1024
+// DO-01 (audit 2026-06-taek): bound the header section so an endless header
+// stream (no `\r\n\r\n`) cannot grow the buffer to OOM before the body cap
+// can apply. Also bounds the cost of the marker scan.
+private let maxHeaderBytes = 64 * 1024
+// Per-connection read/idle timeout (seconds) — defeats slowloris.
+private let socketReadTimeoutSeconds = 15
+// Ceiling on concurrently-handled REST connections; excess connections wait
+// for a slot instead of each pinning a libdispatch worker indefinitely.
+private let maxConcurrentRESTConnections = 64
 private let maxMessageBytes = 64 * 1024
 private let maxJSONBytes = 512 * 1024
 private let maxDataChars = 256 * 1024
@@ -351,16 +360,83 @@ private func validUIntString(_ value: String) -> Bool {
     value.range(of: #"^([0-9]+|0x[0-9a-fA-F]+)$"#, options: .regularExpression) != nil
 }
 
+// AC-01 / RE-01 / RP-01 (audit 2026-06-taek): a single normalization +
+// authorization choke point for every profile-scoped op on BOTH transports.
+//
+// Background: the XPC service authorizes a bridge-supplied `agentProfileId`
+// only by its existence in the machine-global config, so a bridge that can
+// name any paired UUID can read/sign for any tenant. The bridge therefore
+// must scope itself: each bridge process declares the profile id(s) it is
+// authorized for via BASTION_AGENT_PROFILE_ID (comma-separated for a
+// multi-profile bridge) and refuses to proxy anything outside that set. This
+// also normalizes the id identically on REST and MCP (RP-01 parity drift),
+// rejecting whitespace-only / overlong / control-char header values before
+// they cross XPC.
+
+/// Trim + shape-check a profile id. Returns nil for empty/overlong/odd-charset
+/// input. UUIDs (the app's profile-id format) satisfy `[A-Za-z0-9-]{1,64}`.
+private func normalizedProfileId(_ raw: String?) -> String? {
+    guard let raw else { return nil }
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.range(of: #"^[A-Za-z0-9-]{1,64}$"#, options: .regularExpression) != nil else {
+        return nil
+    }
+    return trimmed
+}
+
+/// The set of profile ids this bridge process is authorized to proxy, parsed
+/// from BASTION_AGENT_PROFILE_ID (comma-separated). Empty when unset.
+private func allowedAgentProfileIds() -> Set<String> {
+    guard let env = ProcessInfo.processInfo.environment["BASTION_AGENT_PROFILE_ID"] else {
+        return []
+    }
+    return Set(env.split(separator: ",").compactMap { normalizedProfileId(String($0)) })
+}
+
+/// Resolve + authorize the target profile for a profile-scoped op.
+/// - An explicitly requested id must normalize AND be in the bridge's
+///   authorized set.
+/// - With no explicit id, fall back to the configured profile only when the
+///   set is unambiguous (exactly one).
+private func authorizeProfileId(requested: String?) throws -> String {
+    let allowed = allowedAgentProfileIds()
+    let requestedTrimmed = requested?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if let requestedTrimmed, !requestedTrimmed.isEmpty {
+        guard let id = normalizedProfileId(requestedTrimmed) else {
+            throw BridgeError.input("agentProfileId must be 1-64 characters of [A-Za-z0-9-].")
+        }
+        guard !allowed.isEmpty else {
+            throw BridgeError.auth("This bridge has no BASTION_AGENT_PROFILE_ID configured, so it may not proxy agent profiles. Set BASTION_AGENT_PROFILE_ID to the paired profile id(s) this bridge is authorized for.")
+        }
+        guard allowed.contains(id) else {
+            throw BridgeError.auth("agentProfileId is not in this bridge's authorized set (BASTION_AGENT_PROFILE_ID).")
+        }
+        return id
+    }
+
+    if allowed.count == 1 {
+        return allowed.first!
+    }
+    if allowed.isEmpty {
+        throw BridgeError.input("agentProfileId is required. Pair the agent first, then set BASTION_AGENT_PROFILE_ID or pass agentProfileId.")
+    }
+    throw BridgeError.input("agentProfileId is required: this bridge is configured for multiple profiles; specify which one.")
+}
+
+/// Status may run unscoped (general service health). If a profile is named it
+/// must still be authorized; an unambiguous single-profile bridge scopes to it.
+private func authorizeOptionalProfileId(requested: String?) throws -> String? {
+    let requestedTrimmed = requested?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if requestedTrimmed == nil || requestedTrimmed!.isEmpty {
+        let allowed = allowedAgentProfileIds()
+        return allowed.count == 1 ? allowed.first : nil
+    }
+    return try authorizeProfileId(requested: requested)
+}
+
 private func validateAgentProfileId(_ args: [String: Any]) throws -> String {
-    if let explicit = try optionalString(args["agentProfileId"], "agentProfileId", max: 64),
-       !explicit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        return explicit
-    }
-    if let env = ProcessInfo.processInfo.environment["BASTION_AGENT_PROFILE_ID"],
-       !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        return env
-    }
-    throw BridgeError.input("agentProfileId is required. Pair the agent first, then set BASTION_AGENT_PROFILE_ID or pass agentProfileId.")
+    try authorizeProfileId(requested: args["agentProfileId"] as? String)
 }
 
 private func validatedActions(_ value: Any?) throws -> [[String: String]] {
@@ -551,8 +627,7 @@ private func callTool(name: String, args: [String: Any]) -> [String: Any] {
         case "bastion_poll_pairing":
             return toolResult(try xpc.pollPairing(requestId: requiredString(args["requestId"], "requestId", max: 64)))
         case "bastion_status":
-            let profile = try optionalString(args["agentProfileId"], "agentProfileId", max: 64)
-                ?? ProcessInfo.processInfo.environment["BASTION_AGENT_PROFILE_ID"]
+            let profile = try authorizeOptionalProfileId(requested: args["agentProfileId"] as? String)
             return toolResult(try xpc.status(agentProfileId: profile))
         case "bastion_get_account":
             return toolResult(try xpc.account(agentProfileId: validateAgentProfileId(args)))
@@ -824,29 +899,46 @@ private func parseHTTPRequest(_ data: Data) throws -> HTTPRequest {
 }
 
 private func readHTTPRequest(fd: Int32) throws -> Data {
+    let marker = Data("\r\n\r\n".utf8)
     var buffer = Data()
     var temp = [UInt8](repeating: 0, count: 8192)
     var contentLength: Int?
+    var headerEnd: Int?          // index just past the `\r\n\r\n` once seen
+    var scanFrom = 0             // incremental scan cursor (avoids O(n^2) rescans)
+
     while true {
         let count = recv(fd, &temp, temp.count, 0)
+        // count == 0 → peer closed; count < 0 → error or SO_RCVTIMEO expiry.
         if count <= 0 { break }
         buffer.append(temp, count: count)
-        if contentLength == nil,
-           let marker = "\r\n\r\n".data(using: .utf8),
-           let range = buffer.range(of: marker),
-           let head = String(data: buffer[..<range.lowerBound], encoding: .utf8) {
-            for line in head.components(separatedBy: "\r\n").dropFirst() {
-                if line.lowercased().hasPrefix("content-length:") {
-                    contentLength = Int(line.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "0")
-                }
+
+        if headerEnd == nil {
+            // DO-01: cap the header section before the terminator arrives.
+            if buffer.count > maxHeaderBytes {
+                throw BridgeError.payloadTooLarge("request headers too large")
             }
-            if let contentLength, contentLength > maxBodyBytes {
-                throw BridgeError.payloadTooLarge("request body too large")
+            // Only scan the new tail (with a 3-byte overlap so a marker split
+            // across two recv chunks is still found).
+            let searchStart = max(0, scanFrom - (marker.count - 1))
+            if let range = buffer.range(of: marker, in: searchStart..<buffer.count) {
+                headerEnd = range.upperBound
+                if let head = String(data: buffer[..<range.lowerBound], encoding: .utf8) {
+                    for line in head.components(separatedBy: "\r\n").dropFirst() {
+                        if line.lowercased().hasPrefix("content-length:") {
+                            contentLength = Int(line.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "0")
+                        }
+                    }
+                }
+                if let contentLength, contentLength > maxBodyBytes {
+                    throw BridgeError.payloadTooLarge("request body too large")
+                }
+            } else {
+                scanFrom = buffer.count
             }
         }
-        if let marker = "\r\n\r\n".data(using: .utf8),
-           let range = buffer.range(of: marker) {
-            let expected = range.upperBound + (contentLength ?? 0)
+
+        if let headerEnd {
+            let expected = headerEnd + (contentLength ?? 0)
             if buffer.count >= expected { break }
         }
     }
@@ -872,10 +964,10 @@ private func responseRawJSON(_ status: Int, _ body: Data) -> Data {
 }
 
 private func authorizedAgentProfileId(_ req: HTTPRequest, args: [String: Any] = [:]) throws -> String {
-    if let header = req.headers["x-bastion-agent-profile"], !header.isEmpty {
-        return header
-    }
-    return try validateAgentProfileId(args)
+    // RP-01: normalize + authorize the header through the SAME path as MCP,
+    // instead of forwarding the raw header verbatim across XPC.
+    let requested = req.headers["x-bastion-agent-profile"] ?? (args["agentProfileId"] as? String)
+    return try authorizeProfileId(requested: requested)
 }
 
 private func routeREST(_ req: HTTPRequest) throws -> Data {
@@ -900,7 +992,7 @@ private func routeREST(_ req: HTTPRequest) throws -> Data {
     case ("GET", ["health"]):
         return responseJSON(200, ["status": "ok"])
     case ("GET", ["status"]):
-        return responseRawJSON(200, try xpc.status(agentProfileId: req.headers["x-bastion-agent-profile"]))
+        return responseRawJSON(200, try xpc.status(agentProfileId: authorizeOptionalProfileId(requested: req.headers["x-bastion-agent-profile"])))
     case ("GET", ["account"]):
         return responseRawJSON(200, try xpc.account(agentProfileId: authorizedAgentProfileId(req)))
     case ("GET", ["rules"]):
@@ -993,8 +1085,18 @@ private func routeREST(_ req: HTTPRequest) throws -> Data {
     throw BridgeError.notFound
 }
 
+private func setSocketReadWriteTimeout(_ fd: Int32, seconds: Int) {
+    var tv = timeval(tv_sec: seconds, tv_usec: 0)
+    let len = socklen_t(MemoryLayout<timeval>.size)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, len)
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, len)
+}
+
 private func handleClient(fd: Int32) {
     defer { close(fd) }
+    // DO-01: a slow/silent client can no longer pin this worker forever —
+    // recv/send return after the timeout, ending the handler.
+    setSocketReadWriteTimeout(fd, seconds: socketReadTimeoutSeconds)
     do {
         let data = try readHTTPRequest(fd: fd)
         let request = try parseHTTPRequest(data)
@@ -1033,10 +1135,17 @@ private func runREST() throws -> Never {
     guard bindResult == 0 else { throw BridgeError.xpc("bind failed on 127.0.0.1:\(port)") }
     guard listen(fd, 64) == 0 else { throw BridgeError.xpc("listen failed") }
     fputs("Bastion REST API starting on http://127.0.0.1:\(port)\n", stderr)
+    // DO-01: bound concurrent handlers so a flood of (even timed-out)
+    // connections cannot exhaust the libdispatch worker pool. Combined with the
+    // per-connection read timeout this caps worst-case occupancy.
+    let admission = DispatchSemaphore(value: maxConcurrentRESTConnections)
+    let workQueue = DispatchQueue(label: "com.bastion.mcp.rest", attributes: .concurrent)
     while true {
         let client = accept(fd, nil, nil)
         if client >= 0 {
-            DispatchQueue.global(qos: .userInitiated).async {
+            admission.wait()
+            workQueue.async {
+                defer { admission.signal() }
                 handleClient(fd: client)
             }
         }
