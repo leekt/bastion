@@ -198,6 +198,23 @@ async function requireAccount() {
   return acct.accountAddress;
 }
 
+// ERC-1271 verification needs deployed code at the account, and Permit2 does NOT
+// support ERC-6492 (counterfactual) signatures. So a smart-account signature is
+// only verifiable once the account is deployed. eth_sendTransaction deploys it
+// (initCode on first UserOp); until then, refuse 1271 signing with a clear error.
+async function assertDeployed(account, chainId) {
+  const code = await rpcPassthrough("eth_getCode", [account, "latest"], chainId);
+  if (!code || code === "0x") {
+    const err = new Error(
+      `Smart account ${account} is not deployed on chain ${chainId}. Send a transaction first ` +
+      `(the first UserOp deploys the account) before requesting an on-chain-verifiable signature. ` +
+      `Permit2 does not support ERC-6492 counterfactual signatures.`
+    );
+    err.code = 4100;
+    throw err;
+  }
+}
+
 // Handle one EIP-1193 request. Returns the JSON-RPC `result`.
 async function handleRpc(method, params) {
   switch (method) {
@@ -220,23 +237,26 @@ async function handleRpc(method, params) {
     }
 
     case "personal_sign": {
-      // params: [message, address]  (M2: wrap as Kernel EIP-1271 signature)
-      await requireAccount();
+      // params: [message, address]. The app signs the Kernel v3.3-wrapped digest
+      // (bound to account + active chain); we assemble the root 1271 envelope.
+      const acct = await requireAccount();
+      await assertDeployed(acct, config.chainId);
       const message = hexToUtf8(params?.[0]);
-      const r = await mcp.callTool("bastion_sign_message", {
-        message, agentProfileId: config.profileId,
+      const sig = await mcp.callTool("bastion_sign_message", {
+        message, chainId: config.chainId, agentProfileId: config.profileId,
       });
-      return normalizeSig(r);
+      return kernel1271Envelope(sig);
     }
 
     case "eth_signTypedData_v4": {
-      // params: [address, typedDataJSON]  (M2: EIP-1271 wrap)
-      await requireAccount();
+      // params: [address, typedDataJSON] (Permit2 etc.)
+      const acct = await requireAccount();
+      await assertDeployed(acct, config.chainId);
       const typedData = typeof params?.[1] === "string" ? params[1] : JSON.stringify(params?.[1]);
-      const r = await mcp.callTool("bastion_sign_typed_data", {
-        typedData, agentProfileId: config.profileId,
+      const sig = await mcp.callTool("bastion_sign_typed_data", {
+        typedData, chainId: config.chainId, agentProfileId: config.profileId,
       });
-      return normalizeSig(r);
+      return kernel1271Envelope(sig);
     }
 
     case "eth_sendTransaction": {
@@ -266,13 +286,15 @@ function hexToUtf8(value) {
   return Buffer.from(value.slice(2), "hex").toString("utf8");
 }
 
-function normalizeSig(r) {
-  // bastion returns { r, s, ... } or { signature }. Return 0x-hex.
-  // NOTE (M2): this is the raw P-256 (r||s); dApps that verify via EIP-1271
-  // need the Kernel-wrapped form. Tracked in the plan.
-  if (r.signature) return r.signature.startsWith("0x") ? r.signature : "0x" + r.signature;
-  if (r.r && r.s) return "0x" + r.r.replace(/^0x/, "") + r.s.replace(/^0x/, "");
-  throw new Error("unexpected signature shape");
+function kernel1271Envelope(sig) {
+  // The app returns { r, s } over the Kernel-wrapped digest. Assemble the
+  // Kernel v3.3 root-validator ERC-1271 envelope: 0x00 || r(32) || s(32).
+  // Kernel reads the leading 0x00 as the ROOT validation type and the
+  // P256Validator abi.decodes the 64-byte (r, s).
+  const r = String(sig.r || "").replace(/^0x/, "").padStart(64, "0");
+  const s = String(sig.s || "").replace(/^0x/, "").padStart(64, "0");
+  if (r.length !== 64 || s.length !== 64) throw new Error("unexpected signature shape");
+  return "0x00" + r + s;
 }
 
 // ---------------------------------------------------- pairing
