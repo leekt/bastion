@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bastion — Agent Dashboard (example)</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="shield" aria-hidden="true">⬡</span>
+        <div>
+          <h1>Bastion Agent Dashboard</h1>
+          <p class="sub">Example app · talks to the local <code>bastion-mcp</code> REST bridge via a server-side proxy</p>
+        </div>
+      </div>
+      <button id="refresh" class="btn ghost">Refresh</button>
+    </header>
+
+    <main>
+      <section class="grid">
+        <article class="card">
+          <h2>Service</h2>
+          <dl id="status" class="kv"><dt>Loading…</dt><dd></dd></dl>
+        </article>
+
+        <article class="card">
+          <h2>Account</h2>
+          <dl id="account" class="kv"><dt>Loading…</dt><dd></dd></dl>
+        </article>
+
+        <article class="card">
+          <h2>State · quotas</h2>
+          <dl id="state" class="kv"><dt>Loading…</dt><dd></dd></dl>
+        </article>
+
+        <article class="card span2">
+          <h2>Rules</h2>
+          <pre id="rules" class="code">Loading…</pre>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Sign message</h2>
+          <p class="hint">EIP-191 personal sign. Subject to the profile's raw-message policy; may trigger the Bastion approval popup.</p>
+          <form id="signForm">
+            <label>Message
+              <input type="text" id="message" placeholder="Hello from the web app" required />
+            </label>
+            <button class="btn" type="submit">Sign</button>
+          </form>
+        </article>
+
+        <article class="card">
+          <h2>Send UserOperation</h2>
+          <p class="hint">Builds + signs an ERC-4337 UserOp. Spend/target/rate limits and approval apply.</p>
+          <form id="userOpForm">
+            <label>Target
+              <input type="text" id="target" placeholder="0x0000000000000000000000000000000000000001" required />
+            </label>
+            <div class="row">
+              <label>Value (wei)
+                <input type="text" id="value" value="0" />
+              </label>
+              <label>Chain ID
+                <input type="text" id="chainId" value="84532" />
+              </label>
+            </div>
+            <label>Calldata
+              <input type="text" id="data" value="0x" />
+            </label>
+            <label class="check">
+              <input type="checkbox" id="send" /> Submit on-chain (otherwise sign only)
+            </label>
+            <button class="btn" type="submit">Build &amp; sign</button>
+          </form>
+        </article>
+      </section>
+
+      <section class="card">
+        <div class="result-head">
+          <h2>Result</h2>
+          <button id="clearLog" class="btn ghost tiny">Clear</button>
+        </div>
+        <pre id="result" class="code result">Actions and responses appear here.</pre>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        The browser never sees <code>BASTION_API_TOKEN</code>. It is held by the Node proxy, which adds it
+        server-side (and omits <code>Origin</code>) when calling the Bastion bridge.
+      </p>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
