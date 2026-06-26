@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 // Audit history window — Bastion v2 redesign.
@@ -42,6 +43,16 @@ struct AuditHistoryView: View {
         }
         .frame(minWidth: 1020, minHeight: 660)
         .onAppear { reload() }
+        // Live-refresh when a new audit record is written (or when the reused
+        // window is re-shown). Without this the list only loaded once on first
+        // appear, so freshly signed transactions never showed up.
+        .onReceive(
+            NotificationCenter.default
+                .publisher(for: .bastionAuditHistoryDidChange)
+                .receive(on: RunLoop.main)
+        ) { _ in
+            reload()
+        }
     }
 
     private var tamperRecoveryBanner: some View {

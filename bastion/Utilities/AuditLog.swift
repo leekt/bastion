@@ -1,6 +1,12 @@
 import CommonCrypto
 import Foundation
 
+extension Notification.Name {
+    /// Posted after an audit record is written so an open Audit History view can
+    /// live-refresh instead of showing a stale snapshot from its first load.
+    static let bastionAuditHistoryDidChange = Notification.Name("BastionAuditHistoryDidChange")
+}
+
 nonisolated struct AuditClientSnapshot: Codable, Sendable {
     let bundleId: String?
     let displayName: String
@@ -778,12 +784,12 @@ nonisolated final class AuditLog: @unchecked Sendable {
     }
 
     nonisolated func record(_ event: AuditEvent) {
-        queue.sync {
+        let didWrite: Bool = queue.sync {
             let event = event.applyingRedaction(_redactionLevel)
             var records = loadRequestRecordsLocked()
             guard !_logTampered && !_chainBroken else {
                 NSLog("[AuditLog] refusing to append audit event while tamper or chain-break state is active")
-                return
+                return false
             }
             let key = event.request?.requestID ?? "legacy|\(event.id)"
 
@@ -794,6 +800,13 @@ nonisolated final class AuditLog: @unchecked Sendable {
             }
 
             saveRequestRecordsLocked(records)
+            return true
+        }
+        // Notify any open Audit History view so it live-refreshes. Without this
+        // the view only loaded on first `.onAppear`, so a sign recorded while
+        // the (reused) window was open never appeared.
+        if didWrite {
+            NotificationCenter.default.post(name: .bastionAuditHistoryDidChange, object: nil)
         }
     }
 

@@ -14,6 +14,10 @@ final class AuditHistoryWindowManager {
             NSApplication.shared.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
+            // The reused window keeps its SwiftUI view alive, so `.onAppear`
+            // won't fire again. Poke a refresh so re-opening picks up any
+            // records written since it was last shown.
+            NotificationCenter.default.post(name: .bastionAuditHistoryDidChange, object: nil)
             return
         }
 
