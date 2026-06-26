@@ -516,12 +516,27 @@ First-time setup uses the MCP tools `bastion_pair_agent` and
 `bastion_poll_pairing`; once the owner approves the pairing in Bastion, save the
 returned profile ID as `BASTION_AGENT_PROFILE_ID`.
 
-For local HTTP integration, start REST mode with an explicit bearer token:
+`BASTION_AGENT_PROFILE_ID` is the bridge's **authorization scope**, not just a
+default. A bridge process may only read or sign for the profile id(s) it lists
+here (comma-separate to authorize more than one). A request — over MCP
+`agentProfileId` or the REST `X-Bastion-Agent-Profile` header — that names a
+profile outside this set is rejected before it reaches the signing path. Run one
+bridge per agent so each agent's authority stays isolated.
+
+For local HTTP integration, start REST mode with an explicit bearer token and
+the authorized profile scope:
 
 ```bash
 TOKEN="$(openssl rand -hex 32)"
-BASTION_API_TOKEN="$TOKEN" /Applications/Bastion.app/Contents/MacOS/bastion-mcp rest
+BASTION_API_TOKEN="$TOKEN" \
+  BASTION_AGENT_PROFILE_ID="<paired-profile-id>" \
+  /Applications/Bastion.app/Contents/MacOS/bastion-mcp rest
 ```
+
+Note: the REST bearer token authenticates the *caller of the bridge*, while
+`BASTION_AGENT_PROFILE_ID` bounds *which profiles that bridge may act for*.
+Anyone holding the token can act as any profile in the bridge's scope, so keep
+the scope minimal (ideally one profile per bridge/token).
 
 Then call the loopback API:
 

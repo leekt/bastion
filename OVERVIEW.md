@@ -13,15 +13,25 @@
          ▲ XPC (team ID verified)
          │
 ┌──────────────────────────────────────────────────────┐
+│  TRUSTED-BRIDGE (distinguished XPC client)           │
+│  └── bastion-mcp (bundled, code-signed, path-bound)  │
+│      speaks MCP stdio + localhost REST → XPC         │
+└──────────────────────────────────────────────────────┘
+         ▲ XPC (team ID + bundled-path verified)
+         │
+┌──────────────────────────────────────────────────────┐
 │  UNTRUSTED                                           │
-│  ├── bastion-cli (no secrets, no Keychain)           │
-│  ├── MCP server / REST API (wraps CLI; same rules)   │
-│  ├── AI agents (subprocess + MCP + REST callers)     │
+│  ├── bastion-cli (dev/QA only; no secrets)           │
+│  ├── AI agents (MCP + REST callers)                  │
 │  └── Filesystem (~Library/App Support/)              │
 └──────────────────────────────────────────────────────┘
 ```
 
-Bastion.app is the **single trust boundary**. Everything outside it is untrusted by design — the MCP server and REST API are deliberately on the untrusted side because they hold no secrets and forward every request through the same rule engine the CLI uses.
+Bastion.app is the **single trust boundary** for secrets — the Secure Enclave and Keychain live only inside it.
+
+As of commit `390de47` the production integration path is the **bundled `bastion-mcp` bridge**, which talks to the XPC service *directly* (it no longer wraps `bastion-cli`). The bridge is a **distinguished, path-bound trusted XPC client**: the server only grants the bridge entitlement when the connecting binary is code-signed `com.bastion.mcp` *and* its executable is the bundled `Contents/MacOS/bastion-mcp` inside the host app. Once trusted, the bridge no longer connects *as* a specific agent — it **names** which paired profile to act as per request via an `agentProfileId` (MCP) / `X-Bastion-Agent-Profile` header (REST). The REST front door is additionally gated by a single shared `BASTION_API_TOKEN` (128-bit entropy floor), loopback-only bind, and `Origin`-present rejection.
+
+> **Security status (2026-06 audit, `audits/2026-06-taek/`).** This attribution model is a deliberate trade for a cleaner integration surface. The independent audit found it initially **regressed caller↔profile binding** (identity moved from a kernel-verified caller code signature to a bridge-supplied string), with two Criticals. Remediation landed: **AC-02** (PID→audit-token client auth) is fixed; **AC-01** is mitigated bridge-side — `BASTION_AGENT_PROFILE_ID` is now an enforced authorization allow-set, so a bridge can only act for the profile(s) it is configured for; **DO-01** socket hardening, **AC-03** (biometric-gated `listWalletGroups`) and **AC-04** (redacted support-bundle inventory) are fixed. **One residual remains:** a service-side per-connection capability binding for `agentProfileId` (defense-in-depth) is deferred — until it lands, run **one bridge per agent with a minimal `BASTION_AGENT_PROFILE_ID` scope**, and treat the REST `BASTION_API_TOKEN` as authority over exactly that scope. See `audits/2026-06-taek/findings.md`.
 
 ## Trust Assumptions
 
@@ -121,12 +131,16 @@ A wallet group is a single smart account shared between an owner and multiple sc
 
 ### Agent Integration Surface (MCP + REST)
 
-`mcp/` exposes Bastion to non-CLI callers through:
+The production bridge is the bundled Swift binary **`bastion-mcp`** (`bastion-mcp/main.swift`), shipped at `Bastion.app/Contents/MacOS/bastion-mcp`. It exposes Bastion to agents through:
 
-- **MCP stdio server** — for Claude Code / Cursor agents
-- **REST API on `127.0.0.1`** — bearer-token auth on every route (including `/health`), origin-header CSRF guard, 1 MiB body cap, all string/JSON/hex inputs length- and shape-validated, and startup refusal unless `BASTION_API_TOKEN` passes a 128-bit estimated entropy check
+- **MCP stdio server** (default) — for Claude Code / Cursor agents. The agent config points `command` at the bundled `bastion-mcp` and sets `BASTION_AGENT_PROFILE_ID` to the paired profile id. First-run pairing uses the `bastion_pair_agent` / `bastion_poll_pairing` tools; the owner approves in the menu bar.
+- **REST API on `127.0.0.1`** (`bastion-mcp rest`) — `Authorization: Bearer $BASTION_API_TOKEN` on every route, `Origin`-present rejection, 1 MiB body cap, regex-validated address/hex/UUID inputs, and startup refusal unless `BASTION_API_TOKEN` passes a 128-bit estimated-entropy check.
 
-Neither component holds Keychain access or Secure Enclave handles. They are thin shells over `bastion-cli`, which means every signing request still funnels through the same XPC + rule-engine path as a manual CLI call.
+The bridge holds **no** Keychain access or Secure Enclave handles — every signing request still funnels through the same XPC + rule-engine + approval path. The difference from the old design: it calls `com.bastion.xpc` *directly* via dedicated `bridge*` methods rather than spawning `bastion-cli`, and it carries the target agent identity as data (`agentProfileId`) rather than inheriting it from the caller's verified code signature.
+
+> The legacy TypeScript server under `mcp/` is retained as a development reference only; it is no longer the production path.
+
+**Open audit items on this surface** (see `audits/2026-06-taek/`): the `agentProfileId` is currently authorized by *existence in the global config*, not by binding to the calling bridge connection/token — so it does not yet isolate one agent's authority from another's (AC-01 Critical, RE-01 High, RP-01 Medium). XPC client auth is PID-based, not audit-token-based (AC-02 Critical). The hand-rolled REST socket parser lacks read timeouts and a pre-header byte cap (DO-01 High). `listWalletGroups` / `exportSupportBundle` read paths are gated more weakly than their siblings (AC-03 / AC-04 Medium). Remediation waves are tracked in `findings.md`.
 
 ### On-chain: P256Validator
 
@@ -142,6 +156,11 @@ ERC-7579 IValidator module for Kernel v3.3. Deployed at `0x9906AB44fF795883C5a72
 - [x] **Hardened Runtime** — prevents code injection (enabled)
 - [x] **XPC team ID verification** — rejects connections from other developers (enabled)
 - [x] **Calldata decoding** — spending limits validated against decoded calldata, not declared values
+- [x] **Audit-token XPC client auth** — AC-02 Critical; client identity now resolved from the peer `audit_token_t`, not the bare PID (defeats PID-reuse)
+- [x] **Scope `agentProfileId` to the bridge** — AC-01 Critical (bridge-side): `BASTION_AGENT_PROFILE_ID` is an enforced allow-set; a bridge rejects out-of-scope profiles before XPC. *(Residual: service-side per-connection capability binding deferred — see `audits/2026-06-taek/findings.md`.)*
+- [x] **REST socket hardening** — DO-01 High; read/idle timeouts + 64 KB pre-header cap + bounded concurrency
+- [x] **Read-gate symmetry** — AC-03/AC-04; `listWalletGroups` now biometric-gated, support-bundle profile-id inventory redacted
+- [ ] **Service-side `agentProfileId` capability binding** — AC-01 residual; bind each bridge connection to its authorized profile set via a pairing-derived capability
 - [ ] **Notarization** — Apple can remotely revoke compromised builds
 - [ ] **App Sandbox** — investigate compatibility with XPC Mach service
 
