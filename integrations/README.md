@@ -45,9 +45,13 @@ the active chain.
   `eth_getTransactionReceipt`, `eth_blockNumber`, … (RPC passthrough).
 - **First-run pairing** from the extension popup (approve a code in the Bastion
   menu bar).
-- **Wired (M2/M3, see Caveats):** `personal_sign`, `eth_signTypedData_v4`,
-  `eth_sendTransaction` route through to Bastion, but signatures are returned in
-  Bastion's raw P-256 form — see the EIP-1271 caveat.
+- **Signing (M2):** `personal_sign` and `eth_signTypedData_v4` (Permit2) return a
+  **Kernel v3.3 ERC-1271 signature** — the app signs the Kernel-wrapped digest
+  (`EthHashing.kernelWrappedHash`, bound to the account + active chain) and the
+  host assembles the root envelope `0x00 ‖ r ‖ s`, which `account.isValidSignature`
+  accepts. The account must be deployed first (see counterfactual note).
+- **Send (M3):** `eth_sendTransaction` → UserOp → bundler → returns the inner tx
+  hash once mined.
 
 ## Prerequisites
 
@@ -90,16 +94,36 @@ the Bastion approval UI.
 Default chain is Base Sepolia (84532). `rpcUrls` overrides the built-in public RPC
 per chain.
 
+## ERC-1271 details (M2)
+
+Kernel v3.3 does **not** use ERC-7739. For `isValidSignature(hash, sig)` it wraps
+the dApp `hash` in a single EIP-712 envelope and routes `sig` to the root
+validator. The signature the wallet produces is:
+
+- digest signed `D = keccak256(0x1901 ‖ DS ‖ SH)`, `DS` = `EIP712Domain(name="Kernel",
+  version="0.3.3", chainId, verifyingContract=account)`, `SH = keccak256(abi.encode(
+  keccak256("Kernel(bytes32 hash)"), H))` — done in `EthHashing.kernelWrappedHash`
+  (unit-cross-checked against Foundry `cast`).
+- envelope `0x00 ‖ r ‖ s` (root validation type) — the deployed `P256Validator`
+  (`contracts/src/P256Validator.sol`) `abi.decode`s the 64-byte `(r,s)`.
+
+Verify on-chain once an account is deployed:
+
+```bash
+node integrations/native-host/scripts/verify-1271.mjs \
+  --account 0x<smartAccount> --hash 0x<dappHash> --sig 0x00<r><s> \
+  --rpc https://sepolia.base.org   # expects ✅ magic 0x1626ba7e
+```
+
 ## Caveats / roadmap
 
-- **EIP-1271 (M2):** smart-account signatures (Permit2, off-chain orders) must be
-  verified via `account.isValidSignature`. The host currently returns Bastion's
-  raw P-256 `(r,s)`; it still needs the Kernel v3.3 ERC-7579 1271 wrapper. Until
-  then, dApp flows that verify signatures off-chain (Permit2) won't validate.
-- **Counterfactual accounts:** an undeployed smart account can't satisfy EIP-1271
-  (no code) and Permit2 doesn't support ERC-6492. Deploy the account (first
-  `eth_sendTransaction`) before relying on signature verification.
-- **eth_sendTransaction (M3):** returns the inner tx hash once the UserOp is mined;
+- **Counterfactual accounts:** ERC-1271 needs deployed code and Permit2 does not
+  support ERC-6492, so the host **refuses** `personal_sign`/`eth_signTypedData_v4`
+  until the account is deployed (clear error). Send one `eth_sendTransaction`
+  first (the initial UserOp deploys the account), then signatures verify.
+- **Chains:** `P256Validator` (`0x9906…`) is deployed on **Base Sepolia + Sepolia**
+  only — not Base/Eth mainnet yet. 1271/4337 flows require the validator on-chain.
+- **eth_sendTransaction:** returns the inner tx hash once the UserOp is mined;
   long-pending bundler inclusion may time out the request.
 - **Approvals:** every sign/send hits Bastion's approval popup; multi-step dApp
   flows mean multiple prompts. Session-key batching is future work.

@@ -1636,6 +1636,11 @@ nonisolated struct SignRequest: Sendable {
     /// v9: optional human-readable reason supplied by the agent. Surfaced in
     /// approval popups and audit history. Capped to 240 characters at ingestion.
     let intent: String?
+    /// When set (web-wallet ERC-1271 path), the message/typed-data digest is
+    /// wrapped into the Kernel v3.3 `isValidSignature` digest bound to this
+    /// chain + the signer's smart-account address before signing. nil for the
+    /// normal agent path (raw EIP-191/712 digest). See `EthHashing.kernelWrappedHash`.
+    let kernel1271ChainId: Int?
 
     init(
         operation: SigningOperation,
@@ -1643,13 +1648,15 @@ nonisolated struct SignRequest: Sendable {
         timestamp: Date,
         clientBundleId: String?,
         userOperationSubmission: UserOperationSubmissionRequest? = nil,
-        intent: String? = nil
+        intent: String? = nil,
+        kernel1271ChainId: Int? = nil
     ) {
         self.operation = operation
         self.requestID = requestID
         self.timestamp = timestamp
         self.clientBundleId = clientBundleId
         self.userOperationSubmission = userOperationSubmission
+        self.kernel1271ChainId = kernel1271ChainId
         if let intent {
             let trimmed = intent.trimmingCharacters(in: .whitespacesAndNewlines)
             self.intent = trimmed.isEmpty ? nil : String(trimmed.prefix(240))

@@ -2,8 +2,26 @@ import Foundation
 import Testing
 @testable import bastion
 
-@Suite("Deterministic request flow coverage")
+// `.serialized` because these flows exercise the RuleEngine, whose init
+// reconciles the process-global `SessionStore.shared` / `SessionSnapshotStore.shared`.
+// Run in parallel, concurrent reconciles race on that shared singleton (and the
+// real keychain) and transiently mark session storage unhealthy, which makes
+// `validate` fail-closed with "Session storage is unavailable". Serializing the
+// suite removes the race; each test still uses its own mock keychain + temp audit log.
+@Suite("Deterministic request flow coverage", .serialized)
 struct RequestFlowIntegrationTests {
+
+    // These flows test RULE validation, not session storage. The process-global
+    // `SessionSnapshotStore.shared` gets marked unhealthy ("Session storage is
+    // unavailable") when the test-host app warms the real keychain-backed
+    // SessionStore in an unsigned bundle — which makes `validate` fail-closed.
+    // Swift Testing makes a fresh suite instance per test, so this init resets
+    // the shared store to healthy+empty before each test. `RuleEngine.init` does
+    // not touch SessionStore, so the reset survives through `validate`.
+    init() {
+        SessionSnapshotStore.shared.clearUnhealthy()
+        SessionSnapshotStore.shared.update([])
+    }
 
     @Test("Raw bytes sign flow validates, hashes, and audits as sign-only")
     func rawBytesSignOnlyFlow() throws {

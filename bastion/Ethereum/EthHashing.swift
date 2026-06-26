@@ -32,6 +32,55 @@ nonisolated enum EthHashing {
         return Keccak256.hash(Data([0x19, 0x01]) + domainSeparator + structHash)
     }
 
+    // MARK: - Kernel v3.3 ERC-1271 Wrapper
+
+    /// Kernel's ERC-1271 message wrapper type hash: `keccak256("Kernel(bytes32 hash)")`.
+    private static let kernelWrapperTypeHash: Data = Keccak256.hash(Data("Kernel(bytes32 hash)".utf8))
+
+    /// Wraps a dApp message/typed-data hash `H` into the digest that Kernel v3.3
+    /// actually verifies for `isValidSignature` — i.e. what the P-256 key must sign.
+    ///
+    /// Kernel v3.3 computes `_toWrappedHash(H)` =
+    ///   `keccak256(0x1901 || domainSeparator || keccak256(abi.encode(KERNEL_WRAPPER_TYPEHASH, H)))`
+    /// where the domain is `EIP712Domain(name="Kernel", version="0.3.3", chainId, verifyingContract=account)`.
+    /// Kernel does NOT implement ERC-7739 (no nested TypedDataSign/PersonalSign) — this is a single wrap.
+    /// Verified against ZeroDev kernel `release/v3.3` and `contracts/src/P256Validator.sol`.
+    ///
+    /// - Parameters:
+    ///   - hash: the 32-byte dApp hash (EIP-191 personal-message hash, or the EIP-712 typed-data digest).
+    ///   - account: the Kernel smart-account address (the EIP-712 `verifyingContract`).
+    ///   - chainId: the chain the account is verified on.
+    ///   - version: Kernel implementation version string (default "0.3.3").
+    static func kernelWrappedHash(hash: Data, account: String, chainId: Int, version: String = "0.3.3") -> Data {
+        var domainData = Data()
+        domainData += eip712DomainTypeHash
+        domainData += Keccak256.hash(Data("Kernel".utf8))
+        domainData += Keccak256.hash(Data(version.utf8))
+        domainData += abiEncodeUInt256(UInt64(chainId))
+        domainData += abiEncodeAddress(account)
+        let domainSeparator = Keccak256.hash(domainData)
+
+        var structData = Data()
+        structData += kernelWrapperTypeHash
+        structData += abiEncode(hash) // bytes32, left-padded (no-op for 32-byte input)
+        let structHash = Keccak256.hash(structData)
+
+        return Keccak256.hash(Data([0x19, 0x01]) + domainSeparator + structHash)
+    }
+
+    /// Assembles the Kernel ERC-1271 signature envelope for the root validator:
+    /// `0x00 || r(32) || s(32)`. Kernel reads the leading `0x00` as the
+    /// ROOT validation type and routes to the installed root validator
+    /// (the P256Validator), which `abi.decode`s the remaining 64 bytes as `(r, s)`.
+    static func kernelRootSignatureEnvelope(r: Data, s: Data) -> Data {
+        Data([0x00]) + leftPad32(r) + leftPad32(s)
+    }
+
+    private static func leftPad32(_ data: Data) -> Data {
+        if data.count >= 32 { return Data(data.suffix(32)) }
+        return Data(repeating: 0, count: 32 - data.count) + data
+    }
+
     // MARK: - ERC-4337: UserOperation Hash
 
     /// Computes the UserOperation hash as defined by the EntryPoint contract.

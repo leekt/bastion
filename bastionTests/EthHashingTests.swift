@@ -2,6 +2,42 @@ import Foundation
 import Testing
 @testable import bastion
 
+// MARK: - Kernel v3.3 ERC-1271 wrapper
+
+@Suite("Kernel v3.3 ERC-1271 wrapper")
+struct KernelWrapperTests {
+    // Cross-checked with Foundry `cast` against the Kernel v3.3 domain
+    // (name "Kernel", version "0.3.3") + KERNEL_WRAPPER_TYPEHASH and the
+    // deployed P256Validator's abi.decode((uint256,uint256)) sig format.
+    @Test("kernelWrappedHash matches cast-computed digest")
+    func wrappedHashVector() {
+        let h = Data(hexString: "0x1111111111111111111111111111111111111111111111111111111111111111")!
+        let d = EthHashing.kernelWrappedHash(
+            hash: h,
+            account: "0x1234567890abcdef1234567890abcdef12345678",
+            chainId: 84532
+        )
+        #expect(d.hex == "dbf89d625468ec92273e0678a91145724b0be1c48772457d6d2bb57f81fd9637")
+    }
+
+    @Test("root signature envelope is 0x00 || r(32) || s(32)")
+    func rootEnvelope() {
+        let r = Data(repeating: 0xaa, count: 32)
+        let s = Data(repeating: 0xbb, count: 32)
+        let env = EthHashing.kernelRootSignatureEnvelope(r: r, s: s)
+        #expect(env.count == 65)
+        #expect(env.first == 0x00)
+        #expect(env.hex == "00" + String(repeating: "aa", count: 32) + String(repeating: "bb", count: 32))
+    }
+
+    @Test("envelope left-pads short r/s to 32 bytes")
+    func envelopePads() {
+        let env = EthHashing.kernelRootSignatureEnvelope(r: Data([0x01]), s: Data([0x02]))
+        #expect(env.count == 65)
+        #expect(env.hex == "00" + String(repeating: "00", count: 31) + "01" + String(repeating: "00", count: 31) + "02")
+    }
+}
+
 // MARK: - Keccak256 Tests
 
 @Suite("Keccak256")
