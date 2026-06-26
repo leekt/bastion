@@ -235,15 +235,22 @@ nonisolated enum SupportBundleExporter {
             chainRPCs: config.bundlerPreferences.chainRPCs.map {
                 SupportChainRPCSnapshot(chainId: $0.chainId, host: URL(string: $0.rpcURL)?.host)
             },
-            clientProfiles: config.clientProfiles.map {
+            clientProfiles: config.clientProfiles.enumerated().map { index, profile in
+                // AC-04 (audit 2026-06-taek): the support bundle is an
+                // agent-accessible diagnostic, so it must not hand out the raw
+                // profile UUID / membership id — those are exactly the selectors
+                // the MCP bridge accepts (see AC-01), making the bundle an
+                // enumerate-then-impersonate primitive. Emit stable per-bundle
+                // placeholders that preserve count + per-profile distinctness
+                // for debugging without leaking the real selectors.
                 SupportClientProfileSnapshot(
-                    id: $0.id,
-                    bundleId: $0.bundleId,
-                    label: $0.label,
-                    authPolicy: $0.authPolicy?.rawValue,
-                    isGroupMember: $0.isGroupMember,
-                    walletGroupId: $0.walletGroupId,
-                    membershipId: $0.membershipId
+                    id: "profile-\(index + 1)",
+                    bundleId: profile.bundleId,
+                    label: profile.label,
+                    authPolicy: profile.authPolicy?.rawValue,
+                    isGroupMember: profile.isGroupMember,
+                    walletGroupId: profile.walletGroupId,
+                    membershipId: profile.membershipId == nil ? nil : "member-\(index + 1)"
                 )
             },
             walletGroups: config.walletGroups.map {

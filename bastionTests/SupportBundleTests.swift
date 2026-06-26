@@ -23,6 +23,50 @@ struct SupportBundleTests {
         #expect(entries[0].event == "rate_limited")
     }
 
+    // AC-04 (audit 2026-06-taek): the support bundle must not leak the raw
+    // profile UUID / membership id — those are the selectors the MCP bridge
+    // accepts (AC-01), so leaking them turns the bundle into an
+    // enumerate-then-impersonate primitive.
+    @Test("Support bundle redacts profile id and membership id selectors")
+    func supportBundleRedactsProfileSelectors() throws {
+        let rawProfileId = "11111111-aaaa-bbbb-cccc-222222222222"
+        let rawMembershipId = "33333333-dddd-eeee-ffff-444444444444"
+        let rawGroupId = "55555555-0000-1111-2222-666666666666"
+        var config = BastionConfig.default
+        config.clientProfiles = [
+            ClientProfile(
+                id: rawProfileId,
+                bundleId: "com.example.agent",
+                label: "Agent",
+                keyTag: "com.bastion.signingkey.client.x",
+                rules: .default,
+                walletGroupId: rawGroupId,
+                membershipId: rawMembershipId
+            )
+        ]
+
+        let bundle = SupportBundleExporter.makeBundle(
+            config: config,
+            service: serviceSnapshot(),
+            records: [],
+            auditLogTampered: false,
+            auditChainBroken: false,
+            diagnostics: []
+        )
+        let json = try #require(String(data: try JSONEncoder().encode(bundle), encoding: .utf8))
+
+        // Raw selectors must be absent from the serialized bundle.
+        #expect(json.contains(rawProfileId) == false)
+        #expect(json.contains(rawMembershipId) == false)
+        // Stable per-bundle placeholders preserve diagnostic distinctness.
+        let snapshot = try #require(bundle.config.clientProfiles.first)
+        #expect(snapshot.id == "profile-1")
+        #expect(snapshot.membershipId == "member-1")
+        // Non-selector diagnostic fields are retained.
+        #expect(snapshot.bundleId == "com.example.agent")
+        #expect(snapshot.isGroupMember == true)
+    }
+
     @Test("Support bundle sanitizes config secrets")
     func supportBundleSanitizesConfigSecrets() throws {
         var config = BastionConfig.default
