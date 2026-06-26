@@ -66,7 +66,19 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
         _ listener: NSXPCListener,
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
-        if !verifyClientCodeSignature(connection: newConnection) {
+        // AC-02 (audit 2026-06-taek): resolve ONE code identity from the peer's
+        // audit token (which carries pid + p_idversion) rather than its bare
+        // PID, and drive validity / team / identifier / executable-path all
+        // from that single SecCode. A bare-PID lookup is vulnerable to the
+        // PID-reuse race (CVE-2020-14977 class) and used three independent,
+        // non-atomic kernel lookups that could disagree.
+        guard let identity = resolveClientIdentity(connection: newConnection),
+              Self.isClientSigningInfoAllowed(
+                identity.signingInfo,
+                validityStatus: identity.validityStatus,
+                executablePath: identity.executablePath,
+                allowUntrustedDevSignature: Self.shouldAllowUntrustedDevSignature(identity.validityStatus)
+              ) else {
             DiagnosticLog.shared.record(
                 level: .warning,
                 category: .xpc,
@@ -77,8 +89,8 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
             return false
         }
 
-        let clientBundleId = bundleIdentifier(for: newConnection.processIdentifier)
-        let clientExecutablePath = executablePath(for: newConnection.processIdentifier)
+        let clientBundleId = Self.bundleIdentifier(from: identity.signingInfo)
+        let clientExecutablePath = identity.executablePath
         let isTrustedAgentBridge = Self.isTrustedAgentBridgeClient(
             bundleId: clientBundleId,
             executablePath: clientExecutablePath
@@ -188,29 +200,78 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
 
     // MARK: - Client Identification
 
-    /// Extracts the bundle identifier from a running process via its code signature.
-    private nonisolated func bundleIdentifier(for pid: Int32) -> String? {
+    /// `auditToken` is a long-standing NSXPCConnection property exposing the
+    /// peer's kernel audit token. It is not in the public headers, so we reach
+    /// it through a matching `@objc` protocol — the selector and struct-return
+    /// ABI line up with the real implementation. The audit token (unlike the
+    /// bare PID) embeds `p_idversion`, defeating PID-reuse impersonation.
+    @objc private protocol XPCConnectionAuditToken {
+        var auditToken: audit_token_t { get }
+    }
+
+    /// One resolved code identity for a connecting client, derived from a single
+    /// `SecCode` so all downstream checks agree.
+    private struct ResolvedClientIdentity {
+        let validityStatus: OSStatus
+        let signingInfo: [String: Any]
+        let executablePath: String?
+    }
+
+    private nonisolated func auditToken(of connection: NSXPCConnection) -> audit_token_t? {
+        let accessor = unsafeBitCast(connection, to: XPCConnectionAuditToken.self)
+        return accessor.auditToken
+    }
+
+    /// Build a `SecCode` for the peer from its audit token and extract validity,
+    /// signing info, and the main executable path in one shot.
+    private nonisolated func resolveClientIdentity(connection: NSXPCConnection) -> ResolvedClientIdentity? {
+        guard var token = auditToken(of: connection) else { return nil }
+        let tokenData = Data(bytes: &token, count: MemoryLayout<audit_token_t>.size)
         var code: SecCode?
-        let attrs = [kSecGuestAttributePid: pid] as CFDictionary
+        let attrs = [kSecGuestAttributeAudit: tokenData] as CFDictionary
         guard SecCodeCopyGuestWithAttributes(nil, attrs, [], &code) == errSecSuccess,
               let secCode = code else {
             return nil
         }
+
+        let validityStatus = SecCodeCheckValidity(secCode, [], nil)
+
         var staticCode: SecStaticCode?
         guard SecCodeCopyStaticCode(secCode, [], &staticCode) == errSecSuccess,
               let sCode = staticCode else {
             return nil
         }
+
         var info: CFDictionary?
-        guard SecCodeCopySigningInformation(sCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+        guard SecCodeCopySigningInformation(
+            sCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &info
+        ) == errSecSuccess,
               let signingInfo = info as? [String: Any] else {
             return nil
         }
-        // Prefer the code-signing identifier over Info.plist CFBundleIdentifier.
-        // The signing identifier is sealed by the code signature; the plist value
-        // is display metadata and is easier to spoof accidentally in same-team
-        // helper binaries.
-        return Self.bundleIdentifier(from: signingInfo)
+
+        // The main executable URL is bound to the same verified code object —
+        // no separate proc_pidpath(pid) call (which would re-introduce the PID
+        // race for the bridge/sidecar bundled-path check).
+        let executablePath: String?
+        if let url = signingInfo[kSecCodeInfoMainExecutable as String] as? URL {
+            executablePath = url.path
+        } else if let path = signingInfo[kSecCodeInfoMainExecutable as String] as? String {
+            executablePath = path
+        } else {
+            var pathURL: CFURL?
+            executablePath = SecCodeCopyPath(sCode, [], &pathURL) == errSecSuccess
+                ? (pathURL as URL?)?.path
+                : nil
+        }
+
+        return ResolvedClientIdentity(
+            validityStatus: validityStatus,
+            signingInfo: signingInfo,
+            executablePath: executablePath
+        )
     }
 
     // MARK: - Code Signing Verification
@@ -219,45 +280,12 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
     private nonisolated static let requiredTeamID = "926A27BQ7W"
     private nonisolated static let untrustedDevSignatureStatus = OSStatus(CSSMERR_TP_NOT_TRUSTED)
 
-    private nonisolated func verifyClientCodeSignature(connection: NSXPCConnection) -> Bool {
-        let pid = connection.processIdentifier
-        var code: SecCode?
-        let attrs = [kSecGuestAttributePid: pid] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attrs, [], &code) == errSecSuccess,
-              let secCode = code else {
-            return false
-        }
-
-        let validityStatus = SecCodeCheckValidity(secCode, [], nil)
+    nonisolated static func shouldAllowUntrustedDevSignature(_ validityStatus: OSStatus) -> Bool {
 #if DEBUG
-        let allowUntrustedDevSignature = validityStatus == Self.untrustedDevSignatureStatus
+        return validityStatus == untrustedDevSignatureStatus
 #else
-        let allowUntrustedDevSignature = false
+        return false
 #endif
-
-        var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(secCode, [], &staticCode) == errSecSuccess,
-              let code = staticCode else {
-            return false
-        }
-
-        var info: CFDictionary?
-        guard SecCodeCopySigningInformation(
-            code,
-            SecCSFlags(rawValue: kSecCSSigningInformation),
-            &info
-        ) == errSecSuccess,
-              let signingInfo = info as? [String: Any] else {
-            return false
-        }
-
-        let executablePath = executablePath(for: pid)
-        return Self.isClientSigningInfoAllowed(
-            signingInfo,
-            validityStatus: validityStatus,
-            executablePath: executablePath,
-            allowUntrustedDevSignature: allowUntrustedDevSignature
-        )
     }
 
     nonisolated static func bundleIdentifier(from signingInfo: [String: Any]) -> String? {
@@ -347,15 +375,6 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
         }
         return URL(fileURLWithPath: executablePath).standardizedFileURL.path
             == bundledCLI.standardizedFileURL.path
-    }
-
-    private nonisolated func executablePath(for pid: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: 4096)
-        let result = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-        guard result > 0 else {
-            return nil
-        }
-        return String(cString: buffer)
     }
 }
 
@@ -2211,6 +2230,15 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     ) {
         Task { @MainActor in
             do {
+                // AC-03 (audit 2026-06-taek): listing every group's account
+                // address + member roster is at least as sensitive as viewing a
+                // single group, so require the same owner authentication that
+                // getWalletGroup enforces. Previously this was ungated and
+                // defeated getWalletGroup's biometric gate by enumeration.
+                try await AuthManager.shared.authenticate(
+                    policy: .biometricOrPasscode,
+                    reason: "Authenticate to list wallet groups"
+                )
                 let groups = self.ruleEngine.listWalletGroups().map(WalletGroupHandlerCodec.info(for:))
                 let response = WalletGroupListResponse(groups: groups)
                 let data = try JSONEncoder().encode(response)
