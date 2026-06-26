@@ -6,6 +6,39 @@ import Testing
 @Suite("Audit Log")
 struct AuditLogTests {
 
+    // Regression: a recorded audit event must post `.bastionAuditHistoryDidChange`
+    // so an open Audit History window live-refreshes. Without it, a transaction
+    // signed while the (reused) window was open never appeared in the list.
+    @Test("recording an event posts the audit-history change notification")
+    func recordPostsChangeNotification() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let log = AuditLog(logURL: directory.appendingPathComponent("audit.log"), keychain: MockKeychainBackend())
+
+        // NotificationCenter delivers synchronously to a `queue: nil` observer,
+        // and `record` posts before it returns, so the flag is set by then.
+        final class Flag: @unchecked Sendable { var fired = false }
+        let flag = Flag()
+        let token = NotificationCenter.default.addObserver(
+            forName: .bastionAuditHistoryDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in flag.fired = true }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        log.record(AuditEvent(
+            type: .signSuccess,
+            dataPrefix: "request-notify",
+            request: makeRequest(id: "request-notify"),
+            clientContext: makeContext(bundleId: "com.example.agent")
+        ))
+
+        #expect(flag.fired == true)
+    }
+
     @Test("same request is stored as one record")
     func storesSingleRecordPerRequest() throws {
         let directory = FileManager.default.temporaryDirectory
