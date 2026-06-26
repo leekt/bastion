@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root { --ink:#14110d; --ink5:#6b6358; --paper:#faf7f0; --line:#d9d3c7; --accent:#1b5e3a; }
+      * { box-sizing: border-box; font-family: -apple-system, system-ui, sans-serif; }
+      body { width: 320px; margin: 0; background: var(--paper); color: var(--ink); }
+      header { display:flex; align-items:center; gap:8px; padding:14px 16px; border-bottom:1px solid var(--line); }
+      header .sh { width:22px; height:22px; background:var(--ink); border-radius:6px; color:var(--paper);
+        display:flex; align-items:center; justify-content:center; font-size:13px; }
+      h1 { font-size:14px; margin:0; }
+      main { padding:16px; }
+      .row { display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:8px; }
+      .k { color: var(--ink5); }
+      .v { font-family: ui-monospace, Menlo, monospace; font-size:11.5px; word-break:break-all; text-align:right; max-width:200px; }
+      button { width:100%; padding:9px; border:none; border-radius:8px; background:var(--ink); color:var(--paper);
+        font-size:13px; font-weight:600; cursor:pointer; margin-top:8px; }
+      button:hover { background: var(--accent); }
+      button:disabled { opacity:.5; cursor:progress; }
+      .code { font-family: ui-monospace, Menlo, monospace; font-size:20px; font-weight:600; letter-spacing:1px;
+        text-align:center; padding:12px; background:#ebe6dc; border-radius:8px; margin:10px 0; }
+      .hint { font-size:11.5px; color: var(--ink5); line-height:1.45; }
+      .ok { color: var(--accent); font-weight:600; }
+      .bad { color:#9b2226; }
+    </style>
+  </head>
+  <body>
+    <header><span class="sh">⬡</span><h1>Bastion Wallet</h1></header>
+    <main id="main"><p class="hint">Loading…</p></main>
+    <script src="popup.js"></script>
+  </body>
+</html>

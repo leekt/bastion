@@ -1,0 +1,9 @@
+{
+  "name": "app.bastion.host",
+  "description": "Bastion web-connect native messaging host",
+  "path": "__LAUNCHER_PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__EXTENSION_ID__/"
+  ]
+}
