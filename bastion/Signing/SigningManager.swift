@@ -88,7 +88,8 @@ final class SigningManager {
             timestamp: request.timestamp,
             clientBundleId: request.clientBundleId,
             userOperationSubmission: request.userOperationSubmission,
-            intent: request.intent
+            intent: request.intent,
+            kernel1271ChainId: request.kernel1271ChainId
         )
         let dataPrefix = serverRequestID.prefix(8).description
         DiagnosticLog.shared.record(
@@ -417,7 +418,30 @@ final class SigningManager {
 
         // `request.data` is already the Ethereum-standard 32-byte digest for every operation type.
         // Feed that digest directly into the Secure Enclave to avoid double-hashing message requests.
-        let hash = request.data
+        var hash = request.data
+        // Web-wallet ERC-1271 path: wrap the message/typed-data digest into the
+        // Kernel v3.3 `isValidSignature` digest (bound to this account + chain)
+        // so dApps can verify the smart-account signature on-chain. Only applies
+        // to message/typedData; UserOps and raw bytes are never wrapped.
+        if let chainId = request.kernel1271ChainId {
+            switch request.operation {
+            case .message, .typedData:
+                // Resolve the account from the SAME key we are about to sign with.
+                // `clientContext.accountAddress` comes from a render-safe,
+                // non-creating lookup and can be nil here; deriving it from the
+                // signing key's public key is what guarantees the wrapped digest
+                // matches what the on-chain Kernel account verifies. Fail closed
+                // rather than emit an unverifiable (unwrapped) 1271 signature.
+                let account = clientContext.accountAddress
+                    ?? (try? seManager.getPublicKey(keyTag: clientContext.keyTag))?.accountAddress
+                guard let account else {
+                    throw BastionError.signingFailed
+                }
+                hash = EthHashing.kernelWrappedHash(hash: hash, account: account, chainId: chainId)
+            case .rawBytes, .userOperation:
+                break
+            }
+        }
         let raw: SignResponse
         #if DEBUG
         if let qaRaw = try RuntimeQASigningProvider.shared.signDigestIfEnabled(

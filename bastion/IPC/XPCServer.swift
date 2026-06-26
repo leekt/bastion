@@ -610,7 +610,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             return Self.maxMessageBytes
         case "rawBytes":
             return Self.maxRawBytesPayload
-        case "typedData", "userOperation":
+        case "typedData", "userOperation", "message1271", "typedData1271":
             return Self.maxStructuredOperationBytes
         default:
             return nil
@@ -1785,6 +1785,17 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         )
     }
 
+    // Web-wallet ERC-1271 envelopes: carry the active chain so the message /
+    // typed-data digest can be wrapped into the Kernel v3.3 isValidSignature digest.
+    private struct Message1271Envelope: Decodable {
+        let message: String
+        let chainId: Int
+    }
+    private struct TypedData1271Envelope: Decodable {
+        let typedData: EIP712TypedData
+        let chainId: Int
+    }
+
     private nonisolated func handleSignStructured(
         operationType: String,
         operationData: Data,
@@ -1819,9 +1830,22 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         )
         let resolvedUserOperationRequest: ResolvedUserOperationRequest?
         let immediateOperation: SigningOperation?
+        // Web-wallet ERC-1271 path: when set, the signed digest is Kernel-wrapped
+        // for this chain so dApps can verify the smart-account signature.
+        var kernelChainId: Int? = nil
         do {
             let decoder = JSONDecoder()
             switch operationType {
+            case "message1271":
+                let env = try decoder.decode(Message1271Envelope.self, from: operationData)
+                immediateOperation = .message(env.message)
+                kernelChainId = env.chainId
+                resolvedUserOperationRequest = nil
+            case "typedData1271":
+                let env = try decoder.decode(TypedData1271Envelope.self, from: operationData)
+                immediateOperation = .typedData(env.typedData)
+                kernelChainId = env.chainId
+                resolvedUserOperationRequest = nil
             case "message":
                 guard let text = String(data: operationData, encoding: .utf8) else {
                     DiagnosticLog.shared.record(
@@ -1922,7 +1946,8 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     requestID: requestID,
                     timestamp: Date(),
                     clientBundleId: effectiveBundleId,
-                    userOperationSubmission: userOperationSubmission
+                    userOperationSubmission: userOperationSubmission,
+                    kernel1271ChainId: kernelChainId
                 )
                 let result = try await SigningManager.shared.processSignRequest(request)
                 let jsonData = try JSONEncoder().encode(result)

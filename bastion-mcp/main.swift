@@ -637,18 +637,30 @@ private func callTool(name: String, args: [String: Any]) -> [String: Any] {
             return toolResult(try xpc.state(agentProfileId: validateAgentProfileId(args)))
         case "bastion_sign_message":
             let message = try requiredString(args["message"], "message", max: maxMessageBytes)
-            return toolResult(try xpc.signStructured(operationType: "message", data: Data(message.utf8), agentProfileId: validateAgentProfileId(args), timeoutSeconds: 65))
+            let profile = try validateAgentProfileId(args)
+            // chainId present → Kernel v3.3 ERC-1271 path (smart-account signature
+            // a dApp can verify on-chain). Absent → plain EIP-191 digest.
+            if let chainId = try optionalInt(args["chainId"], "chainId") {
+                let env = try jsonData(["message": message, "chainId": chainId])
+                return toolResult(try xpc.signStructured(operationType: "message1271", data: env, agentProfileId: profile, timeoutSeconds: 65))
+            }
+            return toolResult(try xpc.signStructured(operationType: "message", data: Data(message.utf8), agentProfileId: profile, timeoutSeconds: 65))
         case "bastion_sign_typed_data":
             let typed = args["typedData"]
-            let data: Data
+            let typedObj: Any
             if let text = typed as? String {
-                data = try rawJSONStringData(text)
+                typedObj = try jsonObject(Data(text.utf8))
             } else if let typed {
-                data = try jsonData(typed)
+                typedObj = typed
             } else {
                 throw BridgeError.input("typedData is required")
             }
-            return toolResult(try xpc.signStructured(operationType: "typedData", data: data, agentProfileId: validateAgentProfileId(args)))
+            let profile = try validateAgentProfileId(args)
+            if let chainId = try optionalInt(args["chainId"], "chainId") {
+                let env = try jsonData(["typedData": typedObj, "chainId": chainId])
+                return toolResult(try xpc.signStructured(operationType: "typedData1271", data: env, agentProfileId: profile))
+            }
+            return toolResult(try xpc.signStructured(operationType: "typedData", data: try jsonData(typedObj), agentProfileId: profile))
         case "bastion_sign_raw":
             return toolResult(try xpc.signRaw(hex: requiredString(args["data"], "data", max: 66), agentProfileId: validateAgentProfileId(args)))
         case "bastion_send_user_op":
