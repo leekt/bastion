@@ -9,9 +9,12 @@ boundaries and the remaining security posture for release decisions.
 ## XPC Trust Boundary
 
 - XPC connections are accepted only after code-signature validation. Release
-  builds require the configured Bastion Team ID; debug builds allow the
-  bundled `bastion-cli` sidecar only when both its signing identifier and app
-  bundle path match.
+  builds require the configured Bastion Team ID. The production `bastion-mcp`
+  bridge can proxy paired agent profile identity only when its signing
+  identifier is `com.bastion.mcp` and its executable path is the host app's
+  `Contents/MacOS/bastion-mcp`; debug builds still allow the bundled
+  `bastion-cli` sidecar only when both its signing identifier and app bundle
+  path match.
 - The client bundle ID used for policy and pairing is read from the verified
   code-signing identity. Pairing rejects missing identities and rejects any
   mismatch between the wire-supplied bundle ID and the verified identity.

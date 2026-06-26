@@ -126,6 +126,61 @@ import Foundation
         withReply reply: @escaping (Data?, Error?) -> Void
     )
 
+    // MARK: - Trusted Agent Bridge
+
+    /// Starts a pairing handshake for an agent behind Bastion's signed MCP/REST
+    /// bridge. The bridge executable is authenticated by code signature; the
+    /// agent identity is the Bastion-managed profile created after owner
+    /// approval.
+    func bridgeStartPairing(
+        agentIdentifier: String,
+        processName: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// Returns `PairingPollResponse` JSON for a bridge pairing request.
+    func bridgePollPairing(
+        requestId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    /// Same as `getPublicKey`, but scoped to a paired agent profile id carried
+    /// by the trusted `bastion-mcp` bridge.
+    func bridgeGetPublicKey(
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    func bridgeGetRules(
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    func bridgeGetState(
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    func bridgeGetServiceInfo(
+        agentProfileId: String?,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    func bridgeSign(
+        data: Data,
+        requestID: String,
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
+    func bridgeSignStructured(
+        operationType: String,
+        operationData: Data,
+        requestID: String,
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
     // MARK: - Wallet Groups
 
     /// requestData = `CreateWalletGroupRequest` JSON → returns `WalletGroupInfo`.

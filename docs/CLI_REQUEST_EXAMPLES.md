@@ -1,4 +1,8 @@
-# Bastion CLI Request Examples
+# Bastion Optional Dev CLI Request Examples
+
+`bastion-cli` is development and QA tooling. Production DMG releases are built
+around `/Applications/Bastion.app/Contents/MacOS/bastion-mcp` for agent
+integration; see [`mcp/README.md`](../mcp/README.md).
 
 ## Setup
 

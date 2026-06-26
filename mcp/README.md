@@ -1,150 +1,148 @@
 # Bastion MCP Server & REST API
 
-AI agent integration layer for Bastion. Wraps `bastion-cli` to expose signing capabilities via MCP (Model Context Protocol) and REST.
-
-## Quick Start
+Bastion's production agent bridge is the signed Swift executable bundled at:
 
 ```bash
-cd mcp
-bun install --frozen-lockfile
-
-# MCP server (stdio transport — for Claude, Cursor, etc.)
-bun run mcp
-
-# REST API (localhost HTTP — for any language/tool)
-BASTION_API_TOKEN="$(openssl rand -hex 32)" bun run rest
+/Applications/Bastion.app/Contents/MacOS/bastion-mcp
 ```
 
-## MCP Server
+It implements MCP stdio tools and a localhost REST API directly over
+`com.bastion.xpc`. It does not spawn or depend on `bastion-cli`.
 
-Runs on stdio. Add to your Claude Code config:
+The TypeScript files in this directory are kept as a legacy development
+reference for the original wrapper surface. Production DMG artifacts ship the
+Swift `bastion-mcp` sidecar instead.
+
+## MCP Setup
+
+Add the bundled executable to your agent's MCP config:
 
 ```json
 {
   "mcpServers": {
     "bastion": {
-      "command": "bun",
-      "args": ["run", "/path/to/bastion/mcp/src/mcp-server.ts"],
+      "command": "/Applications/Bastion.app/Contents/MacOS/bastion-mcp",
       "env": {
-        "BASTION_CLI_PATH": "/path/to/bastion-cli"
+        "BASTION_AGENT_PROFILE_ID": "<paired-profile-id>"
       }
     }
   }
 }
 ```
 
-### Available Tools
+First-time pairing:
 
-**Signing & status:**
+1. Call `bastion_pair_agent` with a stable `agentIdentifier` and optional label.
+2. Approve the pairing in Bastion.
+3. Poll `bastion_poll_pairing` with the returned `requestId`.
+4. Save the returned paired profile ID in `BASTION_AGENT_PROFILE_ID`.
+
+Signing, rules, and state tools require a paired profile ID either in
+`BASTION_AGENT_PROFILE_ID` or the tool argument `agentProfileId`.
+
+## MCP Tools
+
+**Pairing, signing, and status:**
 
 | Tool | Description |
 |------|-------------|
-| `bastion_status` | Check if Bastion app is running |
-| `bastion_get_account` | Get P-256 public key + smart account address |
+| `bastion_pair_agent` | Start owner-approved pairing for an agent behind the signed bridge |
+| `bastion_poll_pairing` | Poll a pairing request |
+| `bastion_status` | Check Bastion service status |
+| `bastion_get_account` | Get P-256 public key and smart account address |
 | `bastion_get_rules` | Get current effective signing rules |
-| `bastion_get_state` | Get rate limit + spending counters |
+| `bastion_get_state` | Get rate limit and spending counters |
 | `bastion_sign_message` | Sign EIP-191 personal message |
 | `bastion_sign_typed_data` | Sign EIP-712 typed data |
 | `bastion_sign_raw` | Sign raw 32-byte hash |
-| `bastion_send_user_op` | Build + sign + optionally send UserOp |
+| `bastion_send_user_op` | Build, sign, and optionally send a UserOperation |
 | `bastion_sign_user_op_json` | Sign explicit UserOperation JSON |
 
-**Wallet groups (sudo owner + scoped agents):**
+**Wallet groups:**
 
 | Tool | Description |
 |------|-------------|
-| `bastion_create_wallet_group` | Create a new shared wallet group with a sudo owner |
-| `bastion_list_wallet_groups` | List all wallet groups |
-| `bastion_get_wallet_group` | Show one group, its members, and per-agent scoped rules |
-| `bastion_add_agent_to_group` | Add an agent (validator-scoped client) to a group |
+| `bastion_create_wallet_group` | Create a shared wallet group with a sudo owner |
+| `bastion_list_wallet_groups` | List wallet groups |
+| `bastion_get_wallet_group` | Show one group, members, and scoped rules |
+| `bastion_add_agent_to_group` | Add an agent validator-scoped profile to a group |
 | `bastion_remove_agent_from_group` | Remove an agent from a group |
-| `bastion_update_agent_scope` | Update an agent's scoped rules (rate / spending / target lists) |
-| `bastion_mark_agent_installed` | Mark agent validator as installed (manual override) |
-| `bastion_install_agent_on_chain` | Build + sign + send the on-chain `installModule` UserOp for the agent validator |
-| `bastion_uninstall_agent_on_chain` | Build + sign + send the on-chain `uninstallModule` UserOp |
+| `bastion_update_agent_scope` | Update an agent's scoped rules |
+| `bastion_mark_agent_installed` | Mark an agent validator installed after manual on-chain install |
+| `bastion_install_agent_on_chain` | Build and optionally submit `installModule` UserOp |
+| `bastion_uninstall_agent_on_chain` | Build and optionally submit `uninstallModule` UserOp |
 
 ## REST API
 
-Binds to `127.0.0.1` only. Requires bearer token authentication. The token
-must be provided through `BASTION_API_TOKEN`; the server refuses to generate or
-write a bearer credential to disk.
+Run REST mode from the bundled bridge:
 
 ```bash
-# Start with an explicit high-entropy token
-BASTION_API_TOKEN="$(openssl rand -hex 32)" bun run rest
+TOKEN="$(openssl rand -hex 32)"
+BASTION_API_TOKEN="$TOKEN" /Applications/Bastion.app/Contents/MacOS/bastion-mcp rest
+```
+
+The server binds to `127.0.0.1` only. Every route, including `/health`, requires
+`Authorization: Bearer <token>`. Browser-origin requests are rejected when an
+`Origin` header is present. Request bodies are capped at 1 MiB.
+
+Use the paired profile header for profile-scoped requests:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Bastion-Agent-Profile: <paired-profile-id>" \
+  http://127.0.0.1:9587/account
 ```
 
 ### Endpoints
 
-All routes require bearer auth (including `/health`). Browser-origin requests
-are rejected at the edge — the `Origin` header on a request is treated as a
-CSRF signal and refused with `403`.
-
-**Signing & status:**
+**Pairing, signing, and status:**
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Auth-gated liveness probe |
+| POST | `/pair` | Start owner-approved agent pairing |
+| GET | `/pair/:requestId` | Poll pairing status |
 | GET | `/status` | Service info |
-| GET | `/account` | Public key + address |
+| GET | `/account` | Public key and smart account address |
 | GET | `/rules` | Effective rules |
 | GET | `/state` | Signing state |
 | POST | `/sign/message` | Sign EIP-191 message |
 | POST | `/sign/typed-data` | Sign EIP-712 typed data |
 | POST | `/sign/raw` | Sign raw hash |
-| POST | `/sign/user-op` | Build + sign UserOp |
+| POST | `/sign/user-op` | Build, sign, and optionally send UserOp |
 
 **Wallet groups:**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/groups` | List all wallet groups |
-| POST | `/groups` | Create a wallet group |
-| GET | `/groups/:id` | Show a group with members and scoped rules |
-| POST | `/groups/:id/agents` | Add an agent member |
-| DELETE | `/groups/:id/agents/:memberId` | Remove an agent member |
-| POST | `/groups/:id/agents/:memberId/install-on-chain` | Build + send `installModule` UserOp |
-| POST | `/groups/:id/agents/:memberId/uninstall-on-chain` | Build + send `uninstallModule` UserOp |
-| POST | `/groups/:id/agents/:memberId/installed` | Mark agent installed (manual override) |
-
-### Examples
-
-```bash
-TOKEN="your-token-here"
-
-# Get account
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9587/account
-
-# Sign a message
-curl -X POST -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello from agent"}' \
-  http://127.0.0.1:9587/sign/message
-
-# Send a UserOp (ETH transfer)
-curl -X POST -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"actions": [{"target": "0x...", "value": "1000000000000000", "data": "0x"}], "send": true}' \
-  http://127.0.0.1:9587/sign/user-op
-```
+| GET | `/groups` | List wallet groups |
+| POST | `/groups` | Create wallet group |
+| GET | `/groups/:id` | Show a group |
+| POST | `/groups/:id/agents` | Add agent member |
+| DELETE | `/groups/:id/agents/:memberId` | Remove agent member |
+| PATCH | `/groups/:id/agents/:memberId/scope` | Update scoped rules |
+| POST | `/groups/:id/agents/:memberId/install-on-chain` | Build and optionally send `installModule` UserOp |
+| POST | `/groups/:id/agents/:memberId/uninstall-on-chain` | Build and optionally send `uninstallModule` UserOp |
+| POST | `/groups/:id/agents/:memberId/installed` | Mark agent installed |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BASTION_CLI_PATH` | Auto-detect | Path to `bastion-cli` binary |
-| `BASTION_API_TOKEN` | Required | REST API bearer token; must pass a 128-bit estimated entropy check |
-| `BASTION_API_PORT` | `9587` | REST API port |
+| `BASTION_AGENT_PROFILE_ID` | none | Paired profile ID used by MCP tools when `agentProfileId` is omitted |
+| `BASTION_API_TOKEN` | required for REST | Bearer token; must pass the 128-bit estimated entropy and pattern checks |
+| `BASTION_API_PORT` | `9587` | REST API port on `127.0.0.1` |
 
-## Security
+## Security Notes
 
-- REST API binds to `127.0.0.1` only — no network exposure
-- Bearer token required for **all** routes (including `/health`)
-- Requests carrying an `Origin` header are rejected (`403`) — blocks CSRF from any local browser context that learns the token
-- Request bodies are capped at 1 MiB; all string/JSON/hex inputs are length- and shape-validated before reaching the CLI
-- UserOperation actions are capped by count and aggregate CLI argument size before spawning `bastion-cli`
-- REST never auto-generates or writes bearer tokens to disk
-- Low-entropy repeated or patterned bearer tokens are rejected at startup, even when they meet the length floor
-- The CLI binary path is validated: configured and auto-detected paths must be absolute regular files and must not be world-writable
-- All requests go through Bastion's rule engine (same as CLI)
-- No key material is exposed — only signatures are returned
+- The production bridge is signed as `com.bastion.mcp` and must run from
+  `Bastion.app/Contents/MacOS/bastion-mcp` to proxy agent profile identity.
+- Profile-scoped requests use Bastion-managed paired agent profiles as the
+  policy and audit identity.
+- REST binds to `127.0.0.1` only and rejects `Origin` headers.
+- REST requires bearer auth for all routes and refuses low-entropy or patterned
+  tokens at startup.
+- REST request bodies are capped at 1 MiB.
+- Signing and UserOperation requests go through the same XPC rule engine,
+  Secure Enclave signing flow, state counters, owner-auth prompts, and audit log
+  as native app requests.

@@ -8,7 +8,7 @@ SOURCE_APP_PATH="${1:-${OUTPUT_ROOT}/Bastion.app}"
 INSTALL_APP_PATH="${BASTION_INSTALL_PATH:-/Applications/Bastion.app}"
 INSTALL_PARENT_DIR="$(dirname "${INSTALL_APP_PATH}")"
 APP_BIN="${INSTALL_APP_PATH}/Contents/MacOS/bastion"
-CLI_BIN="${INSTALL_APP_PATH}/Contents/MacOS/bastion-cli"
+MCP_BIN="${INSTALL_APP_PATH}/Contents/MacOS/bastion-mcp"
 LAUNCH_AGENT_LABEL="com.bastion.xpc"
 EXPECTED_TEAM_ID="${BASTION_EXPECTED_TEAM_ID:-926A27BQ7W}"
 SERVICE_DOMAIN="gui/$(id -u)/${LAUNCH_AGENT_LABEL}"
@@ -66,19 +66,18 @@ echo "==> Registering background service"
 "${APP_BIN}" --register-service
 /bin/launchctl kickstart -k "gui/$(id -u)/${LAUNCH_AGENT_LABEL}" >/dev/null 2>&1 || true
 
-if [ -x "${CLI_BIN}" ]; then
-  echo "==> Installing CLI symlink"
-  if ! "${ROOT_DIR}/scripts/install-cli-symlink.sh" --cli "${CLI_BIN}" --sudo-if-interactive; then
-    echo "WARN: CLI symlink was not installed. For an interactive privileged install, run:"
-    echo "      \"${ROOT_DIR}/scripts/install-cli-symlink.sh\" --cli \"${CLI_BIN}\" --sudo"
-  fi
+if [ ! -x "${MCP_BIN}" ]; then
+  echo "Bundled bastion-mcp missing or not executable at ${MCP_BIN}" >&2
+  exit 1
 fi
 
 echo "==> Verifying XPC reachability"
 STATUS_OK=0
 STATUS_JSON=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if STATUS_JSON="$("${CLI_BIN}" status 2>/dev/null)"; then
+  MCP_RESPONSE="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bastion_status","arguments":{}}}' | "${MCP_BIN}" 2>/dev/null || true)"
+  STATUS_JSON="$(printf '%s' "${MCP_RESPONSE}" | /usr/bin/plutil -extract result.content.0.text raw -o - - 2>/dev/null || true)"
+  if [ -n "${STATUS_JSON}" ]; then
     STATUS_OK=1
     break
   fi
@@ -98,4 +97,4 @@ fi
 
 echo "==> Install complete"
 echo "App: ${INSTALL_APP_PATH}"
-echo "CLI: ${CLI_BIN}"
+echo "MCP: ${MCP_BIN}"

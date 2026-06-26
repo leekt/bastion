@@ -172,6 +172,109 @@ struct ReleaseUpdateTests {
         #expect(runner.commands.contains { $0.contains("launchctl kickstart") })
     }
 
+    @Test("staged production install accepts bundled MCP without CLI")
+    func stagedProductionInstallAcceptsBundledMCPWithoutCLI() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let installURL = directory.appendingPathComponent("Applications/Bastion.app", isDirectory: true)
+        let extractedApp = directory.appendingPathComponent("Extracted/Bastion.app", isDirectory: true)
+        try makeAppBundle(at: installURL, version: "1.0", build: "1")
+        try makeAppBundle(at: extractedApp, version: "1.1", build: "2", includeCLI: false)
+
+        let bytes = Data("verified staged production update without cli".utf8)
+        let artifactURL = directory.appendingPathComponent("Bastion-1.1-2-macOS.zip")
+        try bytes.write(to: artifactURL)
+        let manifest = makeManifest(
+            version: "1.1",
+            build: "2",
+            downloadURL: artifactURL.absoluteString,
+            sha256: sha256Hex(bytes),
+            sizeBytes: bytes.count
+        )
+        let artifact = try ReleaseUpdateVerifier.verifyArtifact(at: artifactURL, manifest: manifest)
+        let runner = RecordingUpdateCommandRunner()
+
+        let result = try ReleaseUpdateInstaller.installStagedArtifact(
+            manifest: manifest,
+            artifact: artifact,
+            installURL: installURL,
+            backupDirectory: directory.appendingPathComponent("Backups", isDirectory: true),
+            relaunch: false,
+            recoverService: false,
+            installCLISymlink: true,
+            verifyAppBundle: false,
+            environment: testInstallEnvironment(extractedApp: extractedApp, runner: runner)
+        )
+
+        let installed = try ReleaseUpdateVerifier.currentIdentity(appBundleURL: installURL)
+        #expect(installed.version == "1.1")
+        #expect(installed.build == "2")
+        #expect(FileManager.default.isExecutableFile(
+            atPath: installURL.appendingPathComponent("Contents/MacOS/bastion-mcp").path
+        ) == true)
+        #expect(FileManager.default.fileExists(
+            atPath: installURL.appendingPathComponent("Contents/MacOS/bastion-cli").path
+        ) == false)
+        #expect(result.cliSymlinkInstalled == false)
+        #expect(runner.commands.contains { $0.contains("/bin/ln -sf") } == false)
+    }
+
+    @Test("staged install rejects app bundle missing MCP")
+    func stagedInstallRejectsAppBundleMissingMCP() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let installURL = directory.appendingPathComponent("Applications/Bastion.app", isDirectory: true)
+        let extractedApp = directory.appendingPathComponent("Extracted/Bastion.app", isDirectory: true)
+        try makeAppBundle(at: installURL, version: "1.0", build: "1")
+        try makeAppBundle(at: extractedApp, version: "1.1", build: "2", includeMCP: false)
+
+        let bytes = Data("verified staged update missing mcp".utf8)
+        let artifactURL = directory.appendingPathComponent("Bastion-1.1-2-macOS.zip")
+        try bytes.write(to: artifactURL)
+        let manifest = makeManifest(
+            version: "1.1",
+            build: "2",
+            downloadURL: artifactURL.absoluteString,
+            sha256: sha256Hex(bytes),
+            sizeBytes: bytes.count
+        )
+        let artifact = try ReleaseUpdateVerifier.verifyArtifact(at: artifactURL, manifest: manifest)
+        let runner = RecordingUpdateCommandRunner()
+        var sawMissingMCP = false
+
+        do {
+            _ = try ReleaseUpdateInstaller.installStagedArtifact(
+                manifest: manifest,
+                artifact: artifact,
+                installURL: installURL,
+                backupDirectory: directory.appendingPathComponent("Backups", isDirectory: true),
+                relaunch: false,
+                recoverService: false,
+                installCLISymlink: false,
+                verifyAppBundle: false,
+                environment: testInstallEnvironment(extractedApp: extractedApp, runner: runner)
+            )
+            Issue.record("Expected missing bastion-mcp to reject the staged app")
+        } catch let error as ReleaseUpdateInstallError {
+            if case .appBundleInvalid(let reason) = error {
+                sawMissingMCP = reason.contains("bastion-mcp executable missing")
+            } else {
+                Issue.record("Expected appBundleInvalid, got \(error)")
+            }
+        }
+
+        let stillInstalled = try ReleaseUpdateVerifier.currentIdentity(appBundleURL: installURL)
+        #expect(sawMissingMCP == true)
+        #expect(stillInstalled.version == "1.0")
+        #expect(stillInstalled.build == "1")
+    }
+
     @Test("failed service recovery rolls back to previous app")
     func failedServiceRecoveryRollsBack() throws {
         let directory = FileManager.default.temporaryDirectory
@@ -727,7 +830,13 @@ struct ReleaseUpdateTests {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func makeAppBundle(at url: URL, version: String, build: String) throws {
+    private func makeAppBundle(
+        at url: URL,
+        version: String,
+        build: String,
+        includeCLI: Bool = true,
+        includeMCP: Bool = true
+    ) throws {
         let contents = url.appendingPathComponent("Contents", isDirectory: true)
         let macOS = contents.appendingPathComponent("MacOS", isDirectory: true)
         try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
@@ -747,11 +856,18 @@ struct ReleaseUpdateTests {
         try plistData.write(to: contents.appendingPathComponent("Info.plist"))
 
         let appBinary = macOS.appendingPathComponent("bastion")
-        let cliBinary = macOS.appendingPathComponent("bastion-cli")
         try Data("#!/bin/sh\n".utf8).write(to: appBinary)
-        try Data("#!/bin/sh\n".utf8).write(to: cliBinary)
         chmod(appBinary.path, 0o755)
-        chmod(cliBinary.path, 0o755)
+        if includeCLI {
+            let cliBinary = macOS.appendingPathComponent("bastion-cli")
+            try Data("#!/bin/sh\n".utf8).write(to: cliBinary)
+            chmod(cliBinary.path, 0o755)
+        }
+        if includeMCP {
+            let mcpBinary = macOS.appendingPathComponent("bastion-mcp")
+            try Data("#!/bin/sh\n".utf8).write(to: mcpBinary)
+            chmod(mcpBinary.path, 0o755)
+        }
     }
 
     private func temporaryDefaults() -> UserDefaults {

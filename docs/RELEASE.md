@@ -89,6 +89,10 @@ The script also verifies the code signature and prints:
 - zip SHA-256
 - zip size
 
+Release builds set `BASTION_BUNDLE_CLI=0`, so the staged app contains
+`Contents/MacOS/bastion-mcp` and intentionally excludes
+`Contents/MacOS/bastion-cli`.
+
 ## 2. Notarize and Staple
 
 Set the notarytool profile name:
@@ -178,7 +182,7 @@ The manifest currently contains:
 Manifest generation now refuses to run unless `./scripts/release-notarize.sh` has completed successfully for the same bundle identifier, version, build, and team identifier. It then verifies the local app with signature, Gatekeeper, and stapler checks, repacks the ZIP from that verified app, and publishes the hash and size of the repacked artifact. Published manifests therefore only contain `notarized: true` and `stapled: true`.
 
 This is the repository's current update-distribution contract and the stable
-input for the CLI and app update clients.
+input for the app update monitor and optional development update client.
 
 ## 5. Verify the Release Set
 
@@ -192,7 +196,9 @@ This verifies:
 
 - app bundle identifier, executable, Developer ID signature, Gatekeeper
   assessment, and stapled ticket
-- bundled CLI executable and signature
+- bundled Swift `bastion-mcp` executable, signature, and `com.bastion.mcp`
+  signing identifier
+- absence of `bastion-cli` in production release bundles
 - service LaunchAgent label, Mach service, associated bundle identifiers, and
   `BundleProgram = Contents/MacOS/bastion`
 - bundled helper signature when the helper is present
@@ -215,19 +221,19 @@ client validates:
 - newer version/build ordering
 - ZIP SHA-256 and size after download
 
-CLI check:
+Optional development CLI check:
 
 ```bash
 bastion update check --manifest-url "https://downloads.example.com/latest.json"
 ```
 
-CLI download and verification:
+Optional development CLI download and verification:
 
 ```bash
 bastion update download --manifest-url "https://downloads.example.com/latest.json"
 ```
 
-CLI install from a downloaded or already-staged ZIP:
+Optional development CLI install from a downloaded or already-staged ZIP:
 
 ```bash
 bastion update install --manifest-url "https://downloads.example.com/latest.json"
@@ -264,14 +270,14 @@ by default, downloads and verifies the ZIP into Application Support. Set
 `BASTION_AUTO_DOWNLOAD_UPDATES=0` or UserDefaults
 `BastionAutoDownloadUpdates=false` to check without staging downloads.
 
-`bastion update install` verifies the staged ZIP hash/size against the manifest,
-extracts the app, verifies the app bundle identity, runs codesign/Gatekeeper/
-stapler checks by default, moves the previous app to a rollback backup, installs
-the new app, registers/kickstarts the `com.bastion.xpc` service, verifies that
-XPC responds from the new executable, updates the CLI symlink when possible, and
-relaunches Bastion. If install or service recovery fails after the old app has
-been moved aside, the updater restores the backup and recovers the service from
-the restored app.
+The installer verifies the staged ZIP hash/size against the manifest, extracts
+the app, verifies the app bundle identity, runs codesign/Gatekeeper/stapler
+checks by default, moves the previous app to a rollback backup, installs the new
+app, registers/kickstarts the `com.bastion.xpc` service, verifies XPC through the
+bundled `bastion-mcp` status tool, skips the CLI symlink when production bundles
+omit `bastion-cli`, and relaunches Bastion. If install or service recovery fails
+after the old app has been moved aside, the updater restores the backup and
+recovers the service from the restored app.
 
 Useful install options:
 
@@ -308,8 +314,9 @@ This script:
 - registers the app bundle with Launch Services
 - registers the bundled `SMAppService` launch target
 - kickstarts the registered `com.bastion.xpc` service
-- installs `/usr/local/bin/bastion` when writable
-- verifies XPC reachability with `bastion-cli status`
+- verifies the bundled `/Applications/Bastion.app/Contents/MacOS/bastion-mcp`
+  sidecar is present and executable
+- verifies XPC reachability with `bastion_status` through `bastion-mcp`
 - verifies that the responding XPC service executable is the newly installed bundle, not a stale service
 - validates the stapled ticket on the source and installed app bundles
 
@@ -329,10 +336,12 @@ This release flow gives Bastion:
 - notarization and stapling
 - deterministic `/Applications` install behavior
 - deterministic `SMAppService` registration
-- a machine-generated manifest consumed by the CLI and app update monitor
+- a machine-generated manifest consumed by the app update monitor and optional
+  development update client
 - manifest-driven update checks and SHA-256/size verified ZIP staging
 - verified staged update install with relaunch, service recovery, and rollback
-- a single release verification gate for app, service, CLI, DMG, and manifest
+- a single release verification gate for app, service, `bastion-mcp`, DMG, and
+  manifest integrity
   integrity
 
 ## What Is Still Not Implemented
@@ -343,8 +352,8 @@ Still missing:
 
 - delta updates
 - release channel selection
-- unattended policy for when the menu bar app should install without an
-  operator invoking `bastion update install`
+- unattended policy for when the menu bar app should install without operator
+  confirmation
 
 The current repository now has the release pipeline, manifest side, update
 check/download, verified staging, app replacement, relaunch, service recovery,

@@ -96,7 +96,7 @@
 				06779EEB2F63D53A0058B67A /* Sources */,
 				06779EEC2F63D53A0058B67A /* Frameworks */,
 				06779EED2F63D53A0058B67A /* Resources */,
-				BB000001AAAA000000000001 /* Bundle bastion-cli */,
+				BB000001AAAA000000000001 /* Bundle Bastion sidecars */,
 			);
 			buildRules = (
 			);
@@ -224,7 +224,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		BB000001AAAA000000000001 /* Bundle bastion-cli */ = {
+		BB000001AAAA000000000001 /* Bundle Bastion sidecars */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -233,13 +233,14 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/bastion-cli/main.swift",
+				"$(SRCROOT)/bastion-mcp/main.swift",
 				"$(SRCROOT)/scripts/build-bastion-cli.sh",
 			);
-			name = "Bundle bastion-cli";
+			name = "Bundle Bastion sidecars";
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/bastion-cli",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/bastion-mcp",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

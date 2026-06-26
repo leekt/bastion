@@ -138,12 +138,23 @@ nonisolated struct ReleaseUpdateInstallEnvironment: Sendable {
         _ appURL: URL,
         runner: any ReleaseUpdateCommandRunning
     ) throws {
-        let cliURL = appURL.appendingPathComponent("Contents/MacOS/bastion-cli")
+        let mcpURL = appURL.appendingPathComponent("Contents/MacOS/bastion-mcp")
         let expectedExecutable = appURL.appendingPathComponent("Contents/MacOS/bastion").path
+        let request = #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bastion_status","arguments":{}}}"#
+        let escapedMCPPath = shellSingleQuoted(mcpURL.path)
+        let escapedRequest = shellSingleQuoted(request)
 
         for _ in 0..<10 {
-            if let output = try? runner.run(cliURL.path, ["status"]),
-               let data = output.data(using: .utf8),
+            if let output = try? runner.run("/bin/sh", ["-c", "printf '%s\\n' \(escapedRequest) | \(escapedMCPPath)"]),
+               let line = output
+                    .split(separator: "\n")
+                    .first(where: { $0.contains(#""jsonrpc""#) }),
+               let outerData = String(line).data(using: .utf8),
+               let outer = try? JSONSerialization.jsonObject(with: outerData) as? [String: Any],
+               let result = outer["result"] as? [String: Any],
+               let content = result["content"] as? [[String: Any]],
+               let statusText = content.first?["text"] as? String,
+               let data = statusText.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let executablePath = json["executablePath"] as? String,
                executablePath == expectedExecutable {
@@ -155,6 +166,10 @@ nonisolated struct ReleaseUpdateInstallEnvironment: Sendable {
         throw ReleaseUpdateInstallError.serviceRecoveryFailed(
             "XPC service did not respond from \(expectedExecutable)"
         )
+    }
+
+    private static func shellSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
@@ -220,9 +235,9 @@ nonisolated enum ReleaseUpdateInstaller {
             if recoverService {
                 try registerAndRecoverService(installURL, environment: environment)
             }
-            if installCLISymlink {
-                try installBundledCLISymlink(installURL, runner: environment.commandRunner)
-            }
+            let cliSymlinkInstalled = installCLISymlink
+                ? try installBundledCLISymlink(installURL, runner: environment.commandRunner)
+                : false
             if relaunch {
                 try relaunchApp(installURL, runner: environment.commandRunner)
             }
@@ -234,7 +249,7 @@ nonisolated enum ReleaseUpdateInstaller {
                 build: manifest.build,
                 serviceRecovered: recoverService,
                 relaunched: relaunch,
-                cliSymlinkInstalled: installCLISymlink,
+                cliSymlinkInstalled: cliSymlinkInstalled,
                 rollbackPerformed: false
             )
         } catch {
@@ -297,12 +312,12 @@ nonisolated enum ReleaseUpdateInstaller {
         }
 
         let appBinary = appURL.appendingPathComponent("Contents/MacOS/bastion")
-        let cliBinary = appURL.appendingPathComponent("Contents/MacOS/bastion-cli")
+        let mcpBinary = appURL.appendingPathComponent("Contents/MacOS/bastion-mcp")
         guard FileManager.default.isExecutableFile(atPath: appBinary.path) else {
             throw ReleaseUpdateInstallError.appBundleInvalid("main executable missing at \(appBinary.path)")
         }
-        guard FileManager.default.isExecutableFile(atPath: cliBinary.path) else {
-            throw ReleaseUpdateInstallError.appBundleInvalid("CLI executable missing at \(cliBinary.path)")
+        guard FileManager.default.isExecutableFile(atPath: mcpBinary.path) else {
+            throw ReleaseUpdateInstallError.appBundleInvalid("bastion-mcp executable missing at \(mcpBinary.path)")
         }
     }
 
@@ -365,11 +380,15 @@ nonisolated enum ReleaseUpdateInstaller {
     private static func installBundledCLISymlink(
         _ installURL: URL,
         runner: any ReleaseUpdateCommandRunning
-    ) throws {
+    ) throws -> Bool {
         let cliBinary = installURL.appendingPathComponent("Contents/MacOS/bastion-cli")
+        guard FileManager.default.isExecutableFile(atPath: cliBinary.path) else {
+            return false
+        }
         do {
             _ = try runner.run("/bin/mkdir", ["-p", "/usr/local/bin"])
             _ = try runner.run("/bin/ln", ["-sf", cliBinary.path, "/usr/local/bin/bastion"])
+            return true
         } catch {
             throw ReleaseUpdateInstallError.cliSymlinkInstallFailed(error.localizedDescription)
         }

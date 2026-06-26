@@ -3,17 +3,19 @@
 set -eu
 
 CLI_SOURCE_FILE="${SRCROOT}/bastion-cli/main.swift"
+MCP_SOURCE_FILE="${SRCROOT}/bastion-mcp/main.swift"
 UPDATE_SOURCE_FILE="${SRCROOT}/bastion/Utilities/ReleaseUpdate.swift"
 UPDATE_INSTALLER_SOURCE_FILE="${SRCROOT}/bastion/Utilities/ReleaseUpdateInstaller.swift"
 OUTPUT_DIR="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
-OUTPUT_FILE="${OUTPUT_DIR}/bastion-cli"
+CLI_OUTPUT_FILE="${OUTPUT_DIR}/bastion-cli"
+MCP_OUTPUT_FILE="${OUTPUT_DIR}/bastion-mcp"
 HELPER_BUNDLE_IDENTIFIER="${BASTION_HELPER_BUNDLE_ID:-${PRODUCT_BUNDLE_IDENTIFIER}.helper}"
 HELPER_SOURCE_APP="${BUILT_PRODUCTS_DIR}/bastion-helper.app"
 HELPER_OUTPUT_DIR="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
 HELPER_OUTPUT_APP="${HELPER_OUTPUT_DIR}/bastion-helper.app"
 AGENT_PLIST_DIR="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchAgents"
 AGENT_PLIST_FILE="${AGENT_PLIST_DIR}/com.bastion.xpc.plist"
-TEMP_DIR="${TARGET_TEMP_DIR}/bastion-cli"
+TEMP_DIR="${TARGET_TEMP_DIR}/bastion-sidecars"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
 SWIFTC="$(xcrun --find swiftc)"
 
@@ -24,30 +26,61 @@ fi
 
 mkdir -p "${OUTPUT_DIR}" "${HELPER_OUTPUT_DIR}" "${AGENT_PLIST_DIR}" "${TEMP_DIR}"
 
-set --
-for ARCH in ${ARCHS}; do
-    ARCH_OUTPUT="${TEMP_DIR}/bastion-cli-${ARCH}"
-    TARGET_TRIPLE="${ARCH}-apple-macos${MACOSX_DEPLOYMENT_TARGET}"
+build_sidecar() {
+    output_file="$1"
+    identifier="$2"
+    shift 2
 
-    "${SWIFTC}" \
+    outputs=""
+    for ARCH in ${ARCHS}; do
+        arch_output="${TEMP_DIR}/$(basename "${output_file}")-${ARCH}"
+        target_triple="${ARCH}-apple-macos${MACOSX_DEPLOYMENT_TARGET}"
+
+        "${SWIFTC}" \
+            "$@" \
+            -sdk "${SDK_PATH}" \
+            -target "${target_triple}" \
+            "${SWIFT_OPT}" \
+            -o "${arch_output}"
+
+        outputs="${outputs} ${arch_output}"
+    done
+
+    arch_count="$(printf '%s\n' ${ARCHS} | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+    if [ "${arch_count}" -eq 1 ]; then
+        # shellcheck disable=SC2086
+        /bin/cp ${outputs} "${output_file}"
+    else
+        # shellcheck disable=SC2086
+        /usr/bin/lipo -create ${outputs} -output "${output_file}"
+    fi
+
+    /bin/chmod 755 "${output_file}"
+
+    if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+        /usr/bin/codesign \
+            --force \
+            --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+            --timestamp=none \
+            --identifier "${identifier}" \
+            "${output_file}"
+    fi
+}
+
+echo "==> Building bundled bastion-mcp bridge"
+build_sidecar "${MCP_OUTPUT_FILE}" "com.bastion.mcp" "${MCP_SOURCE_FILE}"
+
+if [ "${BASTION_BUNDLE_CLI:-1}" != "0" ]; then
+    echo "==> Building bundled bastion-cli development bridge"
+    build_sidecar \
+        "${CLI_OUTPUT_FILE}" \
+        "bastion-cli" \
         "${CLI_SOURCE_FILE}" \
         "${UPDATE_SOURCE_FILE}" \
-        "${UPDATE_INSTALLER_SOURCE_FILE}" \
-        -sdk "${SDK_PATH}" \
-        -target "${TARGET_TRIPLE}" \
-        "${SWIFT_OPT}" \
-        -o "${ARCH_OUTPUT}"
-
-    set -- "$@" "${ARCH_OUTPUT}"
-done
-
-if [ "$#" -eq 1 ]; then
-    /bin/cp "$1" "${OUTPUT_FILE}"
+        "${UPDATE_INSTALLER_SOURCE_FILE}"
 else
-    /usr/bin/lipo -create "$@" -output "${OUTPUT_FILE}"
+    /bin/rm -f "${CLI_OUTPUT_FILE}"
 fi
-
-/bin/chmod 755 "${OUTPUT_FILE}"
 
 if [ -d "${HELPER_SOURCE_APP}" ]; then
     /bin/rm -rf "${HELPER_OUTPUT_APP}"
@@ -85,7 +118,3 @@ cat > "${AGENT_PLIST_FILE}" <<EOF
 </dict>
 </plist>
 EOF
-
-if [ "${CODE_SIGNING_ALLOWED:-NO}" = "YES" ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
-    /usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --timestamp=none "${OUTPUT_FILE}"
-fi

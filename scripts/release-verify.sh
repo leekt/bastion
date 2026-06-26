@@ -42,6 +42,7 @@ fi
 INFO_PLIST="${APP_PATH}/Contents/Info.plist"
 APP_BIN="${APP_PATH}/Contents/MacOS/bastion"
 CLI_BIN="${APP_PATH}/Contents/MacOS/bastion-cli"
+MCP_BIN="${APP_PATH}/Contents/MacOS/bastion-mcp"
 SERVICE_PLIST="${APP_PATH}/Contents/Library/LaunchAgents/com.bastion.xpc.plist"
 HELPER_APP="${APP_PATH}/Contents/Helpers/bastion-helper.app"
 
@@ -63,11 +64,18 @@ echo "==> Verifying app signature and notarization"
 verify_signature "${APP_PATH}"
 verify_app_assessment "${APP_PATH}"
 
-echo "==> Verifying bundled CLI"
-if [ ! -x "${CLI_BIN}" ]; then
-  fail "Bundled CLI missing or not executable at ${CLI_BIN}"
+echo "==> Verifying bundled Swift MCP/REST bridge"
+if [ ! -x "${MCP_BIN}" ]; then
+  fail "Bundled bastion-mcp missing or not executable at ${MCP_BIN}"
 fi
-verify_signature "${CLI_BIN}"
+verify_signature "${MCP_BIN}"
+MCP_IDENTIFIER="$(/usr/bin/codesign -dv "${MCP_BIN}" 2>&1 | /usr/bin/awk -F= '/^Identifier=/{print $2}')"
+if [ "${MCP_IDENTIFIER}" != "com.bastion.mcp" ]; then
+  fail "Unexpected bastion-mcp code-signing identifier: ${MCP_IDENTIFIER:-<none>}"
+fi
+if [ -e "${CLI_BIN}" ]; then
+  fail "Production release must not bundle bastion-cli at ${CLI_BIN}"
+fi
 
 echo "==> Verifying service launch plist"
 if [ ! -f "${SERVICE_PLIST}" ]; then

@@ -33,6 +33,7 @@ Use these commands before merging QA or runtime evidence changes:
 ```bash
 python3 qa/audit_goal_completion.py --require-complete
 python3 qa/app_runtime_rows.py --count
+bash qa/run_bastion_mcp_smoke.sh
 bash qa/run_available_checks.sh
 git diff --check
 ```
@@ -45,10 +46,13 @@ Completion audit: complete
 Available checks passed.
 ```
 
-`qa/run_available_checks.sh` covers workbook rebuild/audit, Swift app and test
-target typechecks, deterministic Swift tests, shell/lifecycle fixtures, CLI
-symlink helper fixtures, native CLI/REST/MCP checks, MCP typecheck, final
-tracker workbook audit, and completion-audit negative fixtures.
+`qa/run_bastion_mcp_smoke.sh` compiles the production Swift sidecar and checks
+MCP schema/local validation plus REST auth, origin rejection, token entropy, and
+body-limit behavior without requiring a live XPC service. `qa/run_available_checks.sh`
+covers workbook rebuild/audit, Swift app and test target typechecks,
+deterministic Swift tests, shell/lifecycle fixtures, CLI symlink helper
+fixtures, native CLI/REST/MCP checks, MCP typecheck, final tracker workbook
+audit, and completion-audit negative fixtures.
 
 ## Live Integration Tests
 

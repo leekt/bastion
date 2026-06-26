@@ -19,6 +19,22 @@ import Foundation
         withReply reply: @escaping (Data?, Error?) -> Void
     )
 
+    // Trusted agent bridge — production bastion-mcp only.
+    func bridgeStartPairing(agentIdentifier: String, processName: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func bridgePollPairing(requestId: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func bridgeGetPublicKey(agentProfileId: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func bridgeGetRules(agentProfileId: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func bridgeGetState(agentProfileId: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func bridgeGetServiceInfo(agentProfileId: String?, withReply reply: @escaping (Data?, Error?) -> Void)
+    func bridgeSign(data: Data, requestID: String, agentProfileId: String, withReply reply: @escaping (Data?, Error?) -> Void)
+    func bridgeSignStructured(
+        operationType: String,
+        operationData: Data,
+        requestID: String,
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    )
+
     // Wallet groups — see app target's BastionXPCProtocol.swift for docs.
     func createWalletGroup(requestData: Data, withReply reply: @escaping (Data?, Error?) -> Void)
     func listWalletGroups(withReply reply: @escaping (Data?, Error?) -> Void)

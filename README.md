@@ -1,6 +1,6 @@
 # Bastion
 
-Hardware-backed signing guard for AI agents on macOS. Bastion uses Apple Secure Enclave to hold private keys and macOS Keychain for tamper-resistant state storage. Agents interact through a CLI that communicates with the app over XPC. Requests are reviewed against per-client policy, and rule overrides require explicit approval plus owner authentication.
+Hardware-backed signing guard for AI agents on macOS. Bastion uses Apple Secure Enclave to hold private keys and macOS Keychain for tamper-resistant state storage. Agents integrate through the signed `bastion-mcp` bridge bundled inside `Bastion.app`, which speaks MCP stdio or localhost REST directly over XPC. Requests are reviewed against per-agent policy, and rule overrides require explicit approval plus owner authentication.
 
 ## Why
 
@@ -37,9 +37,9 @@ The product is built around four constraints:
 ```
 Agent (Python / TypeScript / any process)
   |
-  |  subprocess: bastion eth userOp --op 0xTarget,0,0x
+  |  MCP stdio or localhost REST
   v
-bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
+bastion-mcp --- XPC (signed bundled bridge) ---> Bastion.app (menu bar)
                                         |
                                         +-- CalldataDecoder (parse UserOp calldata)
                                         +-- RuleEngine (config from Keychain)
@@ -50,7 +50,7 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
                                         +-- s-normalization (OZ P256 compatibility)
                                               |
                                               v
-                                        JSON response ---> stdout ---> Agent / bundler client
+                                        JSON response ---> MCP/REST ---> Agent / bundler client
                                                                         |
                                                                         +-- Standard RPC fee estimate
                                                                         |     (EIP-1559, 1.2x base fee)
@@ -79,19 +79,20 @@ bastion-cli --- XPC (code-signed) ---> Bastion.app (menu bar)
 
 ### What agents can do
 
-- **Sign raw data** (`bastion sign`) — controlled by a simple on/off raw-message policy
-- **Sign Ethereum operations** (`bastion eth message|typedData|userOp`) — structured signing with operation-specific policy:
+- **Pair once with owner approval** (`bastion_pair_agent`, `POST /pair`) — creates a Bastion-managed agent profile used as the policy and audit identity behind the signed bridge
+- **Sign raw data** (`bastion_sign_raw`, `POST /sign/raw`) — controlled by a simple on/off raw-message policy
+- **Sign Ethereum operations** (`bastion_sign_message`, `bastion_sign_typed_data`, `bastion_send_user_op`, `POST /sign/*`) — structured signing with operation-specific policy:
   - raw / personal-sign: toggle only
   - EIP-712 typed data: domain + primary-type + JSON subset matching
   - UserOperation: chain, target, rate, and spending controls
-  Prefer `bastion eth userOp --op <target,value,data>` for normal use. Bastion builds the Kernel `execute()` calldata and final ERC-4337 UserOperation inside the app. Use `--json-file` only for advanced explicit UserOperation debugging. The documented examples are in `docs/CLI_REQUEST_EXAMPLES.md`.
-- **Read public key** (`bastion pubkey`) — always allowed
-- **Read rules** (`bastion rules`) — always allowed
-- **Read state** (`bastion state`) — check remaining quota per rate limit window
-- **Check status** (`bastion status`) — health check
-- **Export support context** (`bastion support-bundle`) — redacted service diagnostics, config shape, recent audit context, and crash metadata
-- **Check/stage updates** (`bastion update check|download`) — validate the release manifest and verify downloaded ZIP hash/size before staging
-- **Manage wallet groups** (`bastion groups …`) — owner-authenticated commands to create shared wallet groups and add agents with scoped policies (see [Wallet Groups](#wallet-groups))
+  Prefer high-level `bastion_send_user_op` actions for normal use. Bastion builds the Kernel `execute()` calldata and final ERC-4337 UserOperation inside the app. Explicit UserOperation JSON is still available for advanced debugging.
+- **Read public key** (`bastion_get_account`, `GET /account`) — allowed after pairing
+- **Read rules** (`bastion_get_rules`, `GET /rules`) — allowed after pairing
+- **Read state** (`bastion_get_state`, `GET /state`) — check remaining quota per rate limit window
+- **Check status** (`bastion_status`, `GET /status`) — health check
+- **Manage wallet groups** (`bastion_create_wallet_group`, `bastion_add_agent_to_group`, `/groups/*`) — owner-authenticated commands to create shared wallet groups and add agents with scoped policies (see [Wallet Groups](#wallet-groups))
+
+The legacy `bastion-cli` command remains useful for development and QA, but production DMG releases are built around the bundled `bastion-mcp` bridge and do not require a user-installed CLI.
 
 ### What agents cannot do
 
@@ -130,11 +131,13 @@ In short: the hardware key stays silent, and Bastion policy decides when user in
 ### Signing flow
 
 ```
-1. bastion-cli sends sign request over XPC (raw or structured)
-2. XPCServer verifies client code signature + team ID
-3. Parse operation type (message / typedData / userOperation)
-4. CalldataDecoder inspects UserOp calldata → extract inner targets + direct token amounts
-5. RuleEngine.validate():
+1. The bundled `bastion-mcp` bridge receives an MCP tool call or localhost REST request
+2. `bastion-mcp` calls `com.bastion.xpc` directly without spawning the CLI
+3. XPCServer verifies the bridge signature, team ID, and bundled executable path
+4. XPCServer resolves the provided `agentProfileId` to a Bastion-managed paired profile
+5. Parse operation type (message / typedData / userOperation)
+6. CalldataDecoder inspects UserOp calldata → extract inner targets + direct token amounts
+7. RuleEngine.validate():
    - Client allowlist
    - Allowed hours
    - Chain ID whitelist
@@ -143,29 +146,29 @@ In short: the hardware key stays silent, and Bastion policy decides when user in
    - Spending limits (direct native/ERC-20 amounts from decoded calldata)
 
    If all rules pass and no interactive review is required:
-     6a. Sign immediately with the client's Secure Enclave key
-     6b. No approval popup
-     6c. No owner auth prompt
+     8a. Sign immediately with the client's Secure Enclave key
+     8b. No approval popup
+     8c. No owner auth prompt
 
    If all rules pass but interactive review is required:
-     6a. Show approval popup
-     6b. If the client auth policy is not `.open`, ask for owner auth after approval
-     6c. Sign with the same client key
+     8a. Show approval popup
+     8b. If the client auth policy is not `.open`, ask for owner auth after approval
+     8c. Sign with the same client key
 
    If any rule fails:
-     6a. Show violation popup (what rule was broken)
-     6b. User approves → owner auth (`.biometricOrPasscode`)
-     6c. Sign with the same client key
+     8a. Show violation popup (what rule was broken)
+     8b. User approves → owner auth (`.biometricOrPasscode`)
+     8c. Sign with the same client key
 
-7. For high-level `eth userOp --op ... --send` requests:
+9. For high-level `bastion_send_user_op` / `POST /sign/user-op` requests:
    - Bastion builds the Kernel `execute()` calldata
    - Bastion sponsors / estimates the UserOperation first
    - Bastion only performs the real signature after approval / override is complete
    - Bastion then submits the signed UserOperation to ZeroDev
-8. For UserOps: normalize s <= N/2 (OZ P256 on-chain requirement)
-9. Increment counters in Keychain (rate limit + spending)
-10. Record request-level audit history
-11. Return JSON response via XPC → CLI stdout → Agent
+10. For UserOps: normalize s <= N/2 (OZ P256 on-chain requirement)
+11. Increment counters in Keychain (rate limit + spending)
+12. Record request-level audit history
+13. Return JSON response via XPC -> `bastion-mcp` -> Agent
 
 For live UserOps, the client can seed gas fees from chain-native EIP-1559 data and only fall back to bundler-specific fee floors when `eth_sendUserOperation` rejects the initial estimate.
 ```
@@ -244,7 +247,9 @@ bastion.xcodeproj
 │       ├── KeychainStore.swift
 │       ├── CLIInstaller.swift
 │       └── AuditLog.swift
-├── bastion-cli/                       # CLI source bundled into the built app
+├── bastion-mcp/                       # Production Swift MCP/REST bridge bundled into the app
+│   └── main.swift
+├── bastion-cli/                       # Optional dev/QA CLI source
 │   └── main.swift
 └── bastionTests/                      # Unit tests
     ├── StateStoreTests.swift          # RuleEngine + StateStore tests (mock keychain)
@@ -279,10 +284,10 @@ These should already be set:
    - Creates Secure Enclave signing key
    - Registers the bundled `SMAppService` agent for XPC
    - Registers the main binary as the `SMAppService` launch target (`BundleProgram = Contents/MacOS/bastion`)
-   - Attempts to symlink `bastion-cli` to `/usr/local/bin/bastion` when running from `/Applications` or `~/Applications`
-   - Bundles the CLI at `<installed app>/Contents/MacOS/bastion-cli`; the dev helper installs that bundle as `~/Applications/Bastion Dev.app`
+   - Bundles the signed production bridge at `<installed app>/Contents/MacOS/bastion-mcp`
+   - Leaves `bastion-cli` symlink installation disabled unless `BASTION_ENABLE_CLI_SYMLINK=1` is set for development
 
-For day-to-day development, prefer the signed rebuild helper instead of raw `xcodebuild`. It rebuilds to a fixed DerivedData path, copies the signed app to `~/Applications/Bastion Dev.app`, unregisters stale Bastion app bundles, kills stale relay/helper processes, registers the bundled `SMAppService` agent from that stable install path, kickstarts the helper, and verifies the CLI/XPC path cleanly:
+For day-to-day development, prefer the signed rebuild helper instead of raw `xcodebuild`. It rebuilds to a fixed DerivedData path, copies the signed app to `~/Applications/Bastion Dev.app`, unregisters stale Bastion app bundles, kills stale relay/helper processes, registers the bundled `SMAppService` agent from that stable install path, kickstarts the helper, and verifies the local XPC path cleanly:
 
 ```bash
 ./scripts/dev-rebuild-signed.sh
@@ -292,9 +297,10 @@ This helper also disables Xcode's debug dylib / previews path for the developmen
 If your local Apple development profiles use private bundle identifiers, set
 `BASTION_APP_BUNDLE_ID` and `BASTION_HELPER_BUNDLE_ID` in the shell or in an
 ignored `.bastion-dev-local.env` file before running the helper.
-When the dev rebuild runs in an interactive terminal and `/usr/local/bin/bastion`
-needs admin privileges, it asks for sudo through `scripts/install-cli-symlink.sh`;
-non-interactive runs print the exact repair command instead of hanging.
+When the dev rebuild runs with optional CLI symlink installation enabled and
+`/usr/local/bin/bastion` needs admin privileges, it asks for sudo through
+`scripts/install-cli-symlink.sh`; non-interactive runs print the exact repair
+command instead of hanging.
 The signing identity must be usable by non-interactive `codesign`; an identity
 listed by `security find-identity` can still block the rebuild if its private key
 is locked or requires keychain approval in this shell. If that happens, run the
@@ -339,7 +345,9 @@ verify, upload workflow artifacts, and publish the ZIP/DMG/JSON release set to
 the matching GitHub Release when the required signing and notary secrets are
 configured.
 
-For update checks and verified ZIP staging:
+For update checks and verified ZIP staging, the menu bar update monitor is the
+production path. The optional development CLI can still exercise the same update
+client:
 
 ```bash
 bastion update check --manifest-url "https://downloads.example.com/latest.json"
@@ -349,9 +357,9 @@ bastion update install --manifest-url "https://downloads.example.com/latest.json
 
 The menu bar app also checks and stages updates automatically when
 `BASTION_UPDATE_MANIFEST_URL` or the `BastionUpdateManifestURL` UserDefaults key
-is configured. `bastion update install` verifies the staged ZIP, replaces the
-installed app with a rollback backup, recovers the XPC service, updates the CLI
-symlink when possible, and relaunches Bastion.
+is configured. The installer verifies the staged ZIP, replaces the installed app
+with a rollback backup, recovers the XPC service through `bastion-mcp`, skips the
+CLI symlink when production bundles omit `bastion-cli`, and relaunches Bastion.
 
 ### 4. Verify the registered background service
 
@@ -412,16 +420,22 @@ Or request a correlated notification probe directly:
 bastion notification-probe --id manual-check
 ```
 
-### 5. Install the CLI manually (if auto-install failed)
+### 5. Optional dev CLI symlink
 
 ```bash
 BASTION_APP="$HOME/Applications/Bastion Dev.app"
 ./scripts/install-cli-symlink.sh --app "$BASTION_APP" --sudo
 ```
 
+Production DMG artifacts are verified to exclude `bastion-cli`; agents should use
+`/Applications/Bastion.app/Contents/MacOS/bastion-mcp`.
+
 ---
 
-## CLI usage
+## Optional CLI usage
+
+The CLI is development and QA tooling. It is not required for production agent
+operation, and production releases do not bundle it.
 
 ```bash
 # Check if the app is running
@@ -483,33 +497,38 @@ See `docs/CLI_REQUEST_EXAMPLES.md` for validated `message`, `typedData`, and `us
 
 ### From an AI agent
 
-**Python:**
+After installing the DMG, configure the agent to run the bundled bridge:
 
-```python
-import subprocess, json
-
-result = subprocess.run(
-    ["bastion", "sign", "--data", "a3f1c2d4e5b6..."],
-    capture_output=True, text=True, timeout=65
-)
-if result.returncode != 0:
-    raise Exception(result.stderr)
-
-sig = json.loads(result.stdout)
-# sig["pubkeyX"], sig["pubkeyY"], sig["r"], sig["s"]
+```json
+{
+  "mcpServers": {
+    "bastion": {
+      "command": "/Applications/Bastion.app/Contents/MacOS/bastion-mcp",
+      "env": {
+        "BASTION_AGENT_PROFILE_ID": "<paired-profile-id>"
+      }
+    }
+  }
+}
 ```
 
-**TypeScript:**
+First-time setup uses the MCP tools `bastion_pair_agent` and
+`bastion_poll_pairing`; once the owner approves the pairing in Bastion, save the
+returned profile ID as `BASTION_AGENT_PROFILE_ID`.
 
-```typescript
-import { execFileSync } from "child_process";
+For local HTTP integration, start REST mode with an explicit bearer token:
 
-const result = execFileSync(
-  "bastion",
-  ["sign", "--data", "a3f1c2d4e5b6..."],
-  { timeout: 65000 }
-);
-const sig = JSON.parse(result.toString());
+```bash
+TOKEN="$(openssl rand -hex 32)"
+BASTION_API_TOKEN="$TOKEN" /Applications/Bastion.app/Contents/MacOS/bastion-mcp rest
+```
+
+Then call the loopback API:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  -H "X-Bastion-Agent-Profile: <paired-profile-id>" \
+  http://127.0.0.1:9587/account
 ```
 
 ## Uninstall
@@ -518,7 +537,7 @@ const sig = JSON.parse(result.toString());
 # Stop the registered background service
 launchctl bootout gui/$(id -u)/com.bastion.xpc
 
-# Remove CLI symlink
+# Remove optional dev CLI symlink, if installed
 sudo rm /usr/local/bin/bastion
 
 # Remove audit log
@@ -528,13 +547,13 @@ rm -rf ~/Library/Application\ Support/Bastion/
 # (drag /Applications/Bastion.app or ~/Applications/Bastion\ Dev.app to Trash)
 ```
 
-Secure Enclave keys persist in the hardware keychain. The recommended way to clear all Bastion-managed signing keys is:
+Secure Enclave keys persist in the hardware keychain. In development, the optional CLI can clear all Bastion-managed signing keys:
 
 ```bash
 bastion reset-keys
 ```
 
-To rotate one private-client key without deleting every Bastion key:
+To rotate one private-client key without deleting every Bastion key with the optional CLI:
 
 ```bash
 bastion rotate-client-key <profileId>
@@ -561,12 +580,12 @@ Wallet-group key rotation and recovery runbooks are documented in
 
 ## Agent integration: MCP server & REST API
 
-For tools and agents that don't shell out, Bastion ships an MCP server and a localhost REST API in [`mcp/`](mcp/). Both wrap the same `bastion-cli` binary, so they enforce the exact same rule engine and Secure Enclave path.
+Production Bastion ships a signed Swift MCP server and localhost REST API at `/Applications/Bastion.app/Contents/MacOS/bastion-mcp`. The bridge calls `com.bastion.xpc` directly and does not spawn `bastion-cli`.
 
 - **MCP server** (stdio) — drop into Claude Code / Cursor as an MCP server; exposes signing tools and wallet-group management as `bastion_*` tools
-- **REST API** (Hono on `127.0.0.1:9587`) — bearer-token auth on every route (including `/health`), CSRF/origin guard, 1 MiB body cap, and startup refusal unless `BASTION_API_TOKEN` passes a 128-bit estimated entropy check
+- **REST API** (`127.0.0.1:9587`) — bearer-token auth on every route (including `/health`), CSRF/origin guard, 1 MiB body cap, and startup refusal unless `BASTION_API_TOKEN` passes a 128-bit estimated entropy check
 
-See [`mcp/README.md`](mcp/README.md) for the full tool/endpoint matrix and security notes.
+The old TypeScript implementation under [`mcp/`](mcp/) is kept as a legacy development reference; see [`mcp/README.md`](mcp/README.md) for the current production tool/endpoint matrix and security notes.
 
 ## On-chain component
 

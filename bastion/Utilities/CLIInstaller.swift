@@ -24,6 +24,9 @@ final class CLIInstaller {
         guard isRunningAsLaunchAgentService || isStableInstalledBundleLocation else {
             return
         }
+        guard ProcessInfo.processInfo.environment["BASTION_ENABLE_CLI_SYMLINK"] == "1" else {
+            return
+        }
 
         let outcome = installCLISymlink()
         if case .failed(let reason) = outcome {

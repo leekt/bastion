@@ -36,6 +36,40 @@ struct XPCSecurityTests {
         #expect(XPCServer.isAllowedTeamIdentifier(nil) == false)
     }
 
+    @Test("Trusted agent bridge identity is path-bound to bundled MCP")
+    func trustedAgentBridgeIdentityIsPathBoundToBundledMCP() {
+        let hostBundleURL = URL(fileURLWithPath: "/Applications/Bastion.app", isDirectory: true)
+        let bundledMCPPath = hostBundleURL
+            .appendingPathComponent("Contents/MacOS/bastion-mcp")
+            .path
+
+        #expect(XPCServer.trustedAgentBridgeBundleId == "com.bastion.mcp")
+        #expect(XPCServer.isTrustedAgentBridgeBundleId("com.bastion.mcp") == true)
+        #expect(XPCServer.isTrustedAgentBridgeBundleId("COM.BASTION.MCP") == true)
+        #expect(XPCServer.isTrustedAgentBridgeBundleId("bastion-cli") == false)
+        #expect(XPCServer.isTrustedAgentBridgeBundleId(nil) == false)
+        #expect(XPCServer.isTrustedAgentBridgeClient(
+            bundleId: "com.bastion.mcp",
+            executablePath: bundledMCPPath,
+            hostBundleURL: hostBundleURL
+        ) == true)
+        #expect(XPCServer.isTrustedAgentBridgeClient(
+            bundleId: "com.bastion.mcp",
+            executablePath: "/tmp/bastion-mcp",
+            hostBundleURL: hostBundleURL
+        ) == false)
+        #expect(XPCServer.isTrustedAgentBridgeClient(
+            bundleId: "bastion-cli",
+            executablePath: bundledMCPPath,
+            hostBundleURL: hostBundleURL
+        ) == false)
+        #expect(XPCServer.isTrustedAgentBridgeClient(
+            bundleId: "com.bastion.mcp",
+            executablePath: nil,
+            hostBundleURL: hostBundleURL
+        ) == false)
+    }
+
     @Test("Missing profile read message is actionable")
     func missingProfileReadMessageIsActionable() {
         #expect(XPCServer.missingClientProfileReadMessage == "Pair this client with Bastion before reading pubkey, rules, or state.")

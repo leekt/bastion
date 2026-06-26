@@ -5,6 +5,7 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
     static let shared = XPCServer()
     nonisolated static let missingClientProfileReadMessage =
         "Pair this client with Bastion before reading pubkey, rules, or state."
+    nonisolated static let trustedAgentBridgeBundleId = "com.bastion.mcp"
 
     nonisolated static func normalizedPairingDisplayInputs(
         bundleId: String,
@@ -77,7 +78,13 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
         }
 
         let clientBundleId = bundleIdentifier(for: newConnection.processIdentifier)
-        if let denial = ruleEngine.globalClientAllowlistDenial(bundleId: clientBundleId) {
+        let clientExecutablePath = executablePath(for: newConnection.processIdentifier)
+        let isTrustedAgentBridge = Self.isTrustedAgentBridgeClient(
+            bundleId: clientBundleId,
+            executablePath: clientExecutablePath
+        )
+        if !isTrustedAgentBridge,
+           let denial = ruleEngine.globalClientAllowlistDenial(bundleId: clientBundleId) {
             NSLog("[XPCServer] Rejecting connection from %@: %@", clientBundleId ?? "<unknown>", denial)
             DiagnosticLog.shared.record(
                 level: .warning,
@@ -96,6 +103,7 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
         newConnection.exportedObject = XPCHandler(
             ruleEngine: ruleEngine,
             clientBundleId: clientBundleId,
+            isTrustedAgentBridge: isTrustedAgentBridge,
             activeConnectionCountProvider: { [weak self] in
                 self?.activeConnectionCount() ?? 0
             }
@@ -243,11 +251,7 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
             return false
         }
 
-#if DEBUG
         let executablePath = executablePath(for: pid)
-#else
-        let executablePath: String? = nil
-#endif
         return Self.isClientSigningInfoAllowed(
             signingInfo,
             validityStatus: validityStatus,
@@ -269,6 +273,27 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
 
     nonisolated static func isAllowedTeamIdentifier(_ teamID: String?) -> Bool {
         teamID == Self.requiredTeamID
+    }
+
+    nonisolated static func isTrustedAgentBridgeBundleId(_ bundleId: String?) -> Bool {
+        guard let bundleId else { return false }
+        return bundleId.caseInsensitiveCompare(Self.trustedAgentBridgeBundleId) == .orderedSame
+    }
+
+    nonisolated static func isTrustedAgentBridgeClient(
+        bundleId: String?,
+        executablePath: String?,
+        hostBundleURL: URL = Bundle.main.bundleURL
+    ) -> Bool {
+        guard isTrustedAgentBridgeBundleId(bundleId),
+              let executablePath else {
+            return false
+        }
+        let expectedPath = hostBundleURL
+            .appendingPathComponent("Contents/MacOS/bastion-mcp")
+            .standardizedFileURL
+            .path
+        return URL(fileURLWithPath: executablePath).standardizedFileURL.path == expectedPath
     }
 
     nonisolated static func isClientSigningInfoAllowed(
@@ -324,7 +349,6 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
             == bundledCLI.standardizedFileURL.path
     }
 
-#if DEBUG
     private nonisolated func executablePath(for pid: Int32) -> String? {
         var buffer = [CChar](repeating: 0, count: 4096)
         let result = proc_pidpath(pid, &buffer, UInt32(buffer.count))
@@ -333,7 +357,6 @@ final class XPCServer: NSObject, NSXPCListenerDelegate {
         }
         return String(cString: buffer)
     }
-#endif
 }
 
 // Separate handler class for XPC callbacks (runs on XPC queue, not MainActor)
@@ -361,6 +384,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
 
     private let ruleEngine: RuleEngine
     private let clientBundleId: String?
+    private let isTrustedAgentBridge: Bool
     private let activeConnectionCountProvider: () -> Int
 
     private struct UserOperationNotificationProbePayload {
@@ -374,10 +398,12 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     nonisolated init(
         ruleEngine: RuleEngine,
         clientBundleId: String?,
+        isTrustedAgentBridge: Bool = false,
         activeConnectionCountProvider: @escaping () -> Int
     ) {
         self.ruleEngine = ruleEngine
         self.clientBundleId = clientBundleId
+        self.isTrustedAgentBridge = isTrustedAgentBridge
         self.activeConnectionCountProvider = activeConnectionCountProvider
         super.init()
     }
@@ -469,8 +495,9 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     }
 
     @MainActor
-    private func enforceGlobalClientAllowlist() throws {
-        if let denial = ruleEngine.globalClientAllowlistDenial(bundleId: clientBundleId) {
+    private func enforceGlobalClientAllowlist(bundleId: String? = nil) throws {
+        let effectiveBundleId = bundleId ?? clientBundleId
+        if let denial = ruleEngine.globalClientAllowlistDenial(bundleId: effectiveBundleId) {
             throw NSError(
                 domain: "com.bastion.error",
                 code: BastionError.ruleViolation.rawValue,
@@ -480,9 +507,10 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     }
 
     @MainActor
-    private func existingClientContext() throws -> ClientSigningContext {
-        try enforceGlobalClientAllowlist()
-        guard let bundleId = clientBundleId,
+    private func existingClientContext(bundleId: String? = nil) throws -> ClientSigningContext {
+        let effectiveBundleId = bundleId ?? clientBundleId
+        try enforceGlobalClientAllowlist(bundleId: effectiveBundleId)
+        guard let bundleId = effectiveBundleId,
               ruleEngine.clientProfile(bundleId: bundleId) != nil else {
             throw NSError(
                 domain: "com.bastion.error",
@@ -494,9 +522,10 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     }
 
     @MainActor
-    private func enforceSigningPreflightAllowed() throws {
-        try enforceGlobalClientAllowlist()
-        if let denial = ruleEngine.signingBlockedReason(for: clientBundleId) {
+    private func enforceSigningPreflightAllowed(bundleId: String? = nil) throws {
+        let effectiveBundleId = bundleId ?? clientBundleId
+        try enforceGlobalClientAllowlist(bundleId: effectiveBundleId)
+        if let denial = ruleEngine.signingBlockedReason(for: effectiveBundleId) {
             throw NSError(
                 domain: "com.bastion.error",
                 code: BastionError.ruleViolation.rawValue,
@@ -521,9 +550,10 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     }
 
     @MainActor
-    private func enforceStaticSigningPolicy(operation: SigningOperation) throws {
-        try enforceSigningPreflightAllowed()
-        let context = try existingClientContext()
+    private func enforceStaticSigningPolicy(operation: SigningOperation, bundleId: String? = nil) throws {
+        let effectiveBundleId = bundleId ?? clientBundleId
+        try enforceSigningPreflightAllowed(bundleId: effectiveBundleId)
+        let context = try existingClientContext(bundleId: effectiveBundleId)
         if case .userOperation(let op) = operation,
            let expected = context.accountAddress,
            op.sender.lowercased() != expected.lowercased() {
@@ -541,7 +571,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             operation: operation,
             requestID: UUID().uuidString,
             timestamp: Date(),
-            clientBundleId: clientBundleId
+            clientBundleId: effectiveBundleId
         )
         switch ruleEngine.validate(request, config: effectiveConfig) {
         case .allowed:
@@ -1550,9 +1580,10 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     }
 
     @MainActor
-    private func currentClientSmartAccount() throws -> (SmartAccount, ClientSigningContext) {
-        try enforceSigningPreflightAllowed()
-        let context = try existingClientContext()
+    private func currentClientSmartAccount(bundleId: String? = nil) throws -> (SmartAccount, ClientSigningContext) {
+        let effectiveBundleId = bundleId ?? clientBundleId
+        try enforceSigningPreflightAllowed(bundleId: effectiveBundleId)
+        let context = try existingClientContext(bundleId: effectiveBundleId)
         let publicKey: PublicKeyResponse
         #if DEBUG
         if let qaPublicKey = try RuntimeQASigningProvider.shared.publicKeyIfEnabled(keyTag: context.keyTag) {
@@ -1609,9 +1640,13 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
     }
 
     @MainActor
-    private func buildUserOperation(from intent: UserOperationIntentRequestEnvelope) async throws -> (UserOperation, UserOperationSubmissionRequest?) {
+    private func buildUserOperation(
+        from intent: UserOperationIntentRequestEnvelope,
+        bundleId: String? = nil
+    ) async throws -> (UserOperation, UserOperationSubmissionRequest?) {
+        let effectiveBundleId = bundleId ?? clientBundleId
         let projectId = try resolvedZeroDevProjectId(from: intent.projectId)
-        let (account, _) = try currentClientSmartAccount()
+        let (account, _) = try currentClientSmartAccount(bundleId: effectiveBundleId)
         let bundler = ZeroDevAPI(projectId: projectId)
         let rpc = resolvedEthRPC(chainId: intent.chainId, bundler: bundler)
         let executions = try kernelExecutions(from: intent.executions)
@@ -1628,7 +1663,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             sender: sender,
             callData: callData,
             chainId: intent.chainId
-        )))
+        )), bundleId: effectiveBundleId)
 
         let op: UserOperation
         do {
@@ -1731,10 +1766,11 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
         )
     }
 
-    nonisolated func signStructured(
+    private nonisolated func handleSignStructured(
         operationType: String,
         operationData: Data,
         requestID: String,
+        effectiveBundleId: String?,
         withReply reply: @escaping (Data?, Error?) -> Void
     ) {
         guard let maxBytes = maxPayloadBytes(for: operationType),
@@ -1746,7 +1782,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                 message: "Structured signing payload exceeded size limit",
                 context: [
                     "operationType": operationType,
-                    "bundleId": clientBundleId ?? "<unknown>"
+                    "bundleId": effectiveBundleId ?? "<unknown>"
                 ]
             )
             reply(nil, BastionError.invalidInput.nsError)
@@ -1758,7 +1794,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
             message: "Structured signing request received",
             context: [
                 "operationType": operationType,
-                "bundleId": clientBundleId ?? "<unknown>",
+                "bundleId": effectiveBundleId ?? "<unknown>",
                 "requestID": requestID
             ]
         )
@@ -1826,7 +1862,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                 message: error.localizedDescription,
                 context: [
                     "operationType": operationType,
-                    "bundleId": clientBundleId ?? "<unknown>"
+                    "bundleId": effectiveBundleId ?? "<unknown>"
                 ]
             )
             reply(nil, BastionError.invalidInput.nsError)
@@ -1835,7 +1871,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
 
         Task { @MainActor in
             do {
-                try self.enforceSigningPreflightAllowed()
+                try self.enforceSigningPreflightAllowed(bundleId: effectiveBundleId)
                 let operation: SigningOperation
                 let userOperationSubmission: UserOperationSubmissionRequest?
                 if let immediateOperation {
@@ -1847,13 +1883,16 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     }
                     switch resolvedUserOperationRequest {
                     case .direct(let userOperation, let submission):
-                        try self.enforceStaticSigningPolicy(operation: .userOperation(userOperation))
+                        try self.enforceStaticSigningPolicy(
+                            operation: .userOperation(userOperation),
+                            bundleId: effectiveBundleId
+                        )
                         let resolvedSub = try self.resolvedSubmissionRequest(submission)
                         let preflightedOp = try await self.preflightUserOperation(userOperation, submission: resolvedSub)
                         operation = .userOperation(preflightedOp)
                         userOperationSubmission = resolvedSub
                     case .intent(let intent):
-                        let built = try await self.buildUserOperation(from: intent)
+                        let built = try await self.buildUserOperation(from: intent, bundleId: effectiveBundleId)
                         operation = .userOperation(built.0)
                         userOperationSubmission = built.1
                     }
@@ -1863,7 +1902,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     operation: operation,
                     requestID: requestID,
                     timestamp: Date(),
-                    clientBundleId: self.clientBundleId,
+                    clientBundleId: effectiveBundleId,
                     userOperationSubmission: userOperationSubmission
                 )
                 let result = try await SigningManager.shared.processSignRequest(request)
@@ -1874,7 +1913,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     message: "Structured signing request completed",
                     context: [
                         "operationType": operationType,
-                        "bundleId": self.clientBundleId ?? "<unknown>"
+                        "bundleId": effectiveBundleId ?? "<unknown>"
                     ]
                 )
                 reply(jsonData, nil)
@@ -1886,7 +1925,7 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     message: error.description,
                     context: [
                         "operationType": operationType,
-                        "bundleId": self.clientBundleId ?? "<unknown>"
+                        "bundleId": effectiveBundleId ?? "<unknown>"
                     ]
                 )
                 reply(nil, error.nsError)
@@ -1898,10 +1937,246 @@ private nonisolated final class XPCHandler: NSObject, BastionXPCProtocol, @unche
                     message: error.localizedDescription,
                     context: [
                         "operationType": operationType,
-                        "bundleId": self.clientBundleId ?? "<unknown>"
+                        "bundleId": effectiveBundleId ?? "<unknown>"
                     ]
                 )
                 reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func signStructured(
+        operationType: String,
+        operationData: Data,
+        requestID: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        handleSignStructured(
+            operationType: operationType,
+            operationData: operationData,
+            requestID: requestID,
+            effectiveBundleId: clientBundleId,
+            withReply: reply
+        )
+    }
+
+    @MainActor
+    private func bridgeProfileBundleId(agentProfileId: String) throws -> String {
+        guard isTrustedAgentBridge else {
+            throw NSError(
+                domain: "com.bastion.error",
+                code: BastionError.ruleViolation.rawValue,
+                userInfo: [NSLocalizedDescriptionKey: "Only the signed Bastion MCP bridge may proxy agent profiles"]
+            )
+        }
+        let trimmed = agentProfileId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let profile = ruleEngine.clientProfile(id: trimmed) else {
+            throw NSError(
+                domain: "com.bastion.error",
+                code: BastionError.ruleViolation.rawValue,
+                userInfo: [NSLocalizedDescriptionKey: "Agent profile is not paired with Bastion"]
+            )
+        }
+        return profile.bundleId
+    }
+
+    nonisolated func bridgeStartPairing(
+        agentIdentifier: String,
+        processName: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        guard isTrustedAgentBridge else {
+            reply(nil, BastionError.ruleViolation.nsError)
+            return
+        }
+        guard let inputs = XPCServer.normalizedPairingDisplayInputs(
+            bundleId: agentIdentifier,
+            processName: processName
+        ) else {
+            reply(nil, BastionError.invalidInput.nsError)
+            return
+        }
+
+        Task { @MainActor in
+            let request = PairingBroker.shared.registerIncoming(
+                bundleId: inputs.bundleId,
+                processName: inputs.processName
+            )
+            let response = PairingHandshakeResponse(
+                requestId: request.id.uuidString,
+                pairingCode: request.pairingCode,
+                expiresAt: request.expiresAt
+            )
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                reply(try encoder.encode(response), nil)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func bridgePollPairing(
+        requestId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        guard isTrustedAgentBridge else {
+            reply(nil, BastionError.ruleViolation.nsError)
+            return
+        }
+        pollPairing(requestId: requestId, withReply: reply)
+    }
+
+    nonisolated func bridgeGetPublicKey(
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let bundleId = try self.bridgeProfileBundleId(agentProfileId: agentProfileId)
+                let context = try self.existingClientContext(bundleId: bundleId)
+                let raw: PublicKeyResponse
+                #if DEBUG
+                if let qaRaw = try RuntimeQASigningProvider.shared.publicKeyIfEnabled(keyTag: context.keyTag) {
+                    raw = qaRaw
+                } else {
+                    raw = try SecureEnclaveManager.shared.getPublicKey(keyTag: context.keyTag)
+                }
+                #else
+                raw = try SecureEnclaveManager.shared.getPublicKey(keyTag: context.keyTag)
+                #endif
+                let result = PublicKeyResponse(
+                    x: raw.x,
+                    y: raw.y,
+                    accountAddress: context.accountAddress ?? raw.accountAddress
+                )
+                reply(try JSONEncoder().encode(result), nil)
+            } catch {
+                reply(nil, error)
+            }
+        }
+    }
+
+    nonisolated func bridgeGetRules(
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let bundleId = try self.bridgeProfileBundleId(agentProfileId: agentProfileId)
+                let context = try self.existingClientContext(bundleId: bundleId)
+                let response = RulesResponse(
+                    authPolicy: context.authPolicy.rawValue,
+                    globalAuthPolicy: nil,
+                    rules: context.rules,
+                    globalRules: nil,
+                    clientProfile: self.ruleEngine.clientProfileInfo(bundleId: bundleId, createProfile: false),
+                    accountAddress: context.accountAddress
+                )
+                reply(try JSONEncoder().encode(response), nil)
+            } catch {
+                reply(nil, error)
+            }
+        }
+    }
+
+    nonisolated func bridgeGetState(
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let bundleId = try self.bridgeProfileBundleId(agentProfileId: agentProfileId)
+                let context = try self.existingClientContext(bundleId: bundleId)
+                let effectiveRules = context.rules
+                let rateLimits = effectiveRules.rateLimits.map { self.ruleEngine.stateStore.rateLimitStatus(rule: $0) }
+                let spendingLimits = effectiveRules.spendingLimits.map { self.ruleEngine.stateStore.spendingLimitStatus(rule: $0) }
+                let response = StateResponse(
+                    rateLimits: rateLimits,
+                    spendingLimits: spendingLimits,
+                    clientProfile: self.ruleEngine.clientProfileInfo(bundleId: bundleId, createProfile: false),
+                    accountAddress: context.accountAddress
+                )
+                reply(try JSONEncoder().encode(response), nil)
+            } catch {
+                reply(nil, error)
+            }
+        }
+    }
+
+    nonisolated func bridgeGetServiceInfo(
+        agentProfileId: String?,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        guard isTrustedAgentBridge else {
+            reply(nil, BastionError.ruleViolation.nsError)
+            return
+        }
+        if let agentProfileId, !agentProfileId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task { @MainActor in
+                do {
+                    _ = try self.bridgeProfileBundleId(agentProfileId: agentProfileId)
+                    self.getServiceInfo(withReply: reply)
+                } catch {
+                    reply(nil, error)
+                }
+            }
+        } else {
+            getServiceInfo(withReply: reply)
+        }
+    }
+
+    nonisolated func bridgeSign(
+        data: Data,
+        requestID: String,
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        guard data.count == 32 else {
+            reply(nil, BastionError.invalidInput.nsError)
+            return
+        }
+        Task { @MainActor in
+            do {
+                let bundleId = try self.bridgeProfileBundleId(agentProfileId: agentProfileId)
+                try self.enforceSigningPreflightAllowed(bundleId: bundleId)
+                let request = SignRequest(
+                    operation: .rawBytes(data),
+                    requestID: requestID,
+                    timestamp: Date(),
+                    clientBundleId: bundleId
+                )
+                let result = try await SigningManager.shared.processSignRequest(request)
+                reply(try JSONEncoder().encode(result), nil)
+            } catch let error as BastionError {
+                reply(nil, error.nsError)
+            } catch {
+                reply(nil, Self.bridgedError(error))
+            }
+        }
+    }
+
+    nonisolated func bridgeSignStructured(
+        operationType: String,
+        operationData: Data,
+        requestID: String,
+        agentProfileId: String,
+        withReply reply: @escaping (Data?, Error?) -> Void
+    ) {
+        Task { @MainActor in
+            do {
+                let bundleId = try self.bridgeProfileBundleId(agentProfileId: agentProfileId)
+                self.handleSignStructured(
+                    operationType: operationType,
+                    operationData: operationData,
+                    requestID: requestID,
+                    effectiveBundleId: bundleId,
+                    withReply: reply
+                )
+            } catch {
+                reply(nil, error)
             }
         }
     }

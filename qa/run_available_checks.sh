@@ -3801,7 +3801,7 @@ swiftc \
   -o "$TEST_RUN_DIR/bastion-tests"
 
 DETERMINISTIC_TEST_FILTER="AuditFindingsRegressionTests|AuditLogHMACTests|AuditLogRedactionTests|AuditLogTests|BastionConfigMigrationTests|BundlerTrustResolverPrecedenceTests|CLIInstallerTests|CalldataDecoderTests|DataHexTests|ECDSAValidatorTests|EIP191Tests|EIP712Tests|Keccak256Tests|KernelEncodingTests|KernelModuleTests|MergedPolicyTests|P256CurveTests|P256SmartAccountTests|PermitClassifierTests|PreflightDebugExportTests|RLPTests|RawMessagePolicyTests|ReleaseUpdateTests|RequestExecutionModeTests|RequestFlowIntegrationTests|RiskScorerTests|RuleEngineConfigBackupTests|RuleEngineConfigTests|RuleEngineGroupLifecycleTests|RuleEngineValidationTests|RuleMergeTests|SecurityConfigurationTests|ServiceUIBridgeTests|SessionReconcilerTests|SessionStoreReconcileTests|SigningManagerAuthPolicyTests|SigningPostureTests|SilentBannerTests|SmartAccountTests|StateStoreRateLimitTests|StateStoreSpendingLimitTests|SubmissionStatusStoreTests|SupportBundleTests|TokenConfigTests|UserOpHashTests|UserOperationCodableTests|UserOperationFeeEstimationTests|UserOperationIntentEnvelopeTests|UserOperationSubmissionEnvelopeTests|WalletGroupModelTests|XPCSecurityTests|ZeroDevProviderResilienceTests"
-DETERMINISTIC_TEST_SUMMARY="Test run with 441 tests in 53 suites passed"
+DETERMINISTIC_TEST_SUMMARY="Test run with 444 tests in 53 suites passed"
 BASTION_TEST_FILTER="$DETERMINISTIC_TEST_FILTER" "$TEST_RUN_DIR/bastion-tests" 2>&1 | tee "$TEST_RUN_DIR/test-output.log"
 grep -F "$DETERMINISTIC_TEST_SUMMARY" "$TEST_RUN_DIR/test-output.log" >/dev/null
 
@@ -5601,6 +5601,7 @@ echo "== Shell script syntax =="
 python3 -m py_compile qa/refresh_live_runtime_current_blockers.py
 bash -n qa/run_available_checks.sh
 bash -n qa/run_app_runtime_user_story_checks.sh
+bash -n qa/run_bastion_mcp_smoke.sh
 bash -n qa/run_live_runtime_checks.sh
 bash -n qa/run_mcp_cli_wrapper_smoke.sh
 bash -n qa/run_native_cli_smoke.sh
@@ -5674,7 +5675,11 @@ if scripts/install-cli-symlink.sh --sudo --no-sudo >"$CLI_SYMLINK_HELPER_DIR/con
 fi
 grep -F "Use only one of --sudo, --no-sudo, or --sudo-if-interactive" "$CLI_SYMLINK_HELPER_DIR/conflict.log" >/dev/null
 grep -F -- "--sudo-if-interactive" scripts/dev-rebuild-signed.sh >/dev/null
-grep -F -- "--sudo-if-interactive" scripts/release-install.sh >/dev/null
+grep -F "bastion-mcp" scripts/release-install.sh >/dev/null
+if grep -F -- "--sudo-if-interactive" scripts/release-install.sh >/dev/null; then
+  echo "release-install.sh should verify XPC through bastion-mcp, not install the CLI symlink."
+  exit 1
+fi
 
 echo "== Native CLI typecheck =="
 swiftc -typecheck \
@@ -5684,6 +5689,9 @@ swiftc -typecheck \
 
 echo "== Native CLI argument smoke =="
 bash qa/run_native_cli_smoke.sh
+
+echo "== Swift MCP/REST bridge smoke =="
+bash qa/run_bastion_mcp_smoke.sh
 
 echo "== MCP CLI wrapper smoke =="
 bash qa/run_mcp_cli_wrapper_smoke.sh
